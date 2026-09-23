@@ -30,7 +30,18 @@ jobs:
           # description is attacker-controlled text.
           BODY: ${{ github.event.pull_request.body }}
           IS_DRAFT: ${{ github.event.pull_request.draft }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
+          # Dependabot writes its own description and cannot tick a box, so its
+          # PRs failed this required check and could never merge. The checklist
+          # is a person's statement that they ran the checks; for a dependency
+          # bump, CI is the whole statement. Exact login, not "any bot": the
+          # login of a GitHub App cannot be claimed by anyone else.
+          if [ "$AUTHOR" = "dependabot[bot]" ]; then
+            echo "Dependabot PR — no checklist to tick; CI decides."
+            exit 0
+          fi
+
           if [ "$IS_DRAFT" = "true" ]; then
             echo "Draft PR — the checklist is not enforced until it is ready for review."
             exit 0

@@ -23,11 +23,26 @@
  *     }
  *   }
  */
+import fs from 'node:fs';
 import process from 'node:process';
 import { apiRequest as sharedApiRequest } from './lib/api-client.mjs';
 
 const SERVER_NAME = 'astrobaas';
-const SERVER_VERSION = '0.1.0';
+/**
+ * The version of the package this file shipped in. It ships twice — as
+ * bin/astrobaas-mcp.mjs in `astrobaas` (package.json one level up) and as the
+ * root of `astrobaas-mcp` (package.json beside it) — so it reads whichever
+ * belongs to it. A literal here said 0.1.0 in every release after 0.1.0.
+ */
+const SERVER_VERSION = (() => {
+  for (const rel of ['./package.json', '../package.json']) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(new URL(rel, import.meta.url), 'utf8'));
+      if (pkg.name === 'astrobaas' || pkg.name === 'astrobaas-mcp') return pkg.version;
+    } catch { /* not this layout */ }
+  }
+  return '0.0.0';
+})();
 // Protocol versions we understand; we echo the client's if supported, else this.
 const DEFAULT_PROTOCOL = '2024-11-05';
 const SUPPORTED_PROTOCOLS = new Set(['2024-11-05', '2025-03-26', '2025-06-18']);

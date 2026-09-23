@@ -18,7 +18,7 @@
  */
 import { build } from 'esbuild';
 import { execSync } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -46,3 +46,39 @@ console.log('✓ bundled JS  → pkg/{core,client,plugins}/index.js');
 
 execSync('tsc -p tsconfig.build.json', { stdio: 'inherit' });
 console.log('✓ emitted .d.ts → pkg/**/*.d.ts');
+
+/*
+ * Give every relative import in the declarations the file it resolves to.
+ *
+ * The source imports `'../core/models'` (moduleResolution: bundler, where that
+ * is fine) and tsc copies the specifier into the .d.ts as written. A consumer
+ * on `moduleResolution: nodenext` — the ESM Node default — resolves types the
+ * way Node resolves files, with no extension guessing, and gets TS2834 inside
+ * node_modules/astrobaas. 0.1.0 shipped 116 such imports in 94 files.
+ *
+ * Rewritten here rather than in src/ because the app (Vite/Astro) is happy
+ * without extensions and this is purely a property of the published artefact.
+ * `x` → `x.js` when `x.d.ts` exists, `x/index.js` when `x/index.d.ts` does;
+ * anything else is left alone and fails tests/package-types.test.mjs loudly.
+ */
+const SPECIFIER = /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(['"])(\.{1,2}\/[^'"]*?)\2/g;
+function withExtension(fromFile, spec) {
+  if (/\.(js|mjs|cjs|json)$/.test(spec)) return spec;
+  const base = path.resolve(path.dirname(fromFile), spec);
+  if (existsSync(`${base}.d.ts`)) return `${spec}.js`;
+  if (existsSync(path.join(base, 'index.d.ts'))) return `${spec}/index.js`;
+  return spec;
+}
+let rewritten = 0;
+for (const file of readdirSync('pkg', { recursive: true })) {
+  if (!String(file).endsWith('.d.ts')) continue;
+  const abs = path.join('pkg', String(file));
+  const before = readFileSync(abs, 'utf8');
+  const after = before.replace(SPECIFIER, (m, lead, q, spec) => {
+    const next = withExtension(abs, spec);
+    if (next !== spec) rewritten++;
+    return `${lead}${q}${next}${q}`;
+  });
+  if (after !== before) writeFileSync(abs, after);
+}
+console.log(`✓ .d.ts relative imports resolved for nodenext (${rewritten} rewritten)`);

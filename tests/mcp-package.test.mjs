@@ -93,6 +93,10 @@ try {
   const inRepo = await handshake(process.execPath, [path.join(root, 'bin/astrobaas-mcp.mjs')], root);
   check('the installed server answers initialize', installed.get(1)?.serverInfo?.name === 'astrobaas',
     JSON.stringify(installed.get(1)));
+  check('the installed server reports the release version', installed.get(1)?.serverInfo?.version === rootVersion,
+    `${installed.get(1)?.serverInfo?.version} vs ${rootVersion}`);
+  check('so does the one inside `astrobaas`', inRepo.get(1)?.serverInfo?.version === rootVersion,
+    `${inRepo.get(1)?.serverInfo?.version} vs ${rootVersion}`);
   const names = (r) => (r.get(2)?.tools ?? []).map((t) => t.name).sort().join(',');
   check('it lists tools', names(installed).length > 0);
   check('it is the same server as the in-repo binary', names(installed) === names(inRepo),

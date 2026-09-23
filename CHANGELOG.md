@@ -8,6 +8,34 @@ semver yet because the API surface is pre-alpha.
 
 Nothing yet.
 
+## [0.1.1] — 2026-09-23
+
+### The published types work under `moduleResolution: nodenext`
+
+0.1.0's declarations imported each other without file extensions
+(`from '../core/models'`) — 116 such imports in 94 `.d.ts` files. That is fine
+for a bundler, but under `nodenext`, which `tsc --init` chooses for an ESM Node
+project, every one is TS2834 inside `node_modules/astrobaas` for anyone who does
+not set `skipLibCheck`. Found by installing 0.1.0 from npm in a clean container.
+
+- `scripts/build-pkg.mjs` now rewrites each relative import in the emitted
+  declarations to the file it resolves to (`x.js`, or `x/index.js`).
+- `tests/package-types.test.mjs` (in `test:pkg`) packs the real tarball,
+  installs it into an empty project and type-checks it with `skipLibCheck: false`
+  under `nodenext` and `bundler`: a Node project using all three entrypoints, and
+  a frontend that uses only `astrobaas/client` and has no Node types. Without
+  the rewrite, both `nodenext` cases fail.
+
+### Also
+
+- **The MCP server reports its real version.** It said `0.1.0` from a literal;
+  it now reads the `package.json` of whichever package it shipped in, and
+  `tests/mcp-package.test.mjs` checks both copies against the release version.
+- **Dependabot PRs can pass the checklist check.** The PR-checklist workflow
+  failed every Dependabot PR (it cannot tick boxes), and the check is required,
+  so none could merge. It now passes `dependabot[bot]` by exact login; everyone
+  else still needs the boxes ticked.
+
 ## [0.1.0] — 2026-09-23
 
 The first public release. Published to npm under the `alpha` dist-tag
