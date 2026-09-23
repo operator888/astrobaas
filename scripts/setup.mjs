@@ -7,11 +7,11 @@
  * production setup, pipe a strong password from a secret manager:
  *   echo "user@example.com\nyour-strong-pw\nyour-strong-pw\nAdmin\n" | npm run setup
  */
-import readline from 'node:readline';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { promisify } from 'node:util';
+import { createPrompter } from './lib/prompt.mjs';
 import { requireJsonDb } from './lib/db-target.mjs';
 
 // Honours DB_PATH, and REFUSES when the install is on libSQL or a
@@ -20,8 +20,7 @@ import { requireJsonDb } from './lib/db-target.mjs';
 const DB_PATH = requireJsonDb('create an admin account');
 const SEED_PATH = path.resolve(process.cwd(), 'db.seed.json');
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-const ask = (q) => new Promise((res) => rl.question(q, (a) => res(a)));
+const prompt = createPrompter();
 
 const pbkdf2 = promisify(crypto.pbkdf2);
 
@@ -71,19 +70,20 @@ async function loadDb() {
 
 async function main() {
   console.log('AstroBaaS admin setup\n(Note: password will be visible while typing.)\n');
-  const email = ((await ask('Admin email [admin@local]: ')) || '').trim() || 'admin@local';
-  const password = ((await ask('Admin password (>=8 chars): ')) || '').trim();
+  const email = (await prompt.require('Admin email [admin@local]: ', 'the admin email')).trim() || 'admin@local';
+  const password = (await prompt.require('Admin password (>=8 chars): ', 'the password')).trim();
   if (password.length < 8) {
     console.error('Password must be at least 8 characters.');
     process.exit(1);
   }
-  const confirm = ((await ask('Confirm password: ')) || '').trim();
+  const confirm = (await prompt.require('Confirm password: ', 'the confirmation')).trim();
   if (password !== confirm) {
     console.error('Passwords do not match.');
     process.exit(1);
   }
-  const name = ((await ask('Display name [Admin]: ')) || '').trim() || 'Admin';
-  rl.close();
+  // Optional: a pipe that ends after the confirmation still gets the default.
+  const name = ((await prompt.ask('Display name [Admin]: ')) ?? '').trim() || 'Admin';
+  prompt.close();
 
   const db = await loadDb();
   db.users = db.users || [];

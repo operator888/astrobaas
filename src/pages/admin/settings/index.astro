@@ -767,7 +767,7 @@ const emailTransport = emailChannelLabel();
           Note that robots.txt is a <em>request</em> — a crawler that ignores it is
           not stopped by this file.
         </p>
-        {/* Frontmatter and the <script> are separate module scopes, so the seed
+        {/* Frontmatter and the script are separate module scopes, so the seed
             reaches the script as data in the DOM rather than as a closure. */}
         {/*
           `jsonForScript`, not a bare stringify.
@@ -1692,7 +1692,7 @@ const emailTransport = emailChannelLabel();
       <div id="sg-notice" class="hidden mb-3"></div>
       {/*
         The current definitions, handed to the script through a DATA ATTRIBUTE.
-        Not an inline <script set:html>: the hash-based CSP has no hash for one
+        Not an inline script set:html: the hash-based CSP has no hash for one
         the compiler did not see, and this needs no serialiser of its own.
       */}
       <div id="sg-data" hidden data-groups={JSON.stringify(declaredGroups)} data-key={SETTING_GROUPS_SETTING}></div>

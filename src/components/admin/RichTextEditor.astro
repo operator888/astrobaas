@@ -7,7 +7,7 @@ interface Props {
 
 const { content = '', name = 'content', id = 'editor' } = Astro.props;
 
-// Frontmatter labels. The two prompt() dialogs inside the <script> below use
+// Frontmatter labels. The two prompt() dialogs inside the script below use
 // window.t instead — AdminLayout loads /admin-i18n.js before any page script
 // runs. Every toolbar button dispatches on its `data-action`, never on its
 // title, so translating these tooltips cannot break the toolbar.

@@ -24,7 +24,7 @@ const user = Astro.locals.user;
     <meta name="csrf-token" content={csrf} />
     <meta name="astrobaas-user" content={user ? JSON.stringify(user) : ''} />
     {/* The admin's message catalogue for code that runs in the browser. About a
-        third of the admin's strings live in <script> blocks, so without this a
+        third of the admin's strings live in script blocks, so without this a
         third of the interface stays English however complete the catalogues
         are. Served with a content hash in the URL and cached immutably, so it
         costs one request per locale per deploy rather than ~30 KB inlined into

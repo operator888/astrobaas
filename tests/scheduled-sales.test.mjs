@@ -24,6 +24,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadTogether } from './lib/load.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..');
@@ -32,23 +33,16 @@ const DAY = 24 * 60 * 60 * 1000;
 
 /* ---------------------------------------------------------------- child --- */
 if (process.env.SALES_TEST_CHILD) {
-  const { build } = await import('esbuild');
-  const { pathToFileURL } = await import('node:url');
   const cacheDir = path.join(root, 'node_modules', '.cache');
   await fs.mkdir(cacheDir, { recursive: true });
-  const load = async (entry, name) => {
-    const out = path.join(cacheDir, `astrobaas-sales-${name}-${process.pid}.mjs`);
-    await build({
-      entryPoints: [path.join(root, entry)], bundle: true, format: 'esm',
-      platform: 'node', packages: 'external', outfile: out, logLevel: 'silent',
-    });
-    const mod = await import(pathToFileURL(out).href);
-    await fs.rm(out, { force: true });
-    return mod;
-  };
 
-  const { sweepScheduledSales } = await load('src/lib/scheduler.ts', 'sched');
-  const { LocalDB } = await load('src/lib/localdb.ts', 'db');
+  const [
+    { sweepScheduledSales },
+    { LocalDB },
+  ] = await loadTogether([
+    'src/lib/scheduler.ts',
+    'src/lib/localdb.ts',
+  ]);
   await LocalDB.init();
 
   const T0 = Date.parse('2026-06-01T12:00:00.000Z');

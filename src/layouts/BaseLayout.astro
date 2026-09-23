@@ -97,7 +97,7 @@ const fontHref = `https://fonts.googleapis.com/css2?${
 }&display=swap`;
 
 // Plugin-contributed <head> markup (analytics meta, preconnect, scoped CSS).
-// Filter output is sanitized to a head-safe subset (no <script>).
+// Filter output is sanitized to a head-safe subset (no script).
 const headTags = sanitizeHeadHtml(
   pluginManager.applyFilters('head_tags', '', { pathname: Astro.url.pathname }),
 );

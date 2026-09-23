@@ -152,7 +152,7 @@ sale as part of a larger package, which is what a GPL application does.
 Latin-1 and nothing else — so a receipt drawn in Helvetica renders Greek as
 empty boxes, and this project's first users are Greek shops. Only the glyphs a
 given receipt actually uses are embedded in the output, so the 757 KB source
-produces a ~15 KB file.
+produces a file of roughly 11–13 KB.
 
 ---
 

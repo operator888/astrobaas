@@ -15,8 +15,9 @@ into a release (`dist/client/fonts/`). The alternative — anywhere under `src/`
 is exactly the trap the mail test fell into: correct in a checkout, missing on
 the server, invisible until a deploy.
 
-Only the glyphs a given receipt uses are embedded in the output, so a 750 KB
-font produces a ~40 KB PDF.
+Only the glyphs a given receipt uses are embedded in the output, so a 757 KB
+font produces a PDF of roughly 11–13 KB (measured 2026-09-23 on the test
+receipt: 11.3 KB in English, 13.3 KB in Greek).
 
 **Licence:** Bitstream Vera (permissive) with DejaVu's own changes in the public
 domain — full text in `DejaVuSans-LICENSE.txt`, and summarised in

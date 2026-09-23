@@ -11,7 +11,7 @@ import ContentAnalysis from '../../../../components/admin/ContentAnalysis.astro'
 import { LocalDB } from '../../../../lib/localdb';
 // BOTH of these are used by the FRONTMATTER — discourageIndexing on line 33,
 // defaultLocale in the template, which compiles into this same scope. They
-// were imported inside the <script> block below, which is a separate module,
+// were imported inside the script block below, which is a separate module,
 // so this page was a hard 500 for every post. `// @ts-nocheck` on that script
 // is why astro check said nothing. tests/astro-scopes covers both directions now.
 import { defaultLocale } from '../../../../lib/i18n';

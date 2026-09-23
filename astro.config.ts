@@ -3,6 +3,7 @@ import tailwindcss from '@tailwindcss/vite';
 import node from '@astrojs/node';
 import react from '@astrojs/react';
 import { cspDirectives, cspScriptResources, cspStyleResources } from './src/lib/csp-config';
+import { stripBuiltUploadsIntegration } from './src/lib/strip-built-uploads';
 
 const scriptResources = cspScriptResources(process.env);
 
@@ -11,7 +12,7 @@ export default defineConfig({
   // client components. Vanilla Three.js/GSAP/Lenis need no integration — use a
   // plain <script> island. Astro stays zero-JS by default; only `client:*`
   // components ship JS.
-  integrations: [react()],
+  integrations: [react(), stripBuiltUploadsIntegration()],
   // Tailwind v4 ships as a Vite plugin (the old @astrojs/tailwind integration
   // was removed for Astro 6).
   vite: {

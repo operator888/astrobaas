@@ -32,7 +32,13 @@ async function load(rel, tag) {
     bundle: true, format: 'esm', platform: 'node', packages: 'external',
     outfile: out, logLevel: 'silent',
   });
-  return import(pathToFileURL(out).href);
+  // Removed once imported, as tests/lib/load.mjs does: this file left one
+  // artefact per module per run in node_modules/.cache, forever.
+  try {
+    return await import(pathToFileURL(out).href);
+  } finally {
+    await fs.rm(out, { force: true });
+  }
 }
 const T = await load('src/lib/html-text.ts', 'htmltext');
 const S = await load('src/lib/settings-map.ts', 'settingsmap');

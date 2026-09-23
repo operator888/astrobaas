@@ -72,7 +72,7 @@ const onSale = products.filter((p) => p.on_sale).length;
 // email's formatMoney — the screen and the receipt stated the same total two
 // ways. The locale now follows the staff member reading it.
 // The merchant's declared fields. Loaded server-side so the form renders them
-// on first paint; the <script> below reads the same list back out of the DOM,
+// on first paint; the script below reads the same list back out of the DOM,
 // because frontmatter and the script are separate module scopes.
 const productFieldDefs = await getProductFieldDefs();
 const adminLocale = Astro.locals.uiLocale ?? undefined;

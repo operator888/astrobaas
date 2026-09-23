@@ -12,12 +12,12 @@
  * The CSP is hash-based with no `'unsafe-inline'` for scripts. Everything below
  * works within that:
  *
- *  - This `<script>` is an Astro script in a `.astro` file, so Vite bundles it
+ *  - This `script` is an Astro script in a `.astro` file, so Vite bundles it
  *    and Astro emits its sha256 — exactly like the editor script beside it.
  *  - Templates are build-time literals from `sections.ts`. Nothing is
  *    interpolated, so no operator data and nothing executable can appear in one.
  *  - `execCommand('insertHTML', …)` inserts markup; it does not evaluate
- *    scripts, and the sanitizer strips `<script>` on save regardless.
+ *    scripts, and the sanitizer strips `script` on save regardless.
  *  - No inline `style` attribute is ever written. The sanitizer removes them,
  *    which is what silently destroyed the old alignment buttons.
  *

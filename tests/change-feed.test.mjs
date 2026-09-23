@@ -39,7 +39,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadTs, ROOT } from './lib/load.mjs';
+import { loadTs, ROOT, loadTogether } from './lib/load.mjs';
 
 const SECRET = 'SNAPSHOT-SECRET-7f3a';
 const BUYER = 'buyer.cf@example.com';
@@ -181,7 +181,10 @@ if (process.env.CHANGE_FEED_CHILD) {
   const MODE = process.env.CHANGE_FEED_CHILD;
   const DRIVER = process.env.CHANGE_FEED_DRIVER;
   const F = await loadTs('src/core/change-feed.ts', 'cf-core');
-  const { LocalDB, changeFeedUpkeep } = await loadTs('src/lib/localdb.ts', 'cf-db');
+  // One build, so the route and the test share ONE LocalDB (see loadTogether):
+  // separately bundled, the route read settings through a copy of its own.
+  const [{ LocalDB, changeFeedUpkeep }, route] = await loadTogether(
+    ['src/lib/localdb.ts', 'src/pages/api/content/changes.ts'], 'cf');
   const raw = await openRaw(DRIVER, process.env);
   /**
    * Print the result, and exit only once it has been flushed.
@@ -226,7 +229,6 @@ if (process.env.CHANGE_FEED_CHILD) {
   ]);
   await LocalDB.updateSetting('commerce_enabled', true);
 
-  const route = await loadTs('src/pages/api/content/changes.ts', 'cf-route');
   const ANON = {};
   const VIEWER = { user: { id: 'cf-viewer', role: 'viewer' } };
   const EDITOR = { user: { id: 'cf-editor', role: 'editor' } };

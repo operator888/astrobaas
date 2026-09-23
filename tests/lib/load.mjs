@@ -21,6 +21,7 @@
  * counter below already prevent.
  */
 import { build } from 'esbuild';
+import { rmSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -61,6 +62,39 @@ export async function loadTs(rel, tag = '') {
   } finally {
     await fs.rm(out, { force: true });
   }
+}
+
+/**
+ * Bundle several modules in ONE build and import them all — use this whenever
+ * a test loads two modules that share state, and above all LocalDB.
+ *
+ * Each `loadTs()` call is a separate bundle with its own copy of everything the
+ * entry imports. Load `scheduler.ts` and `localdb.ts` that way and the process
+ * holds TWO LocalDB instances on one DB_PATH, each with its own lowdb writer and
+ * its own `.db.json.tmp`; when their writes overlap, one rename moves the other's
+ * temp file away and the test dies with ENOENT on rename. It failed the public
+ * CI's Node 22 job once (2026-09-23) and reproduces every time with two copies
+ * writing concurrently. One build with `splitting: true` puts shared code in
+ * shared chunks, so every entry reaches the same instance.
+ * tests/test-harness-localdb.test.mjs fails a test file that loads two
+ * LocalDB-bearing modules separately.
+ *
+ * Returns the modules in the order given. The chunks stay on disk until the
+ * process exits, because a chunk can be imported lazily after this returns.
+ */
+export async function loadTogether(rels, tag = 'together') {
+  await fs.mkdir(cacheDir, { recursive: true });
+  counter += 1;
+  const outdir = path.join(cacheDir, `astrobaas-${tag}-${process.pid}-${counter}`);
+  const entryPoints = Object.fromEntries(rels.map((rel, i) => [`entry${i}`, path.join(ROOT, rel)]));
+  await build({
+    entryPoints, outdir, bundle: true, splitting: true, format: 'esm',
+    platform: 'node', packages: 'external', logLevel: 'silent',
+  });
+  process.once('exit', () => rmSync(outdir, { recursive: true, force: true }));
+  const mods = [];
+  for (let i = 0; i < rels.length; i++) mods.push(await import(pathToFileURL(path.join(outdir, `entry${i}.js`)).href));
+  return mods;
 }
 
 /** Repo-relative path to an absolute one. Saves every caller a `path.join(root, …)`. */

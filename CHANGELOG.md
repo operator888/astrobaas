@@ -8,6 +8,61 @@ semver yet because the API surface is pre-alpha.
 
 Nothing yet.
 
+## [0.1.2] — 2026-09-23
+
+### Uploads are always served with their security headers
+
+`astro build` copied `public/uploads` — the default upload directory — into
+`dist/client`, and the node adapter serves that copy before the app runs. On a
+built server, every file uploaded before the build therefore came back with no
+`nosniff`, no sandbox CSP on SVG and no `X-Frame-Options`, while newer uploads
+went through the app's `/uploads` route and got all three. It also shipped the
+working tree's uploads inside a release. `src/lib/strip-built-uploads.ts` now
+removes them after every build (`.gitkeep` stays), so the route serves them all:
+an SVG that returned bare headers from a build now returns
+`content-security-policy: default-src 'none'`, `nosniff` and `DENY`.
+`tests/build-uploads.test.mjs`.
+
+### `setup` and `reset-password` work with piped input
+
+Both read their answers with `readline.question()`, which fails once piped stdin
+reaches end-of-file: `reset-password` died with `ERR_USE_AFTER_CLOSE` having
+changed nothing, and `setup` exited **0 without writing an admin**. They now
+share `scripts/lib/prompt.mjs`, which queues lines as they arrive and turns
+input that ends early into a clear error that changes nothing. Typed input in a
+terminal behaves as before. `tests/cli-prompts.test.mjs` pipes both scripts:
+10 of its 12 checks fail on the old scripts.
+
+### `npm run dev` no longer fails its dependency scan
+
+Vite finds `<script>` blocks in `.astro` files by pattern, and strips HTML
+comments but not JavaScript ones, so eleven comments that mentioned a script
+tag each opened a "script" made of prose. The scan failed with ten
+`PARSE_ERROR`s on every start and Vite then skipped dependency pre-bundling
+altogether. The comments are reworded; `tests/dev-scan.test.mjs` applies Vite's
+own pattern to every `.astro` file and requires whatever it would extract to
+parse.
+
+### Tests
+
+- **A rename race in the test harness.** Each test helper call bundled its
+  module separately, so a test that loaded two modules reaching LocalDB held two
+  copies of it on one database file; overlapping writes failed with `ENOENT` on
+  rename (once on CI). `loadTogether()` in `tests/lib/load.mjs` builds several
+  modules in one split build; eight test files use it, and
+  `tests/test-harness-localdb.test.mjs` fails any file that separately loads two
+  LocalDB-bearing modules. Reproduced deterministically: two copies writing
+  concurrently, 20 of 20 rounds failed; one copy, none.
+- `tests/shared-lib.test.mjs` no longer leaves six compiled files in
+  `node_modules/.cache` on every run.
+
+### Also
+
+- **Moving `latest` has its own manual workflow run** (`promote`), which moves
+  the tag and does nothing else; see PUBLISHING.md.
+- The receipt PDF's size is stated as measured: roughly 11–13 KB.
+- `@types/node` 26.6.2 (from Dependabot).
+
 ## [0.1.1] — 2026-09-23
 
 ### The published types work under `moduleResolution: nodenext`
