@@ -1,0 +1,709 @@
+---
+// @ts-nocheck
+import AdminLayout from '../../../../layouts/AdminLayout.astro';
+import { visibleOne } from '../../../../lib/visibility';
+import RichTextEditor from '../../../../components/admin/RichTextEditor.astro';
+import AiAssist from '../../../../components/admin/AiAssist.astro';
+import TermPicker from '../../../../components/admin/TermPicker.astro';
+import SectionInserter from '../../../../components/admin/SectionInserter.astro';
+import MediaLibrary from '../../../../components/admin/MediaLibrary.astro';
+import ContentAnalysis from '../../../../components/admin/ContentAnalysis.astro';
+import { LocalDB } from '../../../../lib/localdb';
+// BOTH of these are used by the FRONTMATTER — discourageIndexing on line 33,
+// defaultLocale in the template, which compiles into this same scope. They
+// were imported inside the <script> block below, which is a separate module,
+// so this page was a hard 500 for every post. `// @ts-nocheck` on that script
+// is why astro check said nothing. tests/astro-scopes covers both directions now.
+import { defaultLocale } from '../../../../lib/i18n';
+import { discourageIndexing } from '../../../../lib/indexing';
+
+await LocalDB.init();
+
+const { id } = Astro.params;
+const post = await LocalDB.getPost(id);
+
+// Same visibility rule as the API. `visibility.ts` was written to be the one
+// place that decides who sees what, and then applied only to the API routes —
+// so an `author`, which middleware deliberately allows onto /admin/posts, could
+// open any other author's draft and read the whole body.
+//
+// Redirect rather than 403 for the same reason the API 404s: distinguishing
+// "exists but forbidden" from "does not exist" confirms the id.
+if (!post || !visibleOne(post, Astro.locals.user)) {
+  return Astro.redirect('/admin/posts');
+}
+
+const allCategories = await LocalDB.getCategories();
+const allUsers = await LocalDB.getUsers();
+
+// The site-wide switch, so the analysis panel can say "the whole site is hidden
+// from search" instead of scoring discoverability on a page nobody will see.
+// The prop existed with no writer at all until an audit found it.
+const siteHidden = await discourageIndexing();
+---
+
+<AdminLayout title="Edit Post">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <!-- Header -->
+    <div class="flex justify-between items-center mb-8">
+      <div>
+        <nav class="flex items-center space-x-2 text-sm text-gray-500 mb-4">
+          <a href="/admin" class="hover:text-gray-700">Admin</a>
+          <span>/</span>
+          <a href="/admin/posts" class="hover:text-gray-700">Posts</a>
+          <span>/</span>
+          <span class="text-gray-900">Edit</span>
+        </nav>
+        <h1 class="text-3xl font-bold text-gray-900">Edit Post</h1>
+      </div>
+      
+      <div class="flex items-center space-x-3">
+        <button type="button" id="save-draft-header" class="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium">
+          Save Draft
+        </button>
+        <button type="button" id="preview-post-header" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium">
+          Preview
+        </button>
+        <button type="submit" form="post-form" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          Update Post
+        </button>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <form id="post-form" class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <input type="hidden" name="id" value={post.id} />
+      
+      <!-- Main Content Column -->
+      <div class="lg:col-span-2 space-y-6">
+        <!-- Title -->
+        <div>
+          <label for="post-title" class="block text-sm font-medium text-gray-700 mb-2">
+            Title *
+          </label>
+          <input 
+            type="text" 
+            id="post-title"
+            name="title"
+            value={post.title}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            required
+          />
+        </div>
+
+        <!-- Slug -->
+        <div>
+          <label for="post-slug" class="block text-sm font-medium text-gray-700 mb-2">
+            Slug
+          </label>
+          <input 
+            type="text" 
+            id="post-slug"
+            name="slug"
+            value={post.slug}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          />
+          <p class="text-xs text-gray-500 mt-1">URL-friendly version of the title</p>
+        </div>
+
+        <!-- Content Editor -->
+        <div>
+          <label for="post-content" class="block text-sm font-medium text-gray-700 mb-2">
+            Content *
+          </label>
+          <SectionInserter targetId="editor" />
+          <RichTextEditor content={post.content} />
+        </div>
+
+        <TermPicker collection={post.kind === 'page' ? 'page' : 'post'} value={(post as any).terms ?? {}} />
+
+        <AiAssist />
+
+        <!-- Excerpt -->
+        <div>
+          <label for="post-excerpt" class="block text-sm font-medium text-gray-700 mb-2">
+            Excerpt
+          </label>
+          <textarea 
+            id="post-excerpt"
+            name="excerpt"
+            rows="4"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          >{post.excerpt}</textarea>
+        </div>
+
+        <!-- SEO Settings -->
+        <div class="bg-white p-4 rounded-lg border border-gray-200">
+          <h2 class="text-lg font-semibold mb-4">SEO Settings</h2>
+          <div class="space-y-4">
+            <ContentAnalysis contentSelector="#editor" metaTitleId="meta-title" metaDescriptionId="meta-description" locale={post.locale ?? defaultLocale()} siteNoindex={siteHidden} />
+
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2" for="post-keyphrase">Focus keyphrase</label>
+              <input
+                type="text"
+                id="post-keyphrase"
+                name="focus_keyphrase"
+                value={post.focus_keyphrase ?? ''}
+                placeholder="what someone would search for"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+              <p class="text-xs text-gray-500 mt-1">
+                Optional. Set it and the analysis below checks where the phrase appears; leave it
+                empty and those checks are simply skipped rather than counted against you.
+              </p>
+            </div>
+            <div>
+              <label for="meta-title" class="block text-sm font-medium text-gray-700 mb-2">
+                Meta Title
+              </label>
+              <input 
+                type="text" 
+                id="meta-title"
+                name="meta_title"
+                value={post.meta_title}
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+              <p id="meta-title-count" class="text-xs text-gray-500 mt-1">0/60</p>
+            </div>
+
+            <div>
+              <label for="meta-description" class="block text-sm font-medium text-gray-700 mb-2">
+                Meta Description
+              </label>
+              <textarea 
+                id="meta-description"
+                name="meta_description"
+                rows="3"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              >{post.meta_description}</textarea>
+              <p id="meta-description-count" class="text-xs text-gray-500 mt-1">0/160</p>
+            </div>
+
+            <div>
+              <label class="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  id="post-noindex"
+                  name="noindex"
+                  checked={!!post.noindex}
+                  class="mt-1 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span class="text-sm text-gray-700">
+                  <span class="font-medium">Hide from search engines</span><br />
+                  <span class="text-gray-500">
+                    Adds <code>noindex</code> to this page, and leaves it out of the
+                    sitemap and the feed — a sitemap that lists a page which then
+                    refuses indexing is a contradiction search engines penalise.
+                  </span>
+                </span>
+              </label>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <label class="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  id="post-pinned"
+                  name="pinned"
+                  checked={!!post.pinned}
+                  class="mt-1 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span class="text-sm text-gray-700">
+                  <span class="font-medium">Pin to the top</span><br />
+                  <span class="text-gray-500">Above the newest posts in every listing.</span>
+                </span>
+              </label>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1" for="post-menu-order">Manual order</label>
+                <input
+                  type="number"
+                  id="post-menu-order"
+                  name="menu_order"
+                  value={post.menu_order ?? ''}
+                  class="w-24 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+                <p class="text-xs text-gray-500 mt-1">
+                  Lower comes first. Leave empty and this post falls back to date order,
+                  behind anything that has a number.
+                </p>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Featured Image -->
+        <div class="bg-white p-4 rounded-lg border border-gray-200">
+          <h2 class="text-lg font-semibold mb-4">Featured Image</h2>
+          <div class="space-y-4">
+            <div class="flex items-center space-x-4">
+              <img id="featured-image-preview" src={post.featured_image || ''} alt="Featured" class="w-32 h-20 object-cover rounded border border-gray-200" />
+              <div class="space-x-2">
+                <button type="button" id="choose-featured-image" class="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded border">Choose Image</button>
+                <button type="button" id="remove-featured-image" class="px-3 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded border border-red-200">Remove</button>
+              </div>
+            </div>
+            <input type="hidden" id="featured_image" name="featured_image" value={post.featured_image || ''} />
+          </div>
+        </div>
+
+        <!-- Categories & Tags -->
+        <div class="bg-white p-4 rounded-lg border border-gray-200">
+          <h2 class="text-lg font-semibold mb-4">Categories & Tags</h2>
+          <div class="space-y-4">
+            <div>
+              <label for="post-category" class="block text-sm font-medium text-gray-700 mb-2">Categories</label>
+              <select id="post-category" name="category_id" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+              <option value="">Uncategorized</option>
+              {allCategories.map(cat => (
+              <option value={cat.id} selected={post.category_id === cat.id}>{cat.name}</option>
+              ))}
+              </select>
+            </div>
+            <div>
+              <label for="post-tags" class="block text-sm font-medium text-gray-700 mb-2">Tags</label>
+              <input type="text" id="post-tags" name="tags" value={(post.tags || []).join(', ')} class="w-full px-3 py-2 border border-gray-300 rounded-lg" placeholder="Comma-separated" />
+              <div id="tag-suggestions" class="mt-2 flex flex-wrap gap-2"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sidebar -->
+      <div class="space-y-6">
+        <!-- Publish Settings -->
+        <div class="bg-white p-4 rounded-lg border border-gray-200">
+          <h2 class="text-lg font-semibold mb-4">Publish Settings</h2>
+          <div class="space-y-4">
+            <div>
+              <!-- Type is editable here, not only at creation. Without it, a
+                   page saved as a post (or vice versa) could never be corrected
+                   from the UI — the record would have to be fixed over the API. -->
+              <label for="post-kind" class="block text-sm font-medium text-gray-700 mb-2">Type</label>
+              <select id="post-kind" name="kind" class="w-full px-3 py-2 border border-gray-300 rounded-lg mb-4">
+                <option value="post" selected={post.kind !== 'page'}>Post — appears in the blog at /blog/slug</option>
+                <option value="page" selected={post.kind === 'page'}>Page — a standalone page at /slug</option>
+              </select>
+
+              <label for="post-status" class="block text-sm font-medium text-gray-700 mb-2">Status</label>
+              <select id="post-status" name="status" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                <option value="draft" selected={post.status === 'draft'}>Draft</option>
+                <option value="review" selected={post.status === 'review'}>Review</option>
+                <option value="scheduled" selected={post.status === 'scheduled'}>Scheduled</option>
+                <option value="published" selected={post.status === 'published'}>Published</option>
+                <option value="trashed" selected={post.status === 'trashed'}>Trashed</option>
+              </select>
+            </div>
+            <div>
+              <label for="post-author" class="block text-sm font-medium text-gray-700 mb-2">Author</label>
+              <select id="post-author" name="author_id" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                {allUsers.map(user => (
+                  <option value={user.id} selected={post.author_id === user.id}>{user.name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label for="publish-date" class="block text-sm font-medium text-gray-700 mb-2">Publish Date</label>
+              <input type="datetime-local" id="publish-date" name="publish_date" value={(post.publish_date ? new Date(post.publish_date).toISOString().slice(0,16) : '')} class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Media Library -->
+        <div class="bg-white p-4 rounded-lg border border-gray-200">
+          <h2 class="text-lg font-semibold mb-4">Media Library</h2>
+          {/*
+            No `accept` override. It was `image/*`, which meant EDITING a post
+            could not insert a video while CREATING one could — posts/new.astro
+            takes the component default and this did not. A prop that pins a
+            default to the value it used to have is how one screen quietly
+            stops matching its sibling.
+          */}
+          <MediaLibrary multiple={false} insertTargetId="editor" />
+        </div>
+
+        <!-- Revision history -->
+        <div class="bg-white p-4 rounded-lg border border-gray-200">
+          <div class="flex items-center justify-between mb-1">
+            <h2 class="text-lg font-semibold">History</h2>
+            <span id="autosave-status" class="text-xs text-gray-400"></span>
+          </div>
+          <p class="text-xs text-gray-500 mb-3">
+            Snapshots of earlier content. Drafts autosave here without publishing.
+          </p>
+          <div id="revision-list" class="space-y-1 max-h-72 overflow-y-auto text-sm">
+            <p class="text-xs text-gray-400">Loading…</p>
+          </div>
+        </div>
+
+        <!-- Actions -->
+        <div class="bg-white p-4 rounded-lg border border-gray-200">
+          <h2 class="text-lg font-semibold mb-4">Actions</h2>
+          <div class="space-y-2">
+            <button type="button" id="save-draft" class="w-full px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded">Save Draft</button>
+            <button type="button" id="preview-post" class="w-full px-4 py-2 bg-purple-600 text-white hover:bg-purple-700 rounded">Preview</button>
+            <button type="submit" form="post-form" class="w-full px-4 py-2 bg-blue-600 text-white hover:bg-blue-700 rounded">Update Post</button>
+          </div>
+        </div>
+      </div>
+    </form>
+  </div>
+</AdminLayout>
+
+<script>
+// @ts-nocheck
+import { api } from '../../../../lib/apiClient';
+import { charCount } from '../../../../lib/admin-ui';
+class PostEditor {
+  constructor() {
+    this.form = document.getElementById('post-form');
+    this.titleInput = document.getElementById('post-title');
+    this.slugInput = document.getElementById('post-slug');
+    this.contentEditor = document.querySelector('[data-richtext-editor]');
+    this.excerptTextarea = document.getElementById('post-excerpt');
+    this.metaTitleInput = document.getElementById('meta-title');
+    this.metaDescriptionTextarea = document.getElementById('meta-description');
+    this.noindexCheckbox = document.getElementById('post-noindex');
+    this.metaTitleCount = document.getElementById('meta-title-count');
+    this.metaDescriptionCount = document.getElementById('meta-description-count');
+    this.featuredImagePreview = document.getElementById('featured-image-preview');
+    this.featuredImageInput = document.getElementById('featured_image');
+    this.chooseFeaturedImageBtn = document.getElementById('choose-featured-image');
+    this.removeFeaturedImageBtn = document.getElementById('remove-featured-image');
+    this.saveDraftBtn = document.getElementById('save-draft');
+    this.previewPostBtn = document.getElementById('preview-post');
+    this.statusSelect = document.getElementById('post-status');
+    this.kindSelect = document.getElementById('post-kind');
+    this.authorSelect = document.getElementById('post-author');
+    this.publishDateInput = document.getElementById('publish-date');
+    this.categorySelect = document.getElementById('post-category');
+    this.tagsInput = document.getElementById('post-tags');
+    this.tagSuggestions = document.getElementById('tag-suggestions');
+
+    this.init();
+  }
+
+  init() {
+    // Revision history + autosave (both no-ops if the panel isn't present).
+    this.loadRevisions();
+    this.startAutosave();
+
+    // Title to Slug
+    this.titleInput.addEventListener('input', () => {
+      if (!this.slugInput.value || this.slugInput.value === this.slugify(this.titleInput.value)) {
+        this.slugInput.value = this.slugify(this.titleInput.value);
+      }
+    });
+
+    // SEO character counters
+    // charCount binds AND paints — see lib/admin-ui.ts. The two editors had
+    // separate implementations and they disagreed about the over-limit colour.
+    charCount(this.metaTitleInput, this.metaTitleCount, 60);
+    charCount(this.metaDescriptionTextarea, this.metaDescriptionCount, 160);
+
+    // Draft save
+    this.saveDraftBtn.addEventListener('click', () => this.saveDraft());
+    document.getElementById('save-draft-header')?.addEventListener('click', () => this.saveDraft());
+
+    // Preview post
+    this.previewPostBtn.addEventListener('click', () => this.previewPost());
+    document.getElementById('preview-post-header')?.addEventListener('click', () => this.previewPost());
+
+    // Form submit
+    this.form.addEventListener('submit', (e) => this.handleSubmit(e));
+
+    // Featured image: the inline media library dispatches 'mediaSelected' when
+    // an item's Select button is clicked; "Choose Image" scrolls it into view.
+    this.chooseFeaturedImageBtn.addEventListener('click', () => {
+      document.querySelector('.media-library')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    this.removeFeaturedImageBtn.addEventListener('click', () => this.removeFeaturedImage());
+    document.addEventListener('mediaSelected', (e) => this.handleMediaSelected(e));
+
+    // Tag suggestions
+    this.tagsInput.addEventListener('input', () => this.updateTagSuggestions());
+    this.tagSuggestions.addEventListener('click', (e) => this.handleTagSuggestionClick(e));
+  }
+
+  slugify(text) {
+    return text
+      .toString()
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, '-')
+      .replace(/&/g, '-and-')
+      .replace(/[^a-z0-9\-]/g, '')
+      .replace(/-{2,}/g, '-');
+  }
+
+  get postId() {
+    return this.form.querySelector('input[name="id"]').value;
+  }
+
+  /** Render revision history. All values via textContent — never innerHTML. */
+  async loadRevisions() {
+    const box = document.getElementById('revision-list');
+    if (!box) return;
+    const res = await api.get(`/api/posts/${this.postId}/revisions`, { limit: 25 });
+    box.textContent = '';
+    if (!res.ok) {
+      const p = document.createElement('p');
+      p.className = 'text-xs text-red-500';
+      p.textContent = res.error || 'Could not load history';
+      box.appendChild(p);
+      return;
+    }
+    const revs = res.data || [];
+    if (!revs.length) {
+      const p = document.createElement('p');
+      p.className = 'text-xs text-gray-400';
+      p.textContent = 'No revisions yet — they appear after your first edit.';
+      box.appendChild(p);
+      return;
+    }
+    for (const rev of revs) {
+      const row = document.createElement('div');
+      row.className = 'flex items-center justify-between gap-2 border-b border-gray-100 py-1.5';
+
+      const left = document.createElement('div');
+      left.className = 'min-w-0';
+      const t = document.createElement('div');
+      t.className = 'truncate text-gray-800';
+      t.textContent = rev.title || '(untitled)';
+      const meta = document.createElement('div');
+      meta.className = 'text-[11px] text-gray-400';
+      meta.textContent = `${rev.kind} · ${new Date(rev.created_at).toLocaleString()}`;
+      left.append(t, meta);
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'shrink-0 text-xs px-2 py-1 rounded bg-gray-100 hover:bg-blue-100 hover:text-blue-700';
+      btn.textContent = 'Restore';
+      btn.addEventListener('click', () => this.restoreRevision(rev));
+
+      row.append(left, btn);
+      box.appendChild(row);
+    }
+  }
+
+  async restoreRevision(rev) {
+    if (!confirm(`Restore "${rev.title || '(untitled)'}" from ${new Date(rev.created_at).toLocaleString()}?\n\nThe current content is snapshotted first, so this can be undone.`)) return;
+    const res = await api.post(`/api/posts/${this.postId}/restore`, { revision_id: rev.id });
+    if (res.ok) window.location.reload();
+    else alert(res.error || 'Restore failed');
+  }
+
+  /**
+   * Autosave the in-progress draft. Never publishes — it only writes a revision,
+   * so a crashed tab loses nothing. Debounced; skipped when nothing changed.
+   */
+  startAutosave() {
+    const status = document.getElementById('autosave-status');
+    let timer = null;
+    let last = '';
+    const tick = async () => {
+      const data = this.collectFormData();
+      const fingerprint = `${data.title}\u0000${data.content}\u0000${data.excerpt ?? ''}`;
+      if (fingerprint === last) return;
+      last = fingerprint;
+      const res = await api.post(`/api/posts/${this.postId}/revisions`, {
+        title: data.title, content: data.content, excerpt: data.excerpt,
+      });
+      if (status) {
+        status.textContent = res.ok
+          ? (res.data?.saved ? `saved ${new Date().toLocaleTimeString()}` : '')
+          : 'autosave failed';
+      }
+      if (res.ok && res.data?.saved) this.loadRevisions();
+    };
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(tick, 5000);
+      if (status) status.textContent = 'editing…';
+    };
+    this.form.addEventListener('input', schedule);
+  }
+
+  async saveDraft() {
+    const res = await this.savePost(this.collectFormData('draft'));
+    if (res.ok) alert('Draft saved');
+    else alert(`Failed to save draft: ${res.error}`);
+  }
+
+  collectFormData(forceStatus) {
+    // Prefer the textarea (sanitized form value); fall back to live DOM.
+    const contentVal = this.form.querySelector('textarea[name="content"]')?.value
+      ?? this.contentEditor?.querySelector('[data-editor]')?.innerHTML
+      ?? '';
+    const data = {
+      id: this.form.querySelector('input[name="id"]').value,
+      title: this.titleInput.value,
+      slug: this.slugInput.value || undefined,
+      content: contentVal,
+      excerpt: this.excerptTextarea.value || undefined,
+      meta_title: this.metaTitleInput.value || undefined,
+      meta_description: this.metaDescriptionTextarea.value || undefined,
+      noindex: !!this.noindexCheckbox?.checked,
+      // Same rule: an emptied keyphrase must be removable.
+      focus_keyphrase: document.getElementById('post-keyphrase')?.value?.trim() || null,
+      pinned: !!document.getElementById('post-pinned')?.checked,
+      // An empty box sends NULL, not nothing.
+      //
+      // Omitting the key looks right and is not: PUT merges, so the stored
+      // number survived and the help text ("Leave empty and this post falls
+      // back to date order") became a false statement the author could not act
+      // on. 0 is still a real position — the very front — so empty and zero
+      // have to be distinguishable, and null is the only value that says
+      // "remove this".
+      menu_order: document.getElementById('post-menu-order')?.value.trim()
+        ? Number(document.getElementById('post-menu-order').value)
+        : null,
+      featured_image: this.featuredImageInput.value || undefined,
+      category_id: this.categorySelect?.value || undefined,
+      status: forceStatus || this.statusSelect.value,
+      // Constrained to the two known values rather than passed through: the
+      // server validates it too, but the client should not be the thing that
+      // sends an unexpected one.
+      kind: this.kindSelect?.value === 'page' ? 'page' : 'post',
+      author_id: this.authorSelect?.value || undefined,
+      publish_date: this.publishDateInput?.value || undefined,
+    };
+    const tags = this.tagsInput.value.split(',').map(t => t.trim()).filter(Boolean);
+    if (tags.length) data.tags = tags;
+
+    // Custom taxonomies (C-128), same as the create screen. This serialiser
+    // builds an explicit key list, so a field that only exists as markup is
+    // invisible to it — the picker rendered and synced and nothing was ever
+    // sent.
+    //
+    // Always present when the picker is on the page, even as `{}`: the server
+    // treats an absent key as "leave the terms alone" and a present one as the
+    // whole new set, which is what makes UNTICKING the last term work. Sending
+    // it only when non-empty would make removal impossible.
+    const termsField = this.form.querySelector('input[name="terms"]');
+    if (termsField) {
+      try {
+        const parsed = JSON.parse(termsField.value || '{}');
+        if (parsed && typeof parsed === 'object') data.terms = parsed;
+      } catch { /* a malformed field is no change, not a failed save */ }
+    }
+    return data;
+  }
+
+  async handleSubmit(e) {
+    e.preventDefault();
+    const res = await this.savePost(this.collectFormData());
+    if (res.ok) {
+      alert('Post updated successfully');
+      window.location.href = '/admin/posts';
+    } else {
+      console.error('Failed to update post:', res);
+      // Show the FIELD message when there is one. The API answers a taken slug
+      // with details.slug naming it; alerting only `res.error` reduced that to
+      // "Invalid post payload", so the sentence written for the author never
+      // reached the author.
+      const fieldMessages = res.details && typeof res.details === 'object'
+        ? Object.entries(res.details).map(([field, message]) => `${field}: ${message}`)
+        : [];
+      alert(fieldMessages.length
+        ? `Could not save:\n${fieldMessages.join('\n')}`
+        : `Failed to update post: ${res.error}`);
+    }
+  }
+
+  async savePost(postData) {
+    return await api.put('/api/posts/update', postData);
+  }
+
+  previewPost() {
+    const data = this.collectFormData();
+    // POST the draft to a real Astro page, which runs the SAME
+    // applyFilters -> sanitizeHtml pipeline the front end runs, inside the
+    // same layout. The old version wrote an interpolated template string into
+    // an about:blank window: unsanitised (self-XSS, and no CSP applies there)
+    // and untrue (no theme tokens, no section styles, no plugin filters), so
+    // it showed something the published page would never look like.
+    //
+    // A form POST rather than fetch+write, so the browser navigates the new
+    // tab normally and the draft body never lands in a URL, history entry or
+    // Referer header.
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/admin/posts/preview';
+    form.target = 'post-preview';
+    for (const [key, value] of Object.entries({ title: data.title || '', content: data.content || '' })) {
+      const field = document.createElement('input');
+      field.type = 'hidden';
+      field.name = key;
+      field.value = value;
+      form.appendChild(field);
+    }
+    document.body.appendChild(form);
+    window.open('', 'post-preview');
+    form.submit();
+    form.remove();
+    // No `preview.document.close()` here: `preview` was a variable of the old
+    // implementation and no longer exists, so the line threw a ReferenceError
+    // on every preview — after the form had already gone, which is why the
+    // preview still appeared and the console error went unread. Closing the
+    // document would be wrong anyway; the window is loading the POST response.
+  }
+
+  handleMediaSelected(e) {
+    const url = e.detail?.url;
+    if (!url) return;
+    this.featuredImageInput.value = url;
+    if (this.featuredImagePreview) this.featuredImagePreview.src = url;
+  }
+
+  removeFeaturedImage() {
+    this.featuredImageInput.value = '';
+    this.featuredImagePreview.src = '';
+  }
+
+  updateTagSuggestions() {
+    const currentTags = this.tagsInput.value.split(',').map(t => t.trim()).filter(Boolean);
+    const suggestions = this.generateTagSuggestions(currentTags);
+
+    this.tagSuggestions.innerHTML = '';
+    suggestions.forEach(tag => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = tag;
+      button.className = 'px-2 py-1 text-sm bg-gray-100 hover:bg-gray-200 rounded';
+      button.addEventListener('click', () => {
+        if (!currentTags.includes(tag)) {
+          currentTags.push(tag);
+          this.tagsInput.value = currentTags.join(', ');
+          this.updateTagSuggestions();
+        }
+      });
+      this.tagSuggestions.appendChild(button);
+    });
+  }
+
+  generateTagSuggestions(currentTags) {
+    const baseTags = ['news', 'updates', 'tips', 'tricks', 'guide', 'tutorial'];
+    return baseTags.filter(tag => !currentTags.includes(tag));
+  }
+
+  handleTagSuggestionClick(e) {
+    if (e.target.tagName === 'BUTTON') {
+      const tag = e.target.textContent;
+      const currentTags = this.tagsInput.value.split(',').map(t => t.trim()).filter(Boolean);
+      if (!currentTags.includes(tag)) {
+        currentTags.push(tag);
+        this.tagsInput.value = currentTags.join(', ');
+        this.updateTagSuggestions();
+      }
+    }
+  }
+}
+
+// Initialize editor when DOM is ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => new PostEditor());
+} else {
+  new PostEditor();
+}
+</script>

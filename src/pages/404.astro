@@ -1,0 +1,95 @@
+---
+import PublicLayout from '../layouts/PublicLayout.astro';
+import { suggestForPath } from '../lib/legacy/suggest';
+import { routeHref } from '../lib/locale-links';
+
+/**
+ * The recovery page.
+ *
+ * ## The status is the whole point
+ *
+ * This page is helpful — it reads the dead URL and offers what it probably
+ * meant — and it is STILL a 404. Those are not in tension: "we could not find
+ * that page, here is what we think you wanted" is an accurate 404 body.
+ *
+ * Serving it as 200 would be a soft 404: Google would index a page that does
+ * not exist, keep sending paid clicks to it, and eventually flag the shop for
+ * it. These shops are already fighting a hijacked Merchant feed, so this is set
+ * explicitly rather than left to the framework's default.
+ *
+ * A path that WILL never exist gets suggestions and a 404. A path we know was
+ * spam gets a 410 from the middleware and never reaches here.
+ */
+Astro.response.status = 404;
+// A wrong guess must not be cached anywhere; and a URL that starts working
+// later must not be served from a stale 404.
+Astro.response.headers.set('Cache-Control', 'no-store');
+
+const path = Astro.url.pathname;
+
+// Failure here returns empty rather than throwing — a 404 page that 500s is a
+// worse outcome than a 404 page with no suggestions.
+const { results } = await suggestForPath(path, 6);
+const suggestions = results;
+---
+
+<PublicLayout title="Page not found - AstroBaaS" description="The page you are looking for could not be found.">
+  <section class="min-h-[60vh] flex items-center justify-center px-4 py-16">
+    <div class="text-center max-w-2xl w-full">
+      <p class="text-sm font-medium text-blue-600 mb-3">404</p>
+      <h1 class="text-3xl md:text-4xl font-bold text-gray-900 mb-4">Page not found</h1>
+      <p class="text-gray-600 mb-8">
+        The page you're looking for doesn't exist, has been moved, or is temporarily unavailable.
+      </p>
+
+      {suggestions.length > 0 && (
+        <div class="mb-8 text-left">
+          <h2 class="text-sm font-semibold text-gray-900 mb-3 text-center">
+            Were you looking for one of these?
+          </h2>
+          <ul class="divide-y divide-gray-200 border border-gray-200 rounded-lg overflow-hidden bg-white">
+            {suggestions.map((s) => (
+              <li>
+                <a href={s.url} class="flex items-center justify-between gap-3 px-4 py-3 hover:bg-gray-50">
+                  <span class="text-gray-900 font-medium">{s.name}</span>
+                  <span class="text-xs uppercase tracking-wide text-gray-500">{s.kind}</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/*
+        Points at a route this CMS SERVES.
+
+        This was `action="/shop"` — a path AstroBaaS has never had a page for.
+        The recovery form on the page for people who took a wrong turn sent them
+        to a second 404. `/blog?q=` is the search this app actually serves, and
+        the one its own structured data advertises to Google.
+      */}
+      <form action={routeHref('/blog', Astro.locals.locale)} method="get" class="mb-8 flex gap-2 max-w-md mx-auto">
+        <label for="q" class="sr-only">Search this site</label>
+        <input
+          id="q"
+          type="search"
+          name="q"
+          placeholder="Search…"
+          class="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          Search
+        </button>
+      </form>
+
+      <div class="flex flex-col sm:flex-row gap-3 justify-center">
+        <a href={routeHref('/', Astro.locals.locale)} class="px-4 py-2 border border-gray-300 text-gray-700 hover:bg-gray-50 rounded-lg font-medium">
+          Go home
+        </a>
+        <a href={routeHref('/blog', Astro.locals.locale)} class="px-4 py-2 border border-gray-300 text-gray-700 hover:bg-gray-50 rounded-lg font-medium">
+          Read the blog
+        </a>
+      </div>
+    </div>
+  </section>
+</PublicLayout>

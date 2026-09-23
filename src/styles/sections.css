@@ -1,0 +1,267 @@
+/* ---------------------------------------------------------------------------
+   Section styles.
+
+   Every rule here reads ONLY theme tokens (see src/lib/theme-tokens.ts). No
+   hardcoded colours, no fixed spacing. That is what makes switching a theme
+   restyle every hero and CTA on the site for free, and it is why a preset
+   change is visible immediately rather than only on new content.
+
+   Two structural decisions worth knowing:
+
+   1. **Parts are scoped to their parent** (`.ab-columns > .ab-col`). Structure
+      is not enforced anywhere — a string-to-string sanitizer cannot know
+      ancestry — so an orphaned `.ab-col` left behind by an editing accident is
+      simply an unstyled block containing readable text, rather than a broken
+      column. Degrading to plain content is the point of building on classes.
+
+   2. **Nothing here uses Tailwind utilities.** Tailwind's JIT scans source
+      files, and these classes live in stored post HTML which it never sees, so
+      a utility written into content would never be generated. Hand-authored
+      CSS is not a stylistic preference here; it is the only thing that works.
+   --------------------------------------------------------------------------- */
+
+/* ---- shared ---- */
+
+.ab-align-left { text-align: left; }
+.ab-align-center { text-align: center; }
+.ab-align-right { text-align: right; }
+
+.ab-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-2) var(--space-4);
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  border: 1px solid var(--btn-border);
+  border-radius: var(--btn-radius);
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition: filter .15s ease;
+}
+.ab-btn:hover { filter: brightness(0.94); }
+
+.ab-btn-secondary {
+  background: var(--secondary-color);
+  color: var(--on-primary);
+  border-color: transparent;
+}
+.ab-btn-ghost {
+  background: transparent;
+  color: var(--primary-color);
+  border-color: var(--border-color);
+}
+
+/* ---- hero ---- */
+
+.ab-hero {
+  padding: var(--section-y) var(--space-4);
+  background: color-mix(in srgb, var(--primary-color) 6%, var(--background-color));
+  border-radius: var(--radius-lg);
+  margin: var(--space-6) 0;
+}
+.ab-hero > :first-child { margin-top: 0; }
+.ab-hero > :last-child { margin-bottom: 0; }
+.ab-hero h1, .ab-hero h2 { font-size: var(--h1); line-height: var(--heading-line-height); }
+
+/* ---- columns ---- */
+
+.ab-columns {
+  display: grid;
+  gap: var(--space-4);
+  margin: var(--space-6) 0;
+  /* Single column by default: a phone is the narrow case, and starting there
+     means the multi-column rules are the enhancement rather than the override. */
+  grid-template-columns: 1fr;
+}
+@media (min-width: 48rem) {
+  .ab-columns.ab-cols-2 { grid-template-columns: repeat(2, 1fr); }
+  .ab-columns.ab-cols-3 { grid-template-columns: repeat(3, 1fr); }
+  .ab-columns.ab-cols-4 { grid-template-columns: repeat(4, 1fr); }
+}
+.ab-columns > .ab-col > :first-child { margin-top: 0; }
+.ab-columns > .ab-col > :last-child { margin-bottom: 0; }
+
+/* ---- card ---- */
+
+.ab-card {
+  padding: var(--space-4);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--surface-color);
+  box-shadow: var(--shadow-sm);
+  margin: var(--space-4) 0;
+}
+.ab-card > :first-child { margin-top: 0; }
+.ab-card > :last-child { margin-bottom: 0; }
+
+/* ---- call to action ---- */
+
+.ab-cta {
+  padding: var(--section-y) var(--space-4);
+  text-align: center;
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--background-color));
+  border-radius: var(--radius-lg);
+  margin: var(--space-6) 0;
+}
+.ab-cta > :first-child { margin-top: 0; }
+.ab-cta > :last-child { margin-bottom: 0; }
+
+/* ---- note ---- */
+
+.ab-note {
+  padding: var(--space-3) var(--space-4);
+  border-left: 3px solid var(--muted-color);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--muted-color) 8%, transparent);
+  margin: var(--space-4) 0;
+}
+.ab-note > :first-child { margin-top: 0; }
+.ab-note > :last-child { margin-bottom: 0; }
+.ab-note-info { border-left-color: var(--primary-color); background: color-mix(in srgb, var(--primary-color) 8%, transparent); }
+.ab-note-warn { border-left-color: var(--warning-color); background: color-mix(in srgb, var(--warning-color) 10%, transparent); }
+.ab-note-success { border-left-color: var(--success-color); background: color-mix(in srgb, var(--success-color) 10%, transparent); }
+
+/* ---- media + text ---- */
+
+.ab-media {
+  display: grid;
+  gap: var(--space-4);
+  align-items: center;
+  grid-template-columns: 1fr;
+  margin: var(--space-6) 0;
+}
+@media (min-width: 48rem) {
+  .ab-media { grid-template-columns: 1fr 1fr; }
+  /* Right-side variant flips the visual order without reordering the DOM, so
+     the reading order a screen reader follows is unchanged. */
+  .ab-media-right > figure { order: 2; }
+}
+.ab-media figure { margin: 0; }
+.ab-media img { width: 100%; height: auto; border-radius: var(--radius-md); }
+.ab-media figcaption { color: var(--muted-color); font-size: 0.9em; margin-top: var(--space-1); }
+
+/* ---- gallery ---- */
+
+.ab-gallery {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  margin: var(--space-6) 0;
+}
+.ab-gallery > .ab-gallery-item { margin: 0; }
+.ab-gallery img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  aspect-ratio: 4 / 3;
+  border-radius: var(--radius-md);
+}
+
+/* ---- spacer ---- */
+
+.ab-spacer { height: var(--space-6); }
+.ab-spacer-sm { height: var(--space-3); }
+.ab-spacer-md { height: var(--space-6); }
+.ab-spacer-lg { height: var(--section-y); }
+
+/* ---- table ----
+   Real CSS in this file, not Tailwind utilities: Tailwind v4 scans SOURCE TEXT
+   for class names, and these are produced by the section template rather than
+   written in a component — so a utility class here is absent from the built
+   stylesheet and the table renders unstyled in production while looking right
+   in dev. */
+
+.ab-table {
+  margin: var(--space-6) 0;
+  /* A wide table on a phone must scroll ITSELF rather than the page: a body
+     that scrolls sideways breaks every other block on the page. */
+  overflow-x: auto;
+}
+.ab-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+.ab-table caption {
+  caption-side: top;
+  text-align: left;
+  padding-bottom: var(--space-2);
+  color: var(--ab-muted, #6b7280);
+  font-size: 0.9em;
+}
+.ab-table th,
+.ab-table td {
+  border: 1px solid var(--ab-border, #e5e7eb);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  vertical-align: top;
+}
+.ab-table thead th {
+  background: var(--ab-surface-2, #f9fafb);
+  font-weight: 600;
+}
+.ab-table tfoot td,
+.ab-table tfoot th { font-weight: 600; }
+.ab-table-striped tbody tr:nth-child(even) td {
+  background: var(--ab-surface-2, #f9fafb);
+}
+
+/* ---- video link ----
+   A poster frame that LINKS OUT. This CMS hosts no video and embeds no
+   third-party player — `iframe` is absent from the sanitizer's allow-list, which
+   is what keeps the CSP intact — so the honest control is a picture with a play
+   badge and an ordinary link. */
+
+.ab-video {
+  margin: var(--space-6) 0;
+}
+.ab-video a {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+}
+.ab-video img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ab-video-16x9 a { aspect-ratio: 16 / 9; }
+.ab-video-4x3 a { aspect-ratio: 4 / 3; }
+/* The play badge, drawn rather than shipped as an asset: an <img> here would be
+   one more request and one more thing to keep in the media library. */
+.ab-video a::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 1.1rem 0 1.1rem 1.9rem;
+  border-color: transparent transparent transparent rgba(255, 255, 255, 0.92);
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.45));
+}
+.ab-video figcaption {
+  margin-top: var(--space-2);
+  color: var(--ab-muted, #6b7280);
+  font-size: 0.9em;
+}
+
+/* ---- print ----
+   Sections are layout, and layout is the first thing to go wrong on paper.
+   A customer printing an order confirmation or a prescription page should get
+   readable text, not a three-column grid squeezed onto A4. */
+@media print {
+  .ab-columns, .ab-media, .ab-gallery { grid-template-columns: 1fr; }
+  /* A table must not be cut off at the page edge because it was scrolling. */
+  .ab-table { overflow-x: visible; }
+  .ab-table table { font-size: 0.85em; }
+  /* A play badge on paper is a triangle nobody can press. */
+  .ab-video a::after { display: none; }
+  .ab-hero, .ab-cta, .ab-card, .ab-note { background: none; box-shadow: none; }
+  .ab-spacer { height: var(--space-3); }
+}

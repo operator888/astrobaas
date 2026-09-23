@@ -1,0 +1,220 @@
+---
+/**
+ * The stock marketing homepage.
+ *
+ * Shown only when no CMS Page has been designated the home page (the
+ * `home_page_slug` setting). It lives in its own component so `index.astro`
+ * stays about the *decision* — CMS page or default — rather than burying it
+ * under a hundred and forty lines of hero copy.
+ *
+ * This is what a fresh install looks like before the owner has written
+ * anything, so it must render with an empty database and no settings.
+ *
+ * Every claim below is checkable against the running code, which grades this exact
+ * copy against the running code. Adding a sentence here means adding something
+ * a stranger with curl can verify, or not adding it.
+ */
+import { getSiteSettings } from '../lib/site';
+import { siteCredit } from '../lib/byline';
+import { routeHref } from '../lib/locale-links';
+
+const site = await getSiteSettings({ astroSite: Astro.site, requestUrl: Astro.url, locale: Astro.locals.locale });
+// Null on a fresh install, so nobody gets an empty "Built by" with a dead link.
+const credit = siteCredit({
+  siteAuthorName: site.siteAuthorName,
+  siteAuthorUrl: site.siteAuthorUrl,
+  siteTitle: site.siteTitle,
+});
+
+// The public links on this page carry the reader's locale, like every other
+// link on the site. They did not, and an audit named the consequence: a reader
+// who had switched to Greek and landed on a fresh install's home page was
+// dropped back into the default language by the one button the page is FOR.
+// `/admin` is deliberately unprefixed — the admin is not a localized route.
+const blogHref = routeHref('/blog', Astro.locals.locale);
+const aboutHref = routeHref('/about', Astro.locals.locale);
+---
+  <!-- Hero Section -->
+  <section class="relative bg-gradient-to-br from-blue-50 via-white to-purple-50 overflow-hidden">
+    <div class="absolute inset-0 bg-grid-pattern opacity-5"></div>
+    <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20 lg:py-32">
+      <div class="text-center">
+        <h1 class="text-4xl md:text-6xl font-bold text-gray-900 mb-6 leading-tight">
+          Modern CMS for the
+          <span class="bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+            Future Web
+          </span>
+        </h1>
+        <p class="text-xl text-gray-600 mb-8 max-w-3xl mx-auto leading-relaxed">
+          Build lightning-fast websites with our modern content management system. 
+          Powered by Astro, designed for performance, built for developers and content creators.
+        </p>
+        <div class="flex flex-col sm:flex-row gap-4 justify-center">
+          <a href="/admin" class="inline-flex items-center px-8 py-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg shadow-lg hover:shadow-xl transition-all duration-200 transform hover:-translate-y-1">
+            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+            </svg>
+            Get Started
+          </a>
+          <a href={blogHref} class="inline-flex items-center px-8 py-4 border-2 border-gray-300 hover:border-gray-400 text-gray-700 font-semibold rounded-lg hover:bg-gray-50 transition-all duration-200">
+            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/>
+            </svg>
+            View Blog
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features Section -->
+  <section class="py-20 bg-white">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-16">
+        <h2 class="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+          Everything you need to manage content
+        </h2>
+        <p class="text-xl text-gray-600 max-w-2xl mx-auto">
+          Powerful features designed to make content management simple, fast, and enjoyable.
+        </p>
+      </div>
+      
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+        <!-- Feature 1 -->
+        <div class="group p-8 bg-gray-50 rounded-2xl hover:bg-white hover:shadow-xl transition-all duration-300 border border-transparent hover:border-gray-200">
+          <div class="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center mb-6 group-hover:bg-blue-600 transition-colors duration-300">
+            <svg class="w-6 h-6 text-blue-600 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+            </svg>
+          </div>
+          <h3 class="text-xl font-semibold text-gray-900 mb-3">Lightning Fast</h3>
+          <p class="text-gray-600 leading-relaxed">
+            Server-rendered HTML with no framework runtime and no hydration waterfall.
+            What client JavaScript there is stays small and purposeful — a
+            cookie-consent manager, and the AI assistant if you enable it.
+          </p>
+        </div>
+
+        <!-- Feature 2 -->
+        <div class="group p-8 bg-gray-50 rounded-2xl hover:bg-white hover:shadow-xl transition-all duration-300 border border-transparent hover:border-gray-200">
+          <div class="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center mb-6 group-hover:bg-purple-600 transition-colors duration-300">
+            <svg class="w-6 h-6 text-purple-600 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a1 1 0 01-1-1V9a1 1 0 011-1h1a2 2 0 100-4H4a1 1 0 01-1-1V4a1 1 0 011-1h3a1 1 0 001-1v-1a2 2 0 012-2z"/>
+            </svg>
+          </div>
+          <h3 class="text-xl font-semibold text-gray-900 mb-3">Rich Editor</h3>
+          <p class="text-gray-600 leading-relaxed">
+            A WYSIWYG editor with autosave and full revision history, plus a palette
+            of ready-made sections — hero, columns, cards, galleries — and whole-page
+            patterns you drop in and edit. Standalone pages live at their own URL.
+          </p>
+        </div>
+
+        <!-- Feature 3 -->
+        <div class="group p-8 bg-gray-50 rounded-2xl hover:bg-white hover:shadow-xl transition-all duration-300 border border-transparent hover:border-gray-200">
+          <div class="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center mb-6 group-hover:bg-green-600 transition-colors duration-300">
+            <svg class="w-6 h-6 text-green-600 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+            </svg>
+          </div>
+          <h3 class="text-xl font-semibold text-gray-900 mb-3">Media Management</h3>
+          <p class="text-gray-600 leading-relaxed">
+            Drag &amp; drop uploads. Every image is re-encoded to WebP and stripped of EXIF —
+            including GPS — on the way in, then filed in a media library.
+          </p>
+        </div>
+
+        <!-- Feature 4 -->
+        <div class="group p-8 bg-gray-50 rounded-2xl hover:bg-white hover:shadow-xl transition-all duration-300 border border-transparent hover:border-gray-200">
+          <div class="w-12 h-12 bg-red-100 rounded-lg flex items-center justify-center mb-6 group-hover:bg-red-600 transition-colors duration-300">
+            <svg class="w-6 h-6 text-red-600 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+            </svg>
+          </div>
+          <h3 class="text-xl font-semibold text-gray-900 mb-3">Secure by Default</h3>
+          <p class="text-gray-600 leading-relaxed">
+            Session auth with optional 2FA, role-based access control, API keys that are
+            scoped and deny by default, and a hash-based Content-Security-Policy with
+            no unsafe-inline.
+          </p>
+        </div>
+
+        <!-- Feature 5 -->
+        <div class="group p-8 bg-gray-50 rounded-2xl hover:bg-white hover:shadow-xl transition-all duration-300 border border-transparent hover:border-gray-200">
+          <div class="w-12 h-12 bg-yellow-100 rounded-lg flex items-center justify-center mb-6 group-hover:bg-yellow-600 transition-colors duration-300">
+            <svg class="w-6 h-6 text-yellow-600 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+            </svg>
+          </div>
+          <h3 class="text-xl font-semibold text-gray-900 mb-3">SEO Optimized</h3>
+          <p class="text-gray-600 leading-relaxed">
+            Canonical URLs, Open Graph and Twitter cards, JSON-LD, per-post title and
+            description, hreflang for translated pages, plus automatic sitemap.xml,
+            robots.txt and RSS. One switch hides a staging site from search engines.
+          </p>
+        </div>
+
+        <!-- Feature 6 -->
+        <div class="group p-8 bg-gray-50 rounded-2xl hover:bg-white hover:shadow-xl transition-all duration-300 border border-transparent hover:border-gray-200">
+          <div class="w-12 h-12 bg-indigo-100 rounded-lg flex items-center justify-center mb-6 group-hover:bg-indigo-600 transition-colors duration-300">
+            <svg class="w-6 h-6 text-indigo-600 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/>
+            </svg>
+          </div>
+          <h3 class="text-xl font-semibold text-gray-900 mb-3">Mobile First</h3>
+          <p class="text-gray-600 leading-relaxed">
+            A responsive admin. The dashboard, content lists and editor work on a phone,
+            so you can fix a typo or publish from anywhere.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA Section -->
+  <section class="py-20 bg-gradient-to-r from-blue-600 to-purple-600">
+    <div class="max-w-4xl mx-auto text-center px-4 sm:px-6 lg:px-8">
+      <h2 class="text-3xl md:text-4xl font-bold text-white mb-6">
+        Ready to build something amazing?
+      </h2>
+      <p class="text-xl text-blue-100 mb-8 leading-relaxed">
+        A full shop is built in: products with variants, stock that cannot oversell,
+        orders, customers, VAT, shipping zones, coupons and EU withdrawal rights.
+        Themes and plugins install from JSON at runtime — no rebuild.
+      </p>
+      <p class="text-blue-100 mb-8">
+        Two live storefronts run on AstroBaaS today. It is pre-alpha, GPL-3.0 and
+        self-hosted — clone it and see for yourself.
+      </p>
+      <div class="flex flex-col sm:flex-row gap-4 justify-center">
+        <a href="/admin" class="inline-flex items-center px-8 py-4 bg-white text-blue-600 font-semibold rounded-lg shadow-lg hover:shadow-xl transition-all duration-200 transform hover:-translate-y-1">
+          Start Building Now
+          <svg class="w-5 h-5 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/>
+          </svg>
+        </a>
+        <a href={aboutHref} class="inline-flex items-center px-8 py-4 border-2 border-white text-white font-semibold rounded-lg hover:bg-white hover:text-blue-600 transition-all duration-200">
+          Learn More
+        </a>
+      </div>
+
+      {/* Settings-driven, so this is the operator's own name on their own
+          install rather than somebody else's baked into an open-source CMS. */}
+      {credit && (
+        <p class="mt-10 text-sm text-blue-100">
+          Built and maintained by{' '}
+          {credit.url
+            ? <a href={credit.url} target="_blank" rel="noopener noreferrer"
+                 class="font-medium text-white underline underline-offset-4 hover:no-underline">{credit.name}</a>
+            : <span class="font-medium text-white">{credit.name}</span>}
+        </p>
+      )}
+    </div>
+  </section>
+
+<style>
+  .bg-grid-pattern {
+    background-image: radial-gradient(circle, #e5e7eb 1px, transparent 1px);
+    background-size: 20px 20px;
+  }
+</style>

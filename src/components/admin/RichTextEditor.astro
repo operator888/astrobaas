@@ -1,0 +1,403 @@
+---
+interface Props {
+  content?: string;
+  name?: string;
+  id?: string;
+}
+
+const { content = '', name = 'content', id = 'editor' } = Astro.props;
+
+// Frontmatter labels. The two prompt() dialogs inside the <script> below use
+// window.t instead — AdminLayout loads /admin-i18n.js before any page script
+// runs. Every toolbar button dispatches on its `data-action`, never on its
+// title, so translating these tooltips cannot break the toolbar.
+const t = Astro.locals.t;
+---
+
+<div class="rich-text-editor">
+  <div class="editor-toolbar bg-gray-50 border border-gray-200 rounded-t-lg p-2 flex flex-wrap gap-1">
+    <!-- Formatting buttons -->
+    <button type="button" data-action="bold" class="toolbar-btn" title={t('admin.editor.bold')}>
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+        <path d="M5 3v14h5.5c2.5 0 4.5-2 4.5-4.5 0-1.5-.8-2.8-2-3.5 1.2-.7 2-2 2-3.5C15 3 13 1 10.5 1H5v2zm2 2h3.5c1.4 0 2.5 1.1 2.5 2.5S11.9 10 10.5 10H7V5zm0 7h4c1.7 0 3 1.3 3 3s-1.3 3-3 3H7v-6z"/>
+      </svg>
+    </button>
+    <button type="button" data-action="italic" class="toolbar-btn" title={t('admin.editor.italic')}>
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+        <path d="M8 1h8v2h-2.5l-3 12H13v2H5v-2h2.5l3-12H8V1z"/>
+      </svg>
+    </button>
+    <button type="button" data-action="underline" class="toolbar-btn" title={t('admin.editor.underline')}>
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+        <path d="M6 2v8c0 2.2 1.8 4 4 4s4-1.8 4-4V2h2v8c0 3.3-2.7 6-6 6s-6-2.7-6-6V2h2zm-4 16h16v2H2v-2z"/>
+      </svg>
+    </button>
+    
+    <div class="w-px h-6 bg-gray-300 mx-1"></div>
+    
+    <!-- Heading buttons -->
+    <button type="button" data-action="heading" data-level="1" class="toolbar-btn" title={t('admin.editor.heading1')}>H1</button>
+    <button type="button" data-action="heading" data-level="2" class="toolbar-btn" title={t('admin.editor.heading2')}>H2</button>
+    <button type="button" data-action="heading" data-level="3" class="toolbar-btn" title={t('admin.editor.heading3')}>H3</button>
+    
+    <div class="w-px h-6 bg-gray-300 mx-1"></div>
+    
+    <!-- List buttons -->
+    <button type="button" data-action="bulletList" class="toolbar-btn" title={t('admin.editor.bulletList')}>
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+        <path d="M4 6a2 2 0 100-4 2 2 0 000 4zM6 8H2v2h4V8zM4 14a2 2 0 100-4 2 2 0 000 4zM6 16H2v2h4v-2zM10 4h8v2h-8V4zM10 8h8v2h-8V8zM10 12h8v2h-8v-2zM10 16h8v2h-8v-2z"/>
+      </svg>
+    </button>
+    <button type="button" data-action="orderedList" class="toolbar-btn" title={t('admin.editor.orderedList')}>
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+        <path d="M3 4h1v1H3V4zM3 7h1v1H3V7zM3 10h1v1H3v-1zM3 13h1v1H3v-1zM6 4h12v1H6V4zM6 7h12v1H6V7zM6 10h12v1H6v-1zM6 13h12v1H6v-1z"/>
+      </svg>
+    </button>
+    
+    <div class="w-px h-6 bg-gray-300 mx-1"></div>
+    
+    <!-- Link and image buttons -->
+    <button type="button" data-action="link" class="toolbar-btn" title={t('admin.editor.addLink')}>
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+        <path d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5 5a2 2 0 012.828 0 1 1 0 101.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z"/>
+      </svg>
+    </button>
+    <button type="button" data-action="image" class="toolbar-btn" title={t('admin.editor.addImage')}>
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+        <path fill-rule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clip-rule="evenodd"/>
+      </svg>
+    </button>
+    
+    <button type="button" data-action="embed" class="toolbar-btn" title={t('admin.editor.addEmbed')}>
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+        <path fill-rule="evenodd" d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm6.5 1.5v5l4-2.5-4-2.5z" clip-rule="evenodd"/>
+      </svg>
+    </button>
+
+    <div class="w-px h-6 bg-gray-300 mx-1"></div>
+    
+    <!-- Alignment buttons -->
+    <button type="button" data-action="textAlign" data-alignment="left" class="toolbar-btn" title={t('admin.editor.alignLeft')}>
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+        <path d="M2 4h16v2H2V4zM2 8h10v2H2V8zM2 12h16v2H2v-2zM2 16h10v2H2v-2z"/>
+      </svg>
+    </button>
+    <button type="button" data-action="textAlign" data-alignment="center" class="toolbar-btn" title={t('admin.editor.alignCenter')}>
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+        <path d="M2 4h16v2H2V4zM5 8h10v2H5V8zM2 12h16v2H2v-2zM5 16h10v2H5v-2z"/>
+      </svg>
+    </button>
+    <button type="button" data-action="textAlign" data-alignment="right" class="toolbar-btn" title={t('admin.editor.alignRight')}>
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+        <path d="M2 4h16v2H2V4zM8 8h10v2H8V8zM2 12h16v2H2v-2zM8 16h10v2H8v-2z"/>
+      </svg>
+    </button>
+  </div>
+  
+  <div 
+    id={id}
+    class="editor-content min-h-[300px] p-4 border border-t-0 border-gray-200 rounded-b-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent prose prose-sm max-w-none"
+    contenteditable="true"
+    data-placeholder={t('admin.editor.placeholder')}
+  >
+  </div>
+  
+  <textarea name={name} id={`${id}-input`} class="hidden" set:html={content}></textarea>
+</div>
+
+<style>
+  /* Astro scopes this <style> into its own CSS module, so Tailwind v4 needs an
+     explicit @reference to resolve @apply against the project theme. */
+  @reference "../../styles/global.css";
+
+  .toolbar-btn {
+    @apply px-2 py-1 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded transition-colors duration-150 flex items-center justify-center min-w-[28px] h-7;
+  }
+  
+  .toolbar-btn.active {
+    @apply bg-blue-100 text-blue-700;
+  }
+  
+  .editor-content:empty:before {
+    content: attr(data-placeholder);
+    @apply text-gray-400 pointer-events-none;
+  }
+  
+  .editor-content:focus:before {
+    content: none;
+  }
+  
+  .editor-content h1 {
+    @apply text-2xl font-bold mt-6 mb-4;
+  }
+  
+  .editor-content h2 {
+    @apply text-xl font-bold mt-5 mb-3;
+  }
+  
+  .editor-content h3 {
+    @apply text-lg font-bold mt-4 mb-2;
+  }
+  
+  .editor-content p {
+    @apply mb-3;
+  }
+  
+  .editor-content ul, .editor-content ol {
+    @apply ml-6 mb-3;
+  }
+  
+  .editor-content li {
+    @apply mb-1;
+  }
+  
+  .editor-content a {
+    @apply text-blue-600 hover:text-blue-800 underline;
+  }
+  
+  .editor-content img {
+    @apply max-w-full h-auto rounded-lg shadow-sm;
+  }
+  
+  .editor-content blockquote {
+    @apply border-l-4 border-gray-300 pl-4 italic text-gray-600 my-4;
+  }
+</style>
+
+<script>
+  // In THIS script's scope. An import in the frontmatter is a different module
+  // and would leave the call below undefined at runtime — the shape that has
+  // cost seven bugs in this branch, and the one tests/shared-lib.test.mjs now
+  // checks in both directions.
+  import { syncEditorSurface } from '../../lib/editor-insert';
+
+  // NO `// @ts-nocheck` any more. It was the first line here, and adding the
+  // import pushed it down and turned the checker back on — which reported 43
+  // things and nothing about the actual bug. The file is typed instead: an
+  // unchecked editor script is exactly where a wrong-scope import lives for a
+  // week without anybody noticing.
+  class RichTextEditor {
+    element: HTMLElement;
+    content: HTMLElement;
+    textarea: HTMLTextAreaElement;
+    toolbar: HTMLElement;
+
+    constructor(element: HTMLElement) {
+      this.element = element;
+      this.content = element.querySelector('.editor-content') as HTMLElement;
+      this.textarea = element.querySelector('textarea') as HTMLTextAreaElement;
+      this.toolbar = element.querySelector('.editor-toolbar') as HTMLElement;
+      
+      this.init();
+    }
+    
+    init() {
+      // Set initial content
+      if (this.textarea.value) {
+        this.content.innerHTML = this.textarea.value;
+      }
+      
+      // Add event listeners
+      this.toolbar.addEventListener('click', this.handleToolbarClick.bind(this));
+      this.content.addEventListener('input', this.handleContentChange.bind(this));
+      this.content.addEventListener('keydown', this.handleKeydown.bind(this));
+      
+      // Update toolbar state on selection change
+      document.addEventListener('selectionchange', this.updateToolbarState.bind(this));
+    }
+    
+    handleToolbarClick(e: Event) {
+      e.preventDefault();
+      const button = (e.target as HTMLElement)?.closest('button') as HTMLElement | null;
+      if (!button) return;
+      
+      const action = button.dataset.action;
+      
+      /**
+     * Align the block the caret is in, with an allow-listed class.
+     *
+     * This function was CALLED and never written — the buttons threw
+     * ReferenceError on every click, silently, because nothing else in the
+     * handler ran afterwards either. An audit found it.
+     *
+     * A class rather than execCommand: `justifyCenter` emits
+     * `style="text-align:center"`, which the sanitizer strips on save, so
+     * alignment appeared to work in the editor and was destroyed at the moment
+     * the author pressed Save. `ab-align-*` is generated into the sanitizer's
+     * allow-list from the section vocabulary, so it survives.
+     *
+     * The three are mutually exclusive, so the other two are removed first;
+     * clicking the current alignment again clears it, which is how every
+     * alignment control anyone has used behaves.
+     */
+    function applyAlignment(surface: HTMLElement, alignment: string) {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return;
+      let node: Node | null = sel.getRangeAt(0).startContainer;
+      if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+      // Walk to the nearest BLOCK inside the editor. Aligning a <strong> does
+      // nothing visible and leaves a class on an inline element.
+      const BLOCKS = new Set(['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'BLOCKQUOTE', 'FIGURE', 'DIV']);
+      while (node && node !== surface && !BLOCKS.has(node.nodeName)) node = node.parentNode;
+      if (!node || node === surface) return;
+      const block = node as HTMLElement;
+
+      const want = `ab-align-${alignment}`;
+      const had = block.classList.contains(want);
+      for (const a of ['left', 'center', 'right']) block.classList.remove(`ab-align-${a}`);
+      if (!had) block.classList.add(want);
+      // The hidden textarea is what saves — see lib/editor-insert.ts.
+      syncEditorSurface(surface);
+    }
+
+    switch (action) {
+        case 'bold':
+          document.execCommand('bold');
+          break;
+        case 'italic':
+          document.execCommand('italic');
+          break;
+        case 'underline':
+          document.execCommand('underline');
+          break;
+        case 'heading':
+          const level = button.dataset.level;
+          document.execCommand('formatBlock', false, `h${level}`);
+          break;
+        case 'bulletList':
+          document.execCommand('insertUnorderedList');
+          break;
+        case 'orderedList':
+          document.execCommand('insertOrderedList');
+          break;
+        case 'link':
+          this.insertLink();
+          break;
+        case 'image':
+          this.insertImage();
+          break;
+        case 'embed':
+          this.insertEmbed();
+          break;
+        case 'textAlign':
+          const alignment = button.dataset.alignment;
+          // `execCommand('justifyCenter')` emits style="text-align:center" (or a
+          // legacy align attribute), and the sanitizer strips BOTH on save. So
+          // alignment appeared to work in the editor and was silently destroyed
+          // the moment the author pressed Save.
+          //
+          // Emit an allow-listed class instead. `ab-` is the project's one-way
+          // prefix for content classes, and these two are the first entries of
+          // the strict class allow-list the theming work will build.
+          applyAlignment(this.content, alignment ?? 'left');
+          break;
+      }
+      
+      this.content.focus();
+      this.updateContent();
+    }
+    
+    insertLink() {
+      const url = prompt((window as any).t('admin.editor.linkPrompt'));
+      if (url) {
+        document.execCommand('createLink', false, url);
+      }
+    }
+    
+    insertImage() {
+      const url = prompt((window as any).t('admin.editor.imagePrompt'));
+      if (url) {
+        document.execCommand('insertImage', false, url);
+      }
+    }
+    
+    /**
+     * Insert a privacy-facade embed (C-44).
+     *
+     * What goes into the document is an inert PLACEHOLDER, not an iframe — the
+     * sanitizer has no `iframe` in its allow-list and `disallowedTagsMode` is
+     * `discard`, so an iframe pasted here is destroyed on save. The URL is
+     * parsed to a provider and an id, and the frame URL is rebuilt from that
+     * pair when the page renders.
+     *
+     * A refused host (Instagram, X, TikTok…) says WHY rather than doing
+     * nothing: an author who pastes one and sees no change assumes a bug.
+     */
+    async insertEmbed() {
+      const raw = prompt((window as any).t('admin.editor.embedPrompt'));
+      if (!raw) return;
+      const { parseEmbedUrl, embedRefusal, embedPlaceholderHtml } = await import('../../lib/embeds');
+      const refusal = embedRefusal(raw);
+      if (refusal) { alert(refusal); return; }
+      const parsed = parseEmbedUrl(raw);
+      if (!parsed) { alert((window as any).t('admin.editor.embedUnknown')); return; }
+      const html = embedPlaceholderHtml(parsed);
+      if (!html) { alert((window as any).t('admin.editor.embedUnknown')); return; }
+      this.content.focus();
+      document.execCommand('insertHTML', false, html + '<p><br></p>');
+      this.updateContent();
+    }
+
+    handleContentChange() {
+      this.updateContent();
+    }
+    
+    handleKeydown(e: KeyboardEvent) {
+      // Handle keyboard shortcuts
+      if (e.ctrlKey || e.metaKey) {
+        switch (e.key) {
+          case 'b':
+            e.preventDefault();
+            document.execCommand('bold');
+            this.updateContent();
+            break;
+          case 'i':
+            e.preventDefault();
+            document.execCommand('italic');
+            this.updateContent();
+            break;
+          case 'u':
+            e.preventDefault();
+            document.execCommand('underline');
+            this.updateContent();
+            break;
+        }
+      }
+    }
+    
+    updateContent() {
+      this.textarea.value = this.content.innerHTML;
+    }
+    
+    updateToolbarState() {
+      if (!this.content.contains(document.activeElement)) return;
+      
+      // Update button states based on current selection
+      const buttons = this.toolbar.querySelectorAll('button');
+      buttons.forEach((button: HTMLElement) => {
+        const action = button.dataset.action;
+        let isActive = false;
+        
+        switch (action) {
+          case 'bold':
+            isActive = document.queryCommandState('bold');
+            break;
+          case 'italic':
+            isActive = document.queryCommandState('italic');
+            break;
+          case 'underline':
+            isActive = document.queryCommandState('underline');
+            break;
+        }
+        
+        button.classList.toggle('active', isActive);
+      });
+    }
+  }
+  
+  // Initialize all rich text editors
+  document.addEventListener('DOMContentLoaded', () => {
+    const editors = document.querySelectorAll('.rich-text-editor');
+    editors.forEach((editor) => new RichTextEditor(editor as HTMLElement));
+  });
+</script>

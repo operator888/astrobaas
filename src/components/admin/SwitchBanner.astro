@@ -1,0 +1,65 @@
+---
+/**
+ * "You are acting as …" (C-141).
+ *
+ * Rendered by AdminLayout on every admin screen. It is deliberately loud: the
+ * point of user switching is that the admin sees exactly what the other person
+ * sees, which means nothing else on the page says who they are.
+ *
+ * Whether a switch is active is decided HERE, from the signed cookie, rather
+ * than passed down as a prop — a prop would have to be threaded through every
+ * page that uses this layout, and the one that forgot it would render an
+ * impersonation with no banner at all.
+ */
+import { SWITCH_COOKIE, verifySwitchBack } from '../../lib/auth';
+import { LocalDB } from '../../lib/localdb';
+
+const back = verifySwitchBack(Astro.cookies.get(SWITCH_COOKIE)?.value);
+
+// The names, so the banner reads as a sentence rather than as two ids. Best
+// effort: a lookup that fails must not take the banner down with it, because
+// the banner is the safety mechanism.
+let adminName = '';
+let actingName = '';
+if (back) {
+  try {
+    await LocalDB.init();
+    adminName = (await LocalDB.getUser(back.uid))?.name ?? '';
+    const me = Astro.locals.user?.id ? await LocalDB.getUser(Astro.locals.user.id) : null;
+    actingName = me?.name || me?.email || '';
+  } catch {
+    /* names are a nicety; the warning is not */
+  }
+}
+---
+
+{back && (
+  <div class="bg-amber-500 text-amber-950" role="status" data-switch-banner>
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2 flex flex-wrap items-center justify-between gap-3">
+      <p class="text-sm font-medium m-0">
+        You are acting as <strong>{actingName || 'another user'}</strong>.
+        Everything you do is recorded as them{adminName ? `, not as ${adminName}` : ''}.
+      </p>
+      <button type="button" id="switch-back"
+        class="px-3 py-1 bg-amber-950 text-amber-50 rounded-lg text-sm font-medium hover:bg-amber-900">
+        Back to my account
+      </button>
+    </div>
+  </div>
+)}
+
+<script>
+  document.getElementById('switch-back')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    button.disabled = true;
+    const csrf = decodeURIComponent((document.cookie.match(/(?:^|; )astrobaas_csrf=([^;]*)/) ?? [])[1] ?? '');
+    const res = await fetch('/api/users/switch', {
+      method: 'DELETE',
+      headers: { 'X-CSRF-Token': csrf },
+    });
+    // Reload either way: on success the session cookie is now the admin's, and
+    // on failure the server has cleared both cookies and the login page is
+    // where this should land.
+    window.location.href = res.ok ? '/admin/users' : '/login';
+  });
+</script>

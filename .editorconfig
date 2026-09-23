@@ -1,0 +1,19 @@
+# One indentation contract for every editor, so a contributor's first diff is
+# their change and not their editor's opinion about tabs.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.md]
+# Two trailing spaces are a line break in Markdown; trimming them silently
+# reflows a paragraph.
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab

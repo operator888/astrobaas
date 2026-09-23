@@ -1,0 +1,33 @@
+---
+/**
+ * The article's terms, as links to their archives (C-128).
+ *
+ * ## Rendered by the ROUTE, not by the article component
+ *
+ * The first version put these inside the built-in `PostArticle` — and the
+ * active theme overrides that slot, so on the install this was tested against
+ * they never appeared at all. Three `PostArticle` implementations exist and a
+ * theme can supply a fourth; asking each to remember a feature is how one ends
+ * up without it.
+ *
+ * This is the same conclusion the print button reached, for the same reason,
+ * two commits earlier. Renders nothing when there is nothing to show, so a
+ * theme that has no taxonomies sees no empty box.
+ */
+import { postTermLinks } from '../../lib/taxonomy-links';
+
+const { post } = Astro.props;
+const termLinks = await postTermLinks(post);
+---
+
+{termLinks.length > 0 && (
+  <div class="no-print max-w-4xl mx-auto px-4 pb-2 flex flex-wrap items-center gap-2">
+    {termLinks.map((t) => (
+      <a href={t.href}
+        class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gray-100 text-sm text-gray-700 hover:bg-gray-200 transition-colors duration-200">
+        <span class="text-xs uppercase tracking-wide text-gray-500">{t.taxonomy}</span>
+        {t.name}
+      </a>
+    ))}
+  </div>
+)}

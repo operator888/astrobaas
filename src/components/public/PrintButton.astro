@@ -1,0 +1,62 @@
+---
+/**
+ * "Print / Save as PDF" (C-152, second half).
+ *
+ * The print STYLESHEET already ships and applies to every article. Nothing told
+ * a reader that, which is the whole gap: a feature nobody can find has not
+ * shipped. This is the affordance.
+ *
+ * It is the browser's own print dialogue, NOT a server-rendered PDF, and for
+ * an ARTICLE that is still the right answer: laying out flowing text, headings
+ * and images on paper is what a browser does, with the reader's own paper size
+ * and margins, and the alternative used to mean a headless Chromium at roughly
+ * 300 MB on every self-host. The dialogue's "Save as PDF" destination is the
+ * export, and it is why the button says so.
+ *
+ * A RECEIPT is the exception, and it is now generated server-side
+ * (`src/lib/commerce/receipt-pdf.ts`): it is a fixed table rather than flowing
+ * prose, so it needs no browser to lay out — and unlike an article it is a file
+ * somebody keeps, files and attaches, which "open this link and press print"
+ * does not produce.
+ *
+ * Rendered by the ROUTE rather than by the article component, so a theme that
+ * replaces `PostArticle` still gets it. Three theme implementations exist and
+ * only one of them had a share footer; asking each to remember a button is how
+ * one of them ends up without it.
+ */
+/**
+ * The label, in the CONTENT locale.
+ *
+ * The prop existed and NOTHING EVER PASSED IT — a write-only interface, and
+ * every Greek and German article carried an English button. Public strings key
+ * on `locals.locale` (the URL's content locale), never on `locals.t`, which is
+ * the staff member's own admin language: two visitors must get the same bytes
+ * for the same address.
+ */
+const { label = publicStrings(Astro.locals.locale).print } = Astro.props;
+import { publicStrings } from '../../lib/i18n/public-strings';
+---
+
+<div class="no-print max-w-4xl mx-auto px-4 pt-6 flex justify-end">
+  <button
+    type="button"
+    data-print-article
+    class="inline-flex items-center gap-2 text-sm font-medium text-gray-600 hover:text-blue-600 transition-colors duration-200"
+  >
+    {/* Presentation attributes, not inline style: the CSP has no
+        `unsafe-inline`, so a style="" attribute is dropped. */}
+    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6v-8z" />
+    </svg>
+    {label}
+  </button>
+</div>
+
+<script>
+  // No inline handler — the CSP forbids one. Delegated, so it keeps working if
+  // a view-transition swaps the article without reloading the page.
+  document.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('[data-print-article]')) window.print();
+  });
+</script>

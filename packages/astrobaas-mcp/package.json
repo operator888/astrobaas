@@ -1,0 +1,34 @@
+{
+  "name": "astrobaas-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "description": "Model Context Protocol server for an AstroBaaS backend — lets an AI agent read and write its content. Zero dependencies, runs under npx.",
+  "keywords": [
+    "astrobaas",
+    "mcp",
+    "model-context-protocol",
+    "cms",
+    "headless-cms"
+  ],
+  "author": "Theodor Dimitriou",
+  "homepage": "https://github.com/operator888/astrobaas/blob/main/INTEGRATION.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/operator888/astrobaas.git",
+    "directory": "packages/astrobaas-mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/operator888/astrobaas/issues"
+  },
+  "bin": {
+    "astrobaas-mcp": "astrobaas-mcp.mjs"
+  },
+  "files": [
+    "astrobaas-mcp.mjs",
+    "lib/api-client.mjs"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

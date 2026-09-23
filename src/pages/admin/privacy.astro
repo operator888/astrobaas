@@ -1,0 +1,345 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { canOpenAdminPage } from '../../lib/admin-access';
+import CookieTable from '../../components/public/CookieTable.astro';
+import { LocalDB } from '../../lib/localdb';
+import { buildCookieDeclaration } from '../../lib/cookie-declaration';
+
+/**
+ * Answering a data request.
+ *
+ * Somebody emails the shop asking what it holds about them, or asking for it
+ * to be deleted, and the shop has a month to answer. Doing it by hand means
+ * opening five screens and hoping none were forgotten — which is how a
+ * "complete" answer turns out to have missed the newsletter list.
+ *
+ * The screen is built around looking BEFORE acting: the export is one click,
+ * erasure needs the record on screen first and then a typed confirmation. An
+ * erasure cannot be undone and a mistyped address erases the wrong person.
+ */
+const user = Astro.locals.user;
+if (!canOpenAdminPage('/admin/privacy', user?.role)) {
+  return Astro.redirect('/admin');
+}
+
+// The SAME component the public page renders, from the same builder. An
+// operator reviewing a declaration that differs from the published one is
+// reviewing nothing — and this is the screen where they would sign it off.
+await LocalDB.init();
+const cookieDeclaration = buildCookieDeclaration(
+  (await LocalDB.getSettings()) as { key: string; value: unknown }[],
+);
+---
+
+<AdminLayout title="Data requests">
+  <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">Data requests</h1>
+    <p class="text-sm text-gray-500 mb-6">
+      Look up everything this site holds about one email address, hand it over, or erase it.
+      Confirm who you are dealing with through a channel you trust before you act — this
+      screen does not verify identity, and it cannot.
+    </p>
+
+    <form id="lookup-form" class="bg-white border border-gray-200 rounded-xl p-6 mb-6 flex flex-wrap items-end gap-3">
+      <div class="flex-1 min-w-64">
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="subject-email">Email address</label>
+        <input id="subject-email" type="email" required placeholder="someone@example.com"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" />
+      </div>
+      <button type="submit" id="lookup-btn"
+        class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50">
+        Look it up
+      </button>
+      <span id="lookup-status" class="text-sm text-gray-500"></span>
+      <p id="lookup-error" class="w-full text-sm text-red-600 m-0"></p>
+    </form>
+
+    <section id="result" class="hidden bg-white border border-gray-200 rounded-xl p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-1">What we hold</h2>
+      <p id="result-subject" class="text-sm text-gray-500 mb-4"></p>
+      <dl id="result-counts" class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6"></dl>
+
+      <div class="flex flex-wrap items-center gap-3 border-t border-gray-200 pt-5">
+        <button type="button" id="download-btn"
+          class="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 font-medium">
+          Download as JSON
+        </button>
+        <span class="text-xs text-gray-400">Send this file to the person who asked.</span>
+      </div>
+    </section>
+
+    <section class="bg-white border border-gray-200 rounded-xl p-6 mb-6">
+      <div class="flex items-start justify-between gap-4 mb-4">
+        <div>
+          <h2 class="text-lg font-semibold text-gray-900 mb-1">Cookie declaration</h2>
+          <p class="text-sm text-gray-500">
+            Exactly what visitors are shown at <a href="/cookies" class="text-blue-600 hover:underline">/cookies</a>,
+            and what <span class="font-mono text-xs">GET /api/consent/cookies</span> returns to a
+            decoupled storefront. It follows your analytics settings, so a tool you switch off
+            disappears from it on the next request.
+          </p>
+        </div>
+      </div>
+      <CookieTable declaration={cookieDeclaration} headingClass="sr-only" />
+    </section>
+
+    <section class="bg-white border border-gray-200 rounded-xl p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-1">Consent receipts</h2>
+      <p class="text-sm text-gray-500 mb-4">
+        Proof that a consent decision was made, holding nothing about who made it — the
+        categories, the version of the text, and the time, under an opaque id that lives in
+        that visitor's own cookie. If somebody quotes their receipt, look it up here.
+      </p>
+      <div class="flex flex-wrap items-end gap-3 mb-4">
+        <div class="flex-1 min-w-64">
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="receipt-id">Receipt id</label>
+          <input id="receipt-id" placeholder="optional — leave empty for the most recent"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm" />
+        </div>
+        <button type="button" id="receipt-btn"
+          class="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 font-medium">
+          Look up
+        </button>
+      </div>
+      <p id="receipt-error" class="text-sm text-red-600 m-0 mb-2"></p>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="text-left text-gray-500">
+            <tr>
+              <th class="py-2 pr-4 font-medium">When</th>
+              <th class="py-2 pr-4 font-medium">Granted</th>
+              <th class="py-2 pr-4 font-medium">Text version</th>
+              <th class="py-2 font-medium">Receipt</th>
+            </tr>
+          </thead>
+          <tbody id="receipt-rows" class="text-gray-700"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="erase-box" class="hidden bg-white border border-red-200 rounded-xl p-6">
+      <h2 class="text-lg font-semibold text-red-800 mb-1">Erase this person</h2>
+      <ul class="text-sm text-gray-700 list-disc pl-5 mb-4 space-y-1">
+        <li>The customer record, contact messages, newsletter subscription and form submissions
+          are <strong>deleted</strong>.</li>
+        <li>Orders are <strong>kept, with the identifying fields removed</strong> — the totals and
+          line items stay so your accounts still add up, and so you can still defend a chargeback
+          or a warranty claim. A shop must be able to produce its books, and the right to erasure
+          does not override that.</li>
+        <li>Those orders are <strong>pseudonymised, not anonymous</strong>: the payment reference
+          still resolves to the buyer inside your payment provider. They are still personal data
+          and still fall under your retention policy — do not describe them as anonymous.</li>
+        <li>You will <strong>no longer be able to match this person to their past orders</strong>,
+          and you cannot re-send their confirmation. That is what the request asks for.</li>
+        <li><strong>Prescriptions are kept.</strong> A γνωμάτευση stored on an order line is
+          health data, and it stays: an optician has a professional obligation to keep the
+          practitioner's prescription, and it is the record that settles a later dispute about a
+          remake — Article 17(3)(b) does not require erasing what you are obliged to retain.
+          Everything identifying is gone by then, so what remains is a measurement against an
+          order number. When your retention period has passed, delete one from the order in
+          <strong>Orders</strong>; that is a separate, deliberate, audited action.</li>
+        <li>A dated record of this erasure — the address, who ran it and what was removed — is
+          <strong>kept in the audit log</strong>. Article 5(2) requires you to be able to
+          demonstrate that you acted on the request.</li>
+        <li>A staff account with this address is <strong>never</strong> removed automatically.</li>
+      </ul>
+      <p class="text-sm text-gray-700 mb-3">
+        This cannot be undone. Type <code class="font-mono bg-gray-100 px-1 rounded">ERASE</code> to confirm.
+      </p>
+      <div class="flex flex-wrap items-center gap-3">
+        <input id="erase-confirm" placeholder="ERASE"
+          class="px-3 py-2 border border-gray-300 rounded-lg w-40 font-mono" />
+        <button type="button" id="erase-btn"
+          class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium disabled:opacity-50">
+          Erase permanently
+        </button>
+        <span id="erase-status" class="text-sm text-gray-500"></span>
+      </div>
+      <p id="erase-error" class="text-sm text-red-600 m-0 mt-2"></p>
+      <div id="erase-report" class="hidden mt-4 border-t border-gray-200 pt-4">
+        <h3 class="text-sm font-semibold text-gray-900 mb-2">Done</h3>
+        <ul id="erase-report-list" class="text-sm text-gray-700 list-disc pl-5 space-y-1"></ul>
+      </div>
+    </section>
+  </div>
+</AdminLayout>
+
+<script>
+  (() => {
+    const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+    const form = $<HTMLFormElement>('lookup-form');
+    if (!form) return;
+
+    let current: any = null;
+
+    const csrf = () =>
+      (window as any).__ASTROBAAS__?.csrf
+      || document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+      || '';
+
+    function count(dl: HTMLElement, label: string, n: number | string) {
+      const wrap = document.createElement('div');
+      const dt = document.createElement('dt');
+      dt.className = 'text-xs text-gray-500';
+      dt.textContent = label;
+      const dd = document.createElement('dd');
+      dd.className = 'text-xl font-semibold text-gray-900';
+      dd.textContent = String(n);
+      wrap.append(dt, dd);
+      dl.appendChild(wrap);
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = $<HTMLInputElement>('subject-email').value.trim();
+      $<HTMLElement>('lookup-error').textContent = '';
+      $<HTMLElement>('lookup-status').textContent = 'Looking…';
+      $<HTMLButtonElement>('lookup-btn').disabled = true;
+      try {
+        const res = await fetch(`/api/privacy/subject?email=${encodeURIComponent(email)}`, {
+          headers: { Accept: 'application/json' },
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          $<HTMLElement>('lookup-error').textContent =
+            json?.error?.message || json?.message || `Lookup failed (${res.status})`;
+          return;
+        }
+        current = json.data;
+        const counts = $<HTMLElement>('result-counts');
+        counts.replaceChildren();
+        count(counts, 'Orders', current.orders.length);
+        count(counts, 'Messages', current.messages.length);
+        count(counts, 'Form submissions',
+          current.submissions.reduce((n: number, g: any) => n + g.entries.length, 0));
+        count(counts, 'Newsletter', current.newsletter ? 'yes' : 'no');
+        $<HTMLElement>('result-subject').textContent =
+          `${current.email} — ${current.customer ? 'has a customer record' : 'no customer record'}`
+          + `${current.account ? ', and a staff account' : ''}`;
+        $<HTMLElement>('result').classList.remove('hidden');
+        $<HTMLElement>('erase-box').classList.remove('hidden');
+        $<HTMLElement>('erase-report').classList.add('hidden');
+      } catch (err) {
+        $<HTMLElement>('lookup-error').textContent = (err as Error).message || 'Could not reach the server';
+      } finally {
+        $<HTMLElement>('lookup-status').textContent = '';
+        $<HTMLButtonElement>('lookup-btn').disabled = false;
+      }
+    });
+
+    $<HTMLButtonElement>('download-btn').addEventListener('click', () => {
+      if (!current) return;
+      // Built in the browser from what is already on screen: nothing is written
+      // to the server, so there is no file sitting in an uploads directory
+      // waiting to be found.
+      const blob = new Blob([JSON.stringify(current, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `data-request-${current.email.replace(/[^a-z0-9]+/gi, '-')}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+
+    /* ---- consent receipts ---- */
+    async function loadReceipts() {
+      const id = $<HTMLInputElement>('receipt-id').value.trim();
+      const rows = $<HTMLElement>('receipt-rows');
+      $<HTMLElement>('receipt-error').textContent = '';
+      try {
+        const res = await fetch(`/api/consent/receipt${id ? `?id=${encodeURIComponent(id)}` : '?limit=25'}`, {
+          headers: { Accept: 'application/json' },
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          rows.replaceChildren();
+          $<HTMLElement>('receipt-error').textContent =
+            json?.error?.message || (res.status === 404 ? 'No receipt with that id.' : `Lookup failed (${res.status})`);
+          return;
+        }
+        const list = Array.isArray(json.data) ? json.data : [json.data];
+        rows.replaceChildren();
+        if (list.length === 0) {
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 4;
+          td.className = 'py-3 text-gray-400';
+          td.textContent = 'No consent decisions recorded yet.';
+          tr.appendChild(td);
+          rows.appendChild(tr);
+          return;
+        }
+        for (const r of list) {
+          const tr = document.createElement('tr');
+          tr.className = 'border-t border-gray-100';
+          const cell = (text: string, cls = '') => {
+            const td = document.createElement('td');
+            td.className = `py-2 pr-4 ${cls}`;
+            td.textContent = text;
+            return td;
+          };
+          tr.append(
+            cell(new Date(r.created_at).toLocaleString()),
+            cell((r.granted ?? []).join(', ')),
+            cell(String(r.version)),
+            cell(r.id, 'font-mono text-xs text-gray-500'),
+          );
+          rows.appendChild(tr);
+        }
+      } catch (err) {
+        $<HTMLElement>('receipt-error').textContent = (err as Error).message || 'Could not reach the server';
+      }
+    }
+    $<HTMLButtonElement>('receipt-btn').addEventListener('click', () => void loadReceipts());
+    void loadReceipts();
+
+    $<HTMLButtonElement>('erase-btn').addEventListener('click', async () => {
+      if (!current) return;
+      const typed = $<HTMLInputElement>('erase-confirm').value.trim();
+      $<HTMLElement>('erase-error').textContent = '';
+      if (typed !== 'ERASE') {
+        $<HTMLElement>('erase-error').textContent = 'Type ERASE to confirm.';
+        return;
+      }
+      $<HTMLButtonElement>('erase-btn').disabled = true;
+      $<HTMLElement>('erase-status').textContent = 'Erasing…';
+      try {
+        const res = await fetch('/api/privacy/subject', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            'X-CSRF-Token': csrf(),
+          },
+          body: JSON.stringify({ email: current.email, confirm: 'ERASE' }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          $<HTMLElement>('erase-error').textContent =
+            json?.error?.message || json?.message || `Erasure failed (${res.status})`;
+          return;
+        }
+        const r = json.data;
+        const list = $<HTMLElement>('erase-report-list');
+        list.replaceChildren();
+        const line = (text: string) => {
+          const li = document.createElement('li');
+          li.textContent = text;
+          list.appendChild(li);
+        };
+        line(`${r.ordersAnonymised} order(s) kept, identifying fields removed`);
+        line(`${r.deleted.customers} customer record(s) deleted`);
+        line(`${r.deleted.messages} message(s) deleted`);
+        line(`${r.deleted.newsletter} newsletter subscription(s) deleted`);
+        line(`${r.deleted.submissions} form submission(s) deleted`);
+        for (const note of r.notes ?? []) line(note);
+        $<HTMLElement>('erase-report').classList.remove('hidden');
+        $<HTMLInputElement>('erase-confirm').value = '';
+      } catch (err) {
+        $<HTMLElement>('erase-error').textContent = (err as Error).message || 'Could not reach the server';
+      } finally {
+        $<HTMLElement>('erase-status').textContent = '';
+        $<HTMLButtonElement>('erase-btn').disabled = false;
+      }
+    });
+  })();
+</script>

@@ -1,0 +1,17 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import MediaLibrary from '../../components/admin/MediaLibrary.astro';
+
+const t = Astro.locals.t;
+---
+
+<AdminLayout title={t('admin.media.title')}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="mb-8">
+      <h1 class="text-3xl font-bold text-gray-900">{t('admin.media.title')}</h1>
+      <p class="text-gray-600 mt-2">{t('admin.media.subtitle')}</p>
+    </div>
+    
+    <MediaLibrary />
+  </div>
+</AdminLayout>

@@ -1,0 +1,13 @@
+{
+  "extends": "astro/tsconfigs/strict",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "astrobaas/core": ["src/core/index.ts"],
+      "astrobaas/plugins": ["src/plugins/index.ts"],
+      "astrobaas/client": ["src/client/index.ts"]
+    }
+  },
+  "include": [".astro/types.d.ts", "src/**/*"],
+  "exclude": ["dist", "scripts", "tests"]
+}

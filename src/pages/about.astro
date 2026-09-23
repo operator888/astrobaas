@@ -1,0 +1,97 @@
+---
+import PublicLayout from '../layouts/PublicLayout.astro';
+---
+
+<PublicLayout title="About" description="Learn about AstroBaaS, our mission, and how it's built.">
+  <!-- Hero -->
+  <section class="bg-gradient-to-br from-blue-50 via-white to-purple-50 py-20">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center">
+        <h1 class="text-4xl md:text-5xl font-bold text-gray-900 mb-6">About AstroBaaS</h1>
+        <p class="text-xl text-gray-600 max-w-3xl mx-auto leading-relaxed">
+          We're on a mission to make content management simple, fast, and enjoyable
+          for developers and content creators.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Mission -->
+  <section class="py-20 bg-white">
+    <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
+      <h2 class="text-3xl md:text-4xl font-bold text-gray-900 mb-6">Our Mission</h2>
+      <p class="text-lg text-gray-600 mb-6 leading-relaxed">
+        AstroBaaS exists to prove that content management can be powerful yet simple.
+        We give developers and content creators the tools to build fast, secure
+        websites without the complexity of traditional CMS platforms.
+      </p>
+      <p class="text-lg text-gray-600 leading-relaxed">
+        Built on modern web technologies like Astro, it delivers strong performance,
+        a small attack surface, and a developer experience that scales with your needs.
+      </p>
+    </div>
+  </section>
+
+  <!-- Values -->
+  <section class="py-20 bg-gray-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-16">
+        <h2 class="text-3xl md:text-4xl font-bold text-gray-900 mb-4">Our Values</h2>
+        <p class="text-xl text-gray-600 max-w-2xl mx-auto">
+          The principles that guide everything we do.
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+        <div class="text-center">
+          <div class="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-6">
+            <svg class="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+            </svg>
+          </div>
+          <h3 class="text-xl font-semibold text-gray-900 mb-3">Performance First</h3>
+          <p class="text-gray-600">
+            We optimize every layer for speed, so your sites render instantly with zero JS by default.
+          </p>
+        </div>
+
+        <div class="text-center">
+          <div class="w-16 h-16 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-6">
+            <svg class="w-8 h-8 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+          </div>
+          <h3 class="text-xl font-semibold text-gray-900 mb-3">Secure by Design</h3>
+          <p class="text-gray-600">
+            Authentication, CSRF, sanitization, and security headers are built in, not bolted on.
+          </p>
+        </div>
+
+        <div class="text-center">
+          <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
+            <svg class="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+            </svg>
+          </div>
+          <h3 class="text-xl font-semibold text-gray-900 mb-3">Developer Friendly</h3>
+          <p class="text-gray-600">
+            Built by developers, for developers — one process, one JSON file, no lock-in.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="py-20 bg-gradient-to-r from-blue-600 to-purple-600">
+    <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+      <h2 class="text-3xl md:text-4xl font-bold text-white mb-6">Ready to build something fast?</h2>
+      <p class="text-xl text-blue-100 mb-8 leading-relaxed">
+        Experience a content management system that gets out of your way.
+      </p>
+      <a href="/admin" class="inline-flex items-center px-8 py-4 bg-white text-blue-600 font-semibold rounded-lg shadow-lg hover:shadow-xl transition-all duration-200 transform hover:-translate-y-1">
+        Get Started
+      </a>
+    </div>
+  </section>
+</PublicLayout>

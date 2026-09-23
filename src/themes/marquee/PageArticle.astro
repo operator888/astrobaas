@@ -1,0 +1,23 @@
+---
+/** Marquee theme — `PageArticle` override. Pages get the poster head too. */
+import type { PageArticleProps } from '../../core/theme-slots';
+
+const { post, contentHtml, isHome } = Astro.props as PageArticleProps;
+---
+
+<article class="mq-page">
+  {!isHome && (
+    <header class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pt-12">
+      <h1 class="font-bold uppercase leading-[0.95] tracking-tight pb-6 border-b-4 ab-heading-font ab-ink ab-border-ink mq-page-title">{post.title}</h1>
+    </header>
+  )}
+  <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="prose prose-lg py-10" set:html={contentHtml} />
+  </div>
+</article>
+
+<style>
+  .mq-page-title {
+    font-size: clamp(2rem, 6vw, 4rem);
+  }
+</style>

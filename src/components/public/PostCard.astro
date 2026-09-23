@@ -1,0 +1,66 @@
+---
+/**
+ * DEFAULT `PostCard` slot — one post in a listing.
+ *
+ * This is the built-in implementation. A theme replaces it by exporting its own
+ * `PostCard` from `src/themes/<id>/`; anything it doesn't override keeps this.
+ * Extracted verbatim from the blog index so switching to slots changed no markup.
+ */
+import type { PostCardProps } from '../../core/theme-slots';
+import { postHref } from '../../lib/locale-links';
+
+const { post } = Astro.props as PostCardProps;
+---
+
+<article class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden hover:shadow-lg transition-all duration-300 group">
+  <div class="relative overflow-hidden">
+    <!--
+      lazy: a listing page carries a dozen of these and all but the first two are
+      below the fold. decoding=async keeps a slow decode off the main thread.
+      The height is fixed by `h-48`, so the box is reserved before the bytes
+      arrive and nothing shifts — width/height attributes would add nothing here
+      and would be WRONG, because object-cover crops to the box rather than
+      honouring the file's own aspect ratio.
+    -->
+    <img
+      src={post.image}
+      alt={post.title}
+      loading="lazy"
+      decoding="async"
+      class="w-full h-48 object-cover group-hover:scale-105 transition-transform duration-300"
+    />
+    <div class="absolute top-4 left-4">
+      <span class="bg-white/90 backdrop-blur-sm text-gray-800 text-xs font-semibold px-2.5 py-1 rounded-full">
+        {post.category}
+      </span>
+    </div>
+  </div>
+
+  <div class="p-6">
+    <h3 class="text-xl font-bold text-gray-900 mb-3 leading-tight group-hover:text-blue-600 transition-colors duration-200">
+      <a href={postHref(`/blog/${post.slug}`, post)} class="hover:text-blue-600">
+        {post.title}
+      </a>
+    </h3>
+
+    <p class="text-gray-600 mb-4 leading-relaxed">
+      {post.excerpt}
+    </p>
+
+    <div class="flex items-center justify-between text-sm">
+      <div class="flex items-center space-x-2">
+        <div class="w-6 h-6 bg-gray-300 rounded-full flex items-center justify-center">
+          <span class="text-white text-xs font-medium">
+            {post.author.split(' ').map(n => n[0]).join('')}
+          </span>
+        </div>
+        <span class="text-gray-700">{post.author}</span>
+      </div>
+      <div class="flex items-center space-x-2 text-gray-500">
+        <span>{post.date}</span>
+        <span>•</span>
+        <span>{post.readTime}</span>
+      </div>
+    </div>
+  </div>
+</article>

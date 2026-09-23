@@ -1,0 +1,56 @@
+---
+/**
+ * The built-in `Breadcrumbs` slot — a trail a reader can follow back.
+ *
+ * Presentation only. The trail is computed by the route (see
+ * `src/lib/breadcrumbs.ts`) precisely so this component cannot fetch, and so
+ * the same array feeds the BreadcrumbList structured data — what a reader
+ * sees and what a crawler is told are the same list by construction.
+ *
+ * A trail of one is not a trail: on the front door there is nowhere to go
+ * back to, and rendering a lone "Home" that links to the page you are on is
+ * noise. Fewer than two items renders nothing at all.
+ *
+ * Colours come from theme tokens, so the default trail already looks like
+ * whichever theme is active; a theme that wants a different SHAPE overrides
+ * the slot.
+ */
+import type { BreadcrumbsProps } from '../../core/theme-slots';
+import { breadcrumbLabel } from '../../lib/breadcrumbs';
+
+interface Props extends BreadcrumbsProps {}
+const { items, locale } = Astro.props;
+const trail = items ?? [];
+// The landmark speaks the reader's language too, not just the crumbs.
+const label = breadcrumbLabel(locale);
+---
+
+{trail.length >= 2 && (
+  <nav aria-label={label} class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 text-sm">
+    <ol class="flex flex-wrap items-center gap-x-2 gap-y-1">
+      {trail.map((item, i) => (
+        <li class="flex items-center gap-x-2">
+          {i > 0 && <span aria-hidden="true" class="breadcrumb-sep">›</span>}
+          {item.href && i < trail.length - 1 ? (
+            <a href={item.href} class="hover:underline underline-offset-4 breadcrumb-link">
+              {item.name}
+            </a>
+          ) : (
+            /* The current page: announced, not linked to itself. */
+            <span aria-current="page" class="breadcrumb-current">{item.name}</span>
+          )}
+        </li>
+      ))}
+    </ol>
+  </nav>
+)}
+
+<style>
+  .breadcrumb-sep,
+  .breadcrumb-link {
+    color: var(--muted-color, #6b7280);
+  }
+  .breadcrumb-current {
+    color: var(--text-color, #374151);
+  }
+</style>

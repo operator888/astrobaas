@@ -1,0 +1,142 @@
+---
+// @ts-nocheck
+import BaseLayout from './BaseLayout.astro';
+import AdminSidebar from '../components/admin/AdminSidebar.astro';
+import { catalogueHash } from '../pages/admin-i18n.js';
+import AdminHeader from '../components/admin/AdminHeader.astro';
+import SwitchBanner from '../components/admin/SwitchBanner.astro';
+import CommandPalette from '../components/admin/CommandPalette.astro';
+
+export interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description = "Admin Dashboard" } = Astro.props;
+const csrf = Astro.locals.csrf || '';
+const uiLocale = Astro.locals.uiLocale || 'en';
+const i18nHash = catalogueHash(uiLocale);
+const user = Astro.locals.user;
+---
+
+<BaseLayout title={`${title} - Admin`} description={description}>
+  <Fragment slot="head">
+    <meta name="csrf-token" content={csrf} />
+    <meta name="astrobaas-user" content={user ? JSON.stringify(user) : ''} />
+    {/* The admin's message catalogue for code that runs in the browser. About a
+        third of the admin's strings live in <script> blocks, so without this a
+        third of the interface stays English however complete the catalogues
+        are. Served with a content hash in the URL and cached immutably, so it
+        costs one request per locale per deploy rather than ~30 KB inlined into
+        every page. Loaded BEFORE the page's own scripts, which call window.t. */}
+    <script is:inline src={`/admin-i18n.js?locale=${uiLocale}&v=${i18nHash}`}></script>
+    <script>
+      // Bundled (external) script — CSP-safe, so script-src needs no
+      // 'unsafe-inline'. Hydrate the client config from meta tags instead of an
+      // inline define:vars block.
+      const meta = (n: string) => document.querySelector(`meta[name="${n}"]`)?.getAttribute('content') || '';
+      let parsedUser: unknown = null;
+      try {
+        const raw = meta('astrobaas-user');
+        parsedUser = raw ? JSON.parse(raw) : null;
+      } catch {
+        parsedUser = null;
+      }
+      window.__ASTROBAAS__ = { csrf: meta('csrf-token'), user: parsedUser as { id: string; role: string } | null };
+    </script>
+  </Fragment>
+  <div class="min-h-screen bg-gray-100 flex">
+    <!-- Sidebar -->
+    <div class="hidden lg:flex lg:flex-shrink-0">
+      <div class="flex flex-col w-64">
+        <AdminSidebar />
+      </div>
+    </div>
+    
+    <!-- Main content -->
+    <div class="flex-1 flex flex-col overflow-hidden">
+      <AdminHeader />
+      {/* On EVERY admin screen, above the content (C-141). An impersonation you
+          can forget you are in is the failure mode this prevents — the whole
+          point is that the admin sees what the other person sees, which
+          includes not obviously being themselves. */}
+      <SwitchBanner />
+      <CommandPalette />
+      <main class="flex-1 relative overflow-y-auto focus:outline-none">
+        <slot />
+      </main>
+    </div>
+  </div>
+  
+  <!-- Mobile sidebar overlay -->
+  <div id="mobile-sidebar-overlay" class="fixed inset-0 z-40 lg:hidden hidden" role="dialog" aria-modal="true" aria-label="Admin navigation">
+    <!-- The backdrop needs its own id: the close handler used to test
+         `e.target === overlay`, but every visible pixel of the backdrop is THIS
+         child element, so tapping outside the drawer never matched and never
+         closed it. -->
+    <div id="mobile-sidebar-backdrop" class="fixed inset-0 bg-gray-600 bg-opacity-75"></div>
+    <!-- `h-full` + `overflow-y-auto` because the panel had neither: on any phone
+         where the nav is taller than the viewport, every item below the fold was
+         simply unreachable — there was nothing to scroll. -->
+    <div class="relative flex flex-col max-w-xs w-full h-full bg-white overflow-y-auto overscroll-contain">
+      <div class="absolute top-0 right-0 -mr-12 pt-2">
+        <button id="close-sidebar" aria-label="Close navigation" class="ml-1 flex items-center justify-center h-11 w-11 rounded-full focus:outline-none focus:ring-2 focus:ring-inset focus:ring-white">
+          <svg class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+      <AdminSidebar />
+    </div>
+  </div>
+</BaseLayout>
+
+<script>
+  // @ts-nocheck — vanilla browser glue (DOM only); not part of the typed API surface.
+  // Mobile sidebar: open, close, and the three things that make a drawer a
+  // drawer rather than a floating panel — it scrolls, it closes when you tap
+  // away or press Escape, and it does not let the page behind it scroll.
+  document.addEventListener('DOMContentLoaded', () => {
+    const mobileMenuButton = document.getElementById('mobile-menu-button');
+    const overlay = document.getElementById('mobile-sidebar-overlay');
+    const backdrop = document.getElementById('mobile-sidebar-backdrop');
+    const closeSidebarButton = document.getElementById('close-sidebar');
+    if (!overlay) return;
+
+    let lastFocused = null;
+
+    const isOpen = () => !overlay.classList.contains('hidden');
+
+    const open = () => {
+      lastFocused = document.activeElement;
+      overlay.classList.remove('hidden');
+      // Without this the page behind scrolls under the drawer on iOS, which
+      // reads as the drawer itself being broken.
+      document.body.style.overflow = 'hidden';
+      // Move focus in, so a keyboard or screen-reader user is actually taken
+      // to the thing that just opened.
+      (overlay.querySelector('a, button') || closeSidebarButton)?.focus?.();
+    };
+
+    const close = () => {
+      overlay.classList.add('hidden');
+      document.body.style.overflow = '';
+      // Return focus where it came from rather than dumping it at <body>.
+      if (lastFocused && typeof lastFocused.focus === 'function') lastFocused.focus();
+    };
+
+    mobileMenuButton?.addEventListener('click', open);
+    closeSidebarButton?.addEventListener('click', close);
+    // The backdrop is its own element; binding to the overlay never fired.
+    backdrop?.addEventListener('click', close);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && isOpen()) close();
+    });
+
+    // Following a nav link should not leave the drawer covering the new page.
+    overlay.addEventListener('click', (e) => {
+      if (e.target instanceof Element && e.target.closest('a[href]')) close();
+    });
+  });
+</script>

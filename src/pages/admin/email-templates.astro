@@ -1,0 +1,166 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { canOpenAdminPage } from '../../lib/admin-access';
+
+/**
+ * Rewording the emails the site sends (C-112).
+ *
+ * ## Why a screen rather than a settings field
+ *
+ * Each template has a subject, a body, a list of placeholders, and a preview of
+ * what actually arrives. That is a page, and squeezing it into the settings
+ * form would have meant five more text areas with no way to see the result.
+ *
+ * ## The preview comes from the SERVER
+ *
+ * It is rendered by the same function that renders the real email, so what is
+ * shown is what would be sent. A preview drawn in the browser would be a second
+ * implementation of the placeholder rules, and the moment they diverged the
+ * preview would be reassuring and wrong.
+ */
+const user = Astro.locals.user;
+if (!canOpenAdminPage('/admin/email-templates', user?.role)) {
+  return Astro.redirect('/admin');
+}
+---
+
+<AdminLayout title="Email wording">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">Email wording</h1>
+    <p class="text-sm text-gray-500 mb-6">
+      The words in the emails this site sends. Not who they go to, or when — those stay where
+      they are decided. Placeholders in <span class="font-mono text-xs">{'{{braces}}'}</span> are
+      filled in when the email is sent; the preview below each one shows the result.
+    </p>
+
+    <p id="tpl-error" class="hidden text-sm text-red-600 mb-4"></p>
+    <div id="tpl-list" class="space-y-6">
+      <p class="text-sm text-gray-500">Loading…</p>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  (function () {
+    const list = document.getElementById('tpl-list') as HTMLElement;
+    const errorBox = document.getElementById('tpl-error') as HTMLElement;
+    if (!list) return;
+
+    const csrf = () => decodeURIComponent((document.cookie.match(/(?:^|; )astrobaas_csrf=([^;]*)/) ?? [])[1] ?? '');
+
+    /**
+     * Every node built with createElement and textContent.
+     *
+     * The strings here include an operator's own subject line and a rendered
+     * preview containing sample values — exactly the text that must never be
+     * parsed as markup on an admin page.
+     */
+    function el(tag: string, className = '', text = '') {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text) node.textContent = text;
+      return node;
+    }
+
+    function card(tpl: any) {
+      const section = el('section', 'bg-white border border-gray-200 rounded-xl p-6');
+
+      const head = el('div', 'flex items-start justify-between gap-4 mb-1');
+      head.append(el('h2', 'text-lg font-semibold text-gray-900', tpl.label));
+      if (tpl.customised) head.append(el('span', 'text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800', 'Customised'));
+      section.append(head);
+      section.append(el('p', 'text-sm text-gray-500 mb-4', tpl.when));
+
+      const subjLabel = el('label', 'block text-xs font-medium text-gray-700 mb-1', 'Subject');
+      const subject = document.createElement('input');
+      subject.type = 'text';
+      subject.value = tpl.subject;
+      subject.className = 'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm';
+      section.append(subjLabel, subject);
+
+      let bodyInput: HTMLTextAreaElement | null = null;
+      if (tpl.subjectOnly) {
+        section.append(el('p', 'mt-2 text-xs text-gray-500',
+          'Only the subject can be changed here. The body of this one is an itemised document with a '
+          + 'plain-text and an HTML version that have to agree, so it stays built in.'));
+      } else {
+        section.append(el('label', 'block text-xs font-medium text-gray-700 mt-4 mb-1', 'Message'));
+        bodyInput = document.createElement('textarea');
+        bodyInput.rows = 10;
+        bodyInput.value = tpl.body;
+        bodyInput.className = 'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono';
+        section.append(bodyInput);
+      }
+
+      const placeholders = el('p', 'mt-2 text-xs text-gray-500',
+        `Available: ${tpl.placeholders.map((p: string) => `{{${p}}}`).join('  ')}`);
+      section.append(placeholders);
+      if (tpl.required.length) {
+        section.append(el('p', 'mt-1 text-xs text-amber-700',
+          `${tpl.required.map((p: string) => `{{${p}}}`).join(', ')} has to stay in — without it this email does not do its job.`));
+      }
+
+      const row = el('div', 'mt-4 flex items-center gap-3');
+      const save = el('button', 'px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', 'Save') as HTMLButtonElement;
+      save.type = 'button';
+      const reset = el('button', 'px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50', 'Use the built-in wording') as HTMLButtonElement;
+      reset.type = 'button';
+      const status = el('span', 'text-sm text-gray-600');
+      status.setAttribute('role', 'status');
+      row.append(save, reset, status);
+      section.append(row);
+
+      const previewWrap = el('div', 'mt-4 border-t border-gray-100 pt-4');
+      previewWrap.append(el('h3', 'text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2', 'What arrives'));
+      const preview = el('pre', 'text-sm text-gray-800 bg-gray-50 rounded-lg p-4 whitespace-pre-wrap');
+      preview.textContent = `Subject: ${tpl.preview?.subject ?? ''}\n\n${tpl.preview?.text ?? ''}`;
+      previewWrap.append(preview);
+      section.append(previewWrap);
+
+      save.addEventListener('click', async () => {
+        save.disabled = true;
+        status.textContent = 'Saving…';
+        const res = await fetch('/api/email-templates', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf() },
+          body: JSON.stringify({ id: tpl.id, subject: subject.value, body: bodyInput ? bodyInput.value : tpl.body }),
+        });
+        const json = await res.json().catch(() => null);
+        save.disabled = false;
+        if (!res.ok) {
+          // The server's own message names the thing to fix.
+          status.textContent = json?.message || json?.error?.message || 'That could not be saved.';
+          return;
+        }
+        status.textContent = 'Saved.';
+        preview.textContent = `Subject: ${json.data?.preview?.subject ?? ''}\n\n${json.data?.preview?.text ?? ''}`;
+      });
+
+      reset.addEventListener('click', async () => {
+        if (!confirm(`Go back to the built-in wording for "${tpl.label}"?`)) return;
+        reset.disabled = true;
+        const res = await fetch(`/api/email-templates?id=${encodeURIComponent(tpl.id)}`, {
+          method: 'DELETE',
+          headers: { 'X-CSRF-Token': csrf() },
+        });
+        reset.disabled = false;
+        if (res.ok) window.location.reload();
+        else status.textContent = 'That could not be reset.';
+      });
+
+      return section;
+    }
+
+    (async () => {
+      const res = await fetch('/api/email-templates');
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.data?.templates) {
+        errorBox.textContent = json?.message || 'Could not load the email templates.';
+        errorBox.classList.remove('hidden');
+        list.replaceChildren();
+        return;
+      }
+      list.replaceChildren(...json.data.templates.map(card));
+    })();
+  })();
+</script>

@@ -1,0 +1,80 @@
+---
+/**
+ * An author's archive (C-153).
+ *
+ * ## Opt-in, twice
+ *
+ * This route publishes a staff member's DISPLAY NAME at a stable public URL,
+ * and on the installs this runs the "authors" are shop staff rather than
+ * bylined journalists. So it needs BOTH a site setting and that person's own
+ * flag, and both default to off — the opposite default would publish a team
+ * roster the day somebody upgraded.
+ *
+ * A 404 rather than an empty page when either is missing: a soft 404 is
+ * indexed, linked and reported as a working page.
+ */
+import PublicLayout from '../../../layouts/PublicLayout.astro';
+import { LocalDB } from '../../../lib/localdb';
+import { articlesOnly } from '../../../lib/post-kind';
+import { visibleContent } from '../../../lib/visibility';
+import { filterByLocale } from '../../../lib/i18n';
+import { prepareCards } from '../../../lib/post-cards';
+import { settingBool, settingsMap } from '../../../lib/settings-map';
+import { resolveActiveTheme } from '../../../lib/theme-runtime';
+import { postHref } from '../../../lib/locale-links';
+import {
+  authorBySlug, authorOptedIn, authorSlug, AUTHOR_ARCHIVES_SETTING,
+} from '../../../lib/archive-view';
+
+export const prerender = false;
+
+const slug = String(Astro.params.slug || '');
+await LocalDB.init();
+
+const map = settingsMap(await LocalDB.getSettings());
+if (!settingBool(map[AUTHOR_ARCHIVES_SETTING], false)) {
+  return new Response('Not found', { status: 404 });
+}
+
+const users = await LocalDB.getUsers();
+const author = authorBySlug(users, slug);
+// `authorBySlug` returns null when two people slug the same, rather than
+// picking one: showing the wrong person's posts under a colleague's name is
+// worse than a 404 and the reader could not detect it.
+if (!author || !authorOptedIn(author as unknown as Record<string, unknown>)) {
+  return new Response('Not found', { status: 404 });
+}
+
+const all = articlesOnly(visibleContent(await LocalDB.getPosts(), null))
+  .filter((p) => !p.noindex && p.author_id === author.id);
+const posts = filterByLocale(all, Astro.locals.locale);
+
+const cards = prepareCards(posts, {
+  users,
+  categories: await LocalDB.getCategories(),
+  byline: { siteAuthorName: String(map.site_author_name ?? ''), siteTitle: String(map.site_title ?? '') },
+});
+
+const { slots } = await resolveActiveTheme();
+const PostCard = slots.PostCard as any;
+const displayName = author.name || authorSlug(author);
+---
+
+<PublicLayout
+  title={`Posts by ${displayName}`}
+  description={`Everything ${displayName} has written on this site.`}
+>
+  <section class="max-w-4xl mx-auto px-4 py-12">
+    <h1 class="text-3xl font-bold text-gray-900 mb-2">{displayName}</h1>
+    <p class="text-sm text-gray-500 mb-8">
+      {cards.length} {cards.length === 1 ? 'article' : 'articles'}
+    </p>
+    {cards.length === 0 ? (
+      <p class="text-gray-500">Nothing published yet.</p>
+    ) : (
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {cards.map((p) => <PostCard post={p} href={postHref(`/blog/${p.slug}`, p)} />)}
+      </div>
+    )}
+  </section>
+</PublicLayout>

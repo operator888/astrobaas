@@ -1,0 +1,2287 @@
+---
+import AdminLayout from '../../../layouts/AdminLayout.astro';
+import { jsonForScript } from '../../../lib/json-in-html';
+import { LocalDB } from '../../../lib/localdb';
+import { emailChannelLabel } from '../../../lib/email';
+import { pagesOnly } from '../../../lib/post-kind';
+import { KNOWN_CRAWLERS_SEED } from '../../../lib/robots-txt';
+import { resolveOrderLimits, resolveCommerceEnabled, resolveShopCurrency, ORDER_LIMIT_BOUNDS } from '../../../lib/commerce-settings';
+import { resolveAbandonmentSettings, resolveRecoverySettings } from '../../../lib/commerce/abandonment';
+import {
+  resolvePaymentHoldSettings, MIN_HOLD_MINUTES, MAX_HOLD_MINUTES, MAX_MAX_UNPAID,
+} from '../../../lib/commerce/payment-hold';
+import { resolveCaptchaSurfaces } from '../../../lib/captcha';
+import {
+  resolveSaleNotifySettings, SALE_NOTIFY_KEYS, MAX_SALE_RECIPIENTS,
+} from '../../../lib/commerce/sale-notify';
+import { resolveMaintenance, MAINTENANCE_KEYS, envFlagOn } from '../../../lib/maintenance';
+import { paymentConfigReport } from '../../../lib/payments/registry';
+import { returnUrlVerdict } from '../../../lib/payments/return-url-check';
+import { ANALYTICS_PROVIDERS, analyticsSettingKey, validateAnalyticsId } from '../../../lib/analytics';
+import { enabledAnalyticsIds } from '../../../lib/csp-config';
+import { isStagingEnv } from '../../../lib/indexing';
+import { PRINT_BUTTON_SETTING, printButtonEnabled } from '../../../lib/print-view';
+import { POPUP_KEYS, POPUP_TRIGGERS, resolvePopup } from '../../../lib/popups';
+import {
+  resolveAssistantConfig, assistantMissing, assistantReady,
+  ASSISTANT_PROVIDERS, ASSISTANT_KEYS, ASSISTANT_LAST_ERROR_KEY,
+} from '../../../lib/ai-assistant';
+import {
+  resolveWithdrawalPolicy, missingTraderFields, WITHDRAWAL_KEYS,
+  WITHDRAWAL_MINIMUM_DAYS, WITHDRAWAL_MAXIMUM_DAYS,
+} from '../../../lib/withdrawal';
+import { settingBool } from '../../../lib/settings-map';
+import { relatedCount } from '../../../lib/related-count';
+import { validateSettingGroups, settingKeyFor, SETTING_GROUPS_SETTING } from '../../../core/setting-groups';
+import { resolvePatterns } from '../../../lib/pattern-registry';
+
+await LocalDB.init();
+const allSettings = await LocalDB.getSettings();
+const map: Record<string, any> = {};
+allSettings.forEach((s) => (map[s.key] = s.value));
+
+// Env-forced noindex, so the screen can say WHO is overriding whom rather than
+// showing a box whose state does not match what the site does.
+const stagingForced = isStagingEnv();
+
+const values = {
+  site_title: map.site_title ?? 'AstroBaaS',
+  // What this install calls itself in the admin (C-159), and what a new
+  // record starts from (C-51).
+  admin_name: map.admin_name ?? '',
+  admin_logo: map.admin_logo ?? '',
+  default_body_post: map.default_body_post ?? '',
+  comments_enabled: settingBool(map.comments_enabled, false),
+  reviews_enabled: settingBool(map.reviews_enabled, false),
+  editorial_review_required: settingBool(map.editorial_review_required, false),
+  author_archives_enabled: settingBool(map.author_archives_enabled, false),
+  default_body_page: map.default_body_page ?? '',
+  site_tagline: map.site_tagline ?? 'Modern CMS for the Future Web',
+  site_url: map.site_url ?? '',
+  public_site_url: map.public_site_url ?? '',
+  admin_email: map.admin_email ?? '',
+  contact_notify_email: map.contact_notify_email ?? '',
+  order_confirmation_enabled: map.order_confirmation_enabled,
+  // Through the resolver, so the box shows the code checkout will actually
+  // freeze onto the next order — including when the stored value is junk.
+  shop_currency: resolveShopCurrency(map),
+  // Through the SAME resolvers the sweeps read, so the boxes show the numbers
+  // that will actually be used — including the recovery delay, which is clamped
+  // below the cancellation deadline and would otherwise display a value the
+  // scheduler quietly ignores.
+  orders_abandon_enabled: map.orders_abandon_enabled,
+  orders_abandon_after_days: resolveAbandonmentSettings(map).days,
+  orders_recovery_enabled: map.orders_recovery_enabled,
+  orders_recovery_after_hours: resolveRecoverySettings(map, resolveAbandonmentSettings(map)).afterHours,
+  // The payment hold, the unpaid cap and the risk hold — through their
+  // resolver for the same reason: the box shows what checkout will enforce.
+  orders_payment_hold_minutes: resolvePaymentHoldSettings(map).holdMinutes,
+  orders_max_unpaid_per_buyer: resolvePaymentHoldSettings(map).maxUnpaidPerBuyer,
+  orders_risk_hold_enabled: resolvePaymentHoldSettings(map).riskHold.enabled,
+  orders_risk_hold_score: resolvePaymentHoldSettings(map).riskHold.score,
+  payment_instructions_bank_transfer: map.payment_instructions_bank_transfer ?? '',
+  payment_instructions_cod: map.payment_instructions_cod ?? '',
+  posts_per_page: map.posts_per_page ?? 10,
+  // Both default to 0 = off. A contents list appearing on every post after an
+  // upgrade is a visible change to published pages nobody asked for, and
+  // `related_posts_count` was being READ by the post route with nothing in the
+  // app able to write it — a feature that existed only in the code.
+  robots_txt: map.robots_txt ?? '',
+  crawler_policy: (map.crawler_policy && typeof map.crawler_policy === 'object') ? map.crawler_policy : {},
+  search_synonyms: map.search_synonyms ?? '',
+  link_check_external: map.link_check_external === true || map.link_check_external === 'true' || map.link_check_external === '1',
+  toc_min_headings: map.toc_min_headings ?? 0,
+  // Through the same helper the routes use, so the default cannot drift.
+  print_button: printButtonEnabled(map[PRINT_BUTTON_SETTING]),
+  // Through the shared resolver, so the form and the served script cannot
+  // disagree about a default or a bound (C-114).
+  popup: resolvePopup(map),
+  // Through the SHARED resolver, so the box shows the number the blog will
+  // actually render. It displayed 0 for an unset value while the route
+  // defaulted to 3 — so a fresh install showed three related posts under a box
+  // reading "0", and saving the form untouched would then really set it to 0.
+  related_posts_count: relatedCount(map.related_posts_count),
+  feed_items: map.feed_items ?? 10,
+  feed_format: map.feed_format ?? 'excerpt',
+  // The STORED value, deliberately not the effective one. On a staging clone
+  // the environment forces noindex, and a box that showed ticked when the
+  // operator never ticked it — and that does nothing when they untick it — is
+  // worse than a box plus a sentence saying who is overriding whom.
+  discourage_indexing: !!map.discourage_indexing,
+  home_page_slug: map.home_page_slug ?? '',
+  site_author_name: map.site_author_name ?? '',
+  site_author_url: map.site_author_url ?? '',
+};
+
+// Offered as a picklist rather than a free-text slug: the homepage is the one
+// setting where a typo is most visible and least explicable, and a select can
+// only ever hold a slug that exists. Drafts are included and labelled, because
+// designating a page you are still writing is a normal way to work — it simply
+// stays invisible to the public until published.
+const pageChoices = pagesOnly(await LocalDB.getPosts())
+  .filter((p) => p.status !== 'trashed')
+  .sort((a, b) => a.title.localeCompare(b.title))
+  .map((p) => ({ slug: p.slug, title: p.title, draft: p.status !== 'published' }));
+
+// A page that was deleted or renamed after being designated would otherwise
+// vanish from the select and silently reset the setting on the next save.
+const homeSlugMissing =
+  !!values.home_page_slug && !pageChoices.some((p) => p.slug === values.home_page_slug);
+
+// Payment providers are configured with ENVIRONMENT VARIABLES, never through
+// this screen — settings have a public read path, and a provider secret must
+// never live there. So this panel is read-only: it reports what the process
+// can see, naming missing variables so a half-configured provider is visible
+// here rather than discovered by a buyer at the till.
+const payments = paymentConfigReport(process.env as Record<string, string | undefined>);
+// The same verdict /api/health/deep gives (there is no attention feed on this
+// screen yet): paying buyers sent back to a page the CMS does not have.
+const returnUrls = returnUrlVerdict({
+  onlineProviders: payments.filter((p) => p.enabled).map((p) => p.id),
+  siteUrlSetting: map.site_url,
+  siteUrlEnv: Astro.site ?? process.env.SITE_URL,
+  publicSiteUrl: map.public_site_url,
+  requestOrigin: Astro.url.origin,
+});
+
+// Analytics: an ID is a RUNTIME setting, but the CSP that lets the tag load is
+// built at BUILD time from ANALYTICS_PROVIDERS. They can disagree, and when
+// they do the browser blocks the tag silently — so surface it here instead.
+const cspAnalyticsIds = enabledAnalyticsIds(process.env as NodeJS.ProcessEnv);
+const analyticsRows = ANALYTICS_PROVIDERS.map((p) => {
+  const stored = map[analyticsSettingKey(p.id)];
+  const value = typeof stored === 'string' ? stored : '';
+  const checked = validateAnalyticsId(p.id, value);
+  return {
+    provider: p,
+    value,
+    configured: checked.ok && !!checked.value,
+    invalid: !checked.ok,
+    allowedByCsp: cspAnalyticsIds.includes(p.id),
+  };
+});
+
+const withdrawal = resolveWithdrawalPolicy(map);
+const withdrawalMissing = missingTraderFields(withdrawal);
+
+// The assistant key is never rendered back — only whether one is present.
+// Settings an operator DECLARED (C-127). The definitions and their current
+// values are both ordinary settings, so nothing new is read here.
+const declaredGroups = validateSettingGroups(map[SETTING_GROUPS_SETTING]).groups;
+
+// The layouts a new record may start from (C-51). resolvePatterns is the same
+// call the editor's palette makes, so the two lists cannot offer different
+// things — and a pattern the vet rejected is offered by neither.
+const startPatterns = resolvePatterns().patterns.map((sp) => ({ name: sp.name, label: sp.label }));
+const groupValues: Record<string, unknown> = {};
+for (const g of declaredGroups) {
+  for (const f of g.fields) {
+    const key = settingKeyFor(g, f.name);
+    groupValues[key] = map[key] ?? '';
+  }
+}
+
+const assistant = resolveAssistantConfig(map, process.env as Record<string, string | undefined>);
+const assistantGaps = assistantMissing(assistant);
+const assistantOk = assistantReady(assistant);
+const assistantKeyFromEnv = !!(process.env.ASSISTANT_API_KEY || '').trim();
+const assistantHasKey = assistant.apiKey !== '';
+// Last provider failure, redacted at the point it was recorded.
+const assistantError = map[ASSISTANT_LAST_ERROR_KEY] as
+  | { at?: string; status?: number; detail?: string; provider?: string; model?: string }
+  | null
+  | undefined;
+// Clamped, so a hand-edited settings row shows the value that will actually apply.
+const orderLimits = resolveOrderLimits(map);
+const commerceOn = resolveCommerceEnabled(map);
+const captchaSurfaces = resolveCaptchaSurfaces(map);
+const saleNotify = resolveSaleNotifySettings(map);
+// The raw value, not the parsed list: an admin who typed an address wrong must
+// see what they typed, not have it silently vanish from the box.
+const saleNotifyRaw = typeof map[SALE_NOTIFY_KEYS.recipients] === 'string'
+  ? map[SALE_NOTIFY_KEYS.recipients] as string
+  : '';
+// `settingBool`, matching the SENDER's own read in commerce/sale-notify.ts.
+// These two must agree or the screen lies: the form serialiser posts
+// `el.checked`, so a box rendered unticked against a stored "true" writes a
+// boolean false the next time anyone saves this section for an unrelated
+// reason — silently switching sale notifications off. Deliberately NOT
+// `resolveSaleNotifySettings().enabled`, which ANDs in "has recipients": the
+// two reads are separate so the "on, but nobody to tell" warning below can
+// exist at all.
+const saleNotifyOn = settingBool(map[SALE_NOTIFY_KEYS.enabled], false);
+const maintenance = resolveMaintenance(process.env as Record<string, string | undefined>, map, Date.now());
+// The env var is the emergency switch and cannot be turned off from here — it
+// lives in the deployment, not the database. Say so rather than showing a
+// checkbox that would not take effect.
+const maintenanceByEnv = envFlagOn(process.env.MAINTENANCE_MODE);
+const maintenanceMessage = typeof map[MAINTENANCE_KEYS.message] === 'string'
+  ? map[MAINTENANCE_KEYS.message] as string : '';
+const maintenanceUntil = typeof map[MAINTENANCE_KEYS.until] === 'string'
+  ? map[MAINTENANCE_KEYS.until] as string : '';
+// Asked, not sniffed. This screen used to re-derive the answer from environment
+// variables, and was not updated when the SMTP transport was added — so an
+// operator with a working SMTP config was told no transport existed while mail
+// was in fact going out. A screen that reports the opposite of what the system
+// does is worse than one that says nothing, and that can only happen when two
+// places decide the same fact. The transport itself is the only one that knows.
+const emailTransport = emailChannelLabel();
+---
+
+<AdminLayout title="Settings">
+  <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="mb-8">
+      <h1 class="text-3xl font-bold text-gray-900">Settings</h1>
+      <p class="text-gray-600 mt-2">Configure your site's basics.</p>
+    </div>
+
+    <div id="settings-notice" class="hidden mb-4 px-3 py-2 rounded-md border text-sm"></div>
+
+    <!--
+      A jump list.
+
+      Ten sections in one scroll is a page you search rather than a page you
+      use. "Reading" used to sit below EU withdrawal law and maintenance mode —
+      nine sections past the one it belongs beside.
+    -->
+    <nav aria-label="Settings sections" class="mb-8 rounded-xl border border-gray-200 bg-white p-5">
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-2">
+        <div>
+          <p class="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-1.5">Site</p>
+          <ul class="space-y-1">
+            <li><a href="#set-general" class="text-sm text-gray-600 hover:text-blue-700">General</a></li>
+            <li><a href="#set-reading" class="text-sm text-gray-600 hover:text-blue-700">Reading</a></li>
+          </ul>
+        </div>
+        <div>
+          <p class="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-1.5">Shop</p>
+          <ul class="space-y-1">
+            <li><a href="#set-shop" class="text-sm text-gray-600 hover:text-blue-700">Selling</a></li>
+            <li><a href="#set-orderlimits" class="text-sm text-gray-600 hover:text-blue-700">Order limits</a></li>
+            <li><a href="#set-payments" class="text-sm text-gray-600 hover:text-blue-700">Payment providers</a></li>
+            <li><a href="#set-salenotify" class="text-sm text-gray-600 hover:text-blue-700">New-sale notifications</a></li>
+            <li><a href="#set-withdrawal" class="text-sm text-gray-600 hover:text-blue-700">Right of withdrawal (EU)</a></li>
+          </ul>
+        </div>
+        <div>
+          <p class="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-1.5">Marketing</p>
+          <ul class="space-y-1">
+            <li><a href="#set-analytics" class="text-sm text-gray-600 hover:text-blue-700">Analytics & marketing tags</a></li>
+          </ul>
+        </div>
+        <div>
+          <p class="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-1.5">Advanced</p>
+          <ul class="space-y-1">
+            <li><a href="#set-assistant" class="text-sm text-gray-600 hover:text-blue-700">AI assistant</a></li>
+            <li><a href="#set-captcha" class="text-sm text-gray-600 hover:text-blue-700">Anti-spam check</a></li>
+            <li><a href="#set-maintenance" class="text-sm text-gray-600 hover:text-blue-700">Maintenance mode</a></li>
+            <li><a href="#set-tools" class="text-sm text-gray-600 hover:text-blue-700">Tools</a></li>
+          </ul>
+        </div>
+      </div>
+    </nav>
+
+    <div class="flex flex-wrap items-baseline gap-x-3 mt-12 mb-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-500">Site</h2>
+      <p class="text-sm text-gray-400">The name, the addresses, and how the blog reads.</p>
+    </div>
+
+    <div id="set-general" class="scroll-mt-20">
+    <!-- General -->
+    <form id="general-form" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8 space-y-6">
+      <h2 class="text-xl font-semibold text-gray-900">General</h2>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2" for="site_title">Site title</label>
+          <input id="site_title" name="site_title" type="text" value={values.site_title}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2" for="admin_name">Name in the admin</label>
+          <input id="admin_name" name="admin_name" type="text" value={values.admin_name}
+            placeholder={String(values.site_title || 'AstroBaaS')}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          <p class="mt-1 text-xs text-gray-500">
+            Shown on the sidebar and the sign-in screens. Empty uses the site title.
+            This renames the admin — it does not remove plugin or theme author credits,
+            which the licence requires to stay.
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2" for="admin_logo">Logo in the admin</label>
+          <input id="admin_logo" name="admin_logo" type="text" value={values.admin_logo}
+            placeholder="/uploads/2026/01/logo.png"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          <p class="mt-1 text-xs text-gray-500">
+            A path on this site, from the media library. An address on another server is
+            ignored — a logo fetched from a third party is a request your staff did not
+            make, on a screen behind their login.
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2" for="site_tagline">Tagline</label>
+          <input id="site_tagline" name="site_tagline" type="text" value={values.site_tagline}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2" for="site_url">Site URL</label>
+        <input id="site_url" name="site_url" type="url" value={values.site_url}
+          placeholder="https://example.com"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+        <p class="text-xs text-gray-500 mt-1">
+          Used to build canonical URLs in sitemap and feeds — and where card, PayPal and Klarna
+          payments send the buyer back to. On a headless shop, this is your storefront's address.
+        </p>
+        {returnUrls.status === 'warn' && (
+          <p class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 mt-2">
+            {returnUrls.detail}
+          </p>
+        )}
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2" for="public_site_url">Address of this CMS</label>
+        <input id="public_site_url" name="public_site_url" type="url" value={values.public_site_url}
+          placeholder="https://cms.example.com"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+        <p class="text-xs text-gray-500 mt-1">
+          The web address your uploaded images are served from — set this if your shop runs on a
+          different domain than this CMS, or its product photos will not load.
+        </p>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2" for="admin_email">Admin email</label>
+        <input id="admin_email" name="admin_email" type="email" value={values.admin_email}
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+        <p class="text-xs text-gray-500 mt-1">
+          Operator contact. Used as the last fallback for form-submission notifications
+          when the field below is empty.
+        </p>
+      </div>
+
+      <div>
+        <label class="flex items-center gap-3 cursor-pointer">
+          {/* settingBool, and the same default (true) the sender uses in
+              commerce/order-confirmation.ts. `!== false` read a stored "false"
+              as ON, so the box showed ticked on a shop that had switched
+              customer email off — and because this form posts `el.checked`,
+              the next unrelated save silently switched it back ON. */}
+          <input type="checkbox" name="order_confirmation_enabled" value="true"
+            checked={settingBool(values.order_confirmation_enabled, true)}
+            class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+          <span class="text-sm font-medium text-gray-700">Email the customer when they order</span>
+        </label>
+        {!emailTransport && (
+          <p class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 mt-2 ml-7">
+            No mail transport is configured, so this is only written to the server log —
+            the customer receives nothing, including the bank details they need in order
+            to pay. Set <code class="bg-amber-100 px-1 rounded">SMTP_HOST</code> with
+            <code class="bg-amber-100 px-1 rounded">EMAIL_TRANSPORT=smtp</code>, or set
+            <code class="bg-amber-100 px-1 rounded">SMTP2GO_API_KEY</code> and
+            <code class="bg-amber-100 px-1 rounded">SMTP2GO_SENDER</code> and activate the
+            SMTP2GO plugin.
+          </p>
+        )}
+        <p class="text-xs text-gray-500 mt-1 ml-7">
+          Order number, items, total, what happens next, and the bank details below when
+          they pay by transfer. Turn it off only if your storefront sends its own.
+        </p>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2" for="payment_instructions_bank_transfer">
+          Bank transfer details
+        </label>
+        <textarea id="payment_instructions_bank_transfer" name="payment_instructions_bank_transfer"
+          rows="4" placeholder={'Bank: …\nIBAN: …\nAccount holder: …'}
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm"
+        >{values.payment_instructions_bank_transfer}</textarea>
+        <p class="text-xs text-gray-500 mt-1">
+          Sent to the customer in their order confirmation when they choose bank transfer,
+          with the order number as the payment reference. Leave empty and the email says a
+          human will be in touch instead of promising details it does not carry.
+        </p>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2" for="payment_instructions_cod">
+          Cash-on-delivery note
+        </label>
+        <textarea id="payment_instructions_cod" name="payment_instructions_cod" rows="2"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        >{values.payment_instructions_cod}</textarea>
+        <p class="text-xs text-gray-500 mt-1">Optional. Anything the courier or the buyer needs to know.</p>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2" for="contact_notify_email">
+          Send form submissions to
+        </label>
+        <input id="contact_notify_email" name="contact_notify_email" type="email"
+          value={values.contact_notify_email}
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+        <p class="text-xs text-gray-500 mt-1">
+          Where contact-form and custom-form submissions are emailed. Leave empty to use the
+          admin email above. Needs a working mail transport (EMAIL_TRANSPORT).
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2" for="site_author_name">Published by</label>
+          <input id="site_author_name" name="site_author_name" type="text" value={values.site_author_name}
+            placeholder="Your name or company"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          <p class="text-xs text-gray-500 mt-1">
+            Shown as the byline when a post has no linked account — after an import,
+            or once a contributor's account is removed. Leave empty to fall back to
+            the site title. Nothing ever displays as "Unknown Author".
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2" for="site_author_url">Author link</label>
+          <input id="site_author_url" name="site_author_url" type="url" value={values.site_author_url}
+            placeholder="https://example.com"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          <p class="text-xs text-gray-500 mt-1">https only. The name links here when set.</p>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2" for="home_page_slug">Home page</label>
+        <select id="home_page_slug" name="home_page_slug"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+          <option value="">Default welcome page</option>
+          {homeSlugMissing && (
+            <option value={values.home_page_slug} selected>
+              {values.home_page_slug} — missing, will fall back
+            </option>
+          )}
+          {pageChoices.map((p) => (
+            <option value={p.slug} selected={p.slug === values.home_page_slug}>
+              {p.title}{p.draft ? ' (draft)' : ''}
+            </option>
+          ))}
+        </select>
+        <p class="text-xs text-gray-500 mt-1">
+          {pageChoices.length === 0
+            ? 'No pages yet — create one under Posts with Type set to “Page”.'
+            : 'Choose a page to serve at your site root. The default welcome page is used if it becomes unavailable.'}
+        </p>
+      </div>
+
+      <div class="flex justify-end">
+        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium">
+          Save general
+        </button>
+      </div>
+    </form>
+    </div>
+
+    <div id="set-reading" class="scroll-mt-20">
+    <form id="reading-form" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8 space-y-6">
+      <h2 class="text-xl font-semibold text-gray-900">Reading</h2>
+
+      {/*
+        A starting layout per kind (C-51). The pattern mechanism has existed
+        since sections shipped, but it was INSERT-ONLY: a new Page opened blank
+        and the author had to know to scroll to the palette and pick the right
+        tile — which is exactly the discovery problem "start from" solves.
+
+        The pattern NAME is stored, never its HTML. A stored HTML blob is never
+        re-vetted, so it rots silently the day the section vocabulary changes —
+        which is the failure the pattern registry's vet exists to prevent.
+      */}
+      {/*
+        Comments and reviews (C-142, C-35). OFF by default and switched on here:
+        a site that has never wanted comments must not grow a public write
+        endpoint because it upgraded. Both are ordinary collections once on, so
+        they appear under Content with the moderation queue every moderated type
+        gets.
+      */}
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="md:col-span-2">
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" id="comments_enabled" name="comments_enabled"
+              checked={values.comments_enabled === true} class="rounded border-gray-300" />
+            Let readers comment on posts
+          </label>
+          <p class="mt-1 ml-6 text-xs text-gray-500">
+            Every comment waits for approval before anyone else can see it, and carries the same
+            honeypot and anti-spam check the contact form uses.
+          </p>
+          <label class="flex items-center gap-2 text-sm text-gray-700 mt-3">
+            <input type="checkbox" id="editorial_review_required" name="editorial_review_required"
+              checked={values.editorial_review_required === true} class="rounded border-gray-300" />
+            Hold posts for review before they go live
+          </label>
+          <p class="mt-1 ml-6 text-xs text-gray-500">
+            Authors and shop managers set a post to “review”; editors and admins publish it.
+            An author who tries to publish is REFUSED and told why — never silently saved as a draft.
+          </p>
+          <label class="flex items-center gap-2 text-sm text-gray-700 mt-3">
+            <input type="checkbox" id="author_archives_enabled" name="author_archives_enabled"
+              checked={values.author_archives_enabled === true} class="rounded border-gray-300" />
+            Give authors a public archive page
+          </label>
+          <p class="mt-1 ml-6 text-xs text-gray-500">
+            Publishes a staff member's display name at <code>/blog/author/&lt;name&gt;</code>.
+            Each person also has to opt in on their own profile — on a shop, the “authors” are
+            staff rather than bylined journalists.
+          </p>
+          <label class="flex items-center gap-2 text-sm text-gray-700 mt-3">
+            <input type="checkbox" id="reviews_enabled" name="reviews_enabled"
+              checked={values.reviews_enabled === true} class="rounded border-gray-300" />
+            Let customers review products
+          </label>
+          <p class="mt-1 ml-6 text-xs text-gray-500">
+            Also moderated. A review by somebody who actually paid for that product is marked as a
+            verified purchase — that mark is set by the server and cannot be sent by the reviewer.
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2" for="default_body_post">New posts start from</label>
+          <select id="default_body_post" name="default_body_post"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+            <option value="">Blank</option>
+            {startPatterns.map((sp: { name: string; label: string }) => (
+              <option value={sp.name} selected={values.default_body_post === sp.name}>{sp.label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2" for="default_body_page">New pages start from</label>
+          <select id="default_body_page" name="default_body_page"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+            <option value="">Blank</option>
+            {startPatterns.map((sp: { name: string; label: string }) => (
+              <option value={sp.name} selected={values.default_body_page === sp.name}>{sp.label}</option>
+            ))}
+          </select>
+          <p class="mt-1 text-xs text-gray-500">
+            Only layouts that passed the section check are offered — the same list the
+            editor's palette shows.
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2" for="posts_per_page">Posts per page</label>
+          <input id="posts_per_page" name="posts_per_page" type="number" min="1" max="100"
+            value={values.posts_per_page}
+            class="w-32 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2" for="feed_items">Feed items</label>
+          <input id="feed_items" name="feed_items" type="number" min="1" max="200"
+            value={values.feed_items}
+            class="w-32 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2" for="toc_min_headings">Table of contents</label>
+          <input id="toc_min_headings" name="toc_min_headings" type="number" min="0" max="20"
+            value={values.toc_min_headings}
+            class="w-32 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          <p class="mt-2 text-xs text-gray-500">
+            Show a contents list on posts and pages with at least this many headings.
+            <strong>0 turns it off.</strong> Headings always get an anchor either way, so
+            a link to a section keeps working whatever this says.
+          </p>
+        </div>
+        <div class="md:col-span-2">
+          <label class="block text-sm font-medium text-gray-700 mb-2">Opt-in popup</label>
+          <p class="text-xs text-gray-500 mb-3">
+            Needs the <strong>Popups</strong> plugin active under Plugins. It is shown once per
+            reader and then not again for the number of days below; somebody who signs up or
+            closes it is not asked again. It never covers the page and never appears on top of
+            the cookie banner.
+          </p>
+          <label class="flex items-center gap-2 text-sm text-gray-700 mb-3">
+            <input type="checkbox" id="popup_enabled" name="popup_enabled"
+              checked={values.popup.enabled === true} class="rounded border-gray-300" />
+            Show it
+          </label>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="md:col-span-2">
+              <label class="block text-xs font-medium text-gray-700 mb-1" for="popup_title">Heading</label>
+              <input id="popup_title" name="popup_title" type="text" maxlength="120" value={values.popup.title}
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+            </div>
+            <div class="md:col-span-2">
+              <label class="block text-xs font-medium text-gray-700 mb-1" for="popup_text">Text</label>
+              <textarea id="popup_text" name="popup_text" rows="2" maxlength="400"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">{values.popup.text}</textarea>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-700 mb-1" for="popup_button_label">Button</label>
+              <input id="popup_button_label" name="popup_button_label" type="text" maxlength="60" value={values.popup.buttonLabel}
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-700 mb-1" for="popup_button_url">Button link</label>
+              <input id="popup_button_url" name="popup_button_url" type="text" maxlength="500" value={values.popup.buttonUrl}
+                placeholder="Leave empty for the newsletter form"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-700 mb-1" for="popup_trigger">When</label>
+              <select id="popup_trigger" name="popup_trigger" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                {POPUP_TRIGGERS.map((tr) => (
+                  <option value={tr} selected={values.popup.trigger === tr}>
+                    {tr === 'delay' ? 'After a few seconds' : tr === 'scroll' ? 'Part-way down the page' : 'When the pointer leaves'}
+                  </option>
+                ))}
+              </select>
+              <p class="mt-1 text-xs text-gray-500">
+                "When the pointer leaves" falls back to the delay on a touch screen, which has no pointer.
+              </p>
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1" for="popup_delay_seconds">Seconds</label>
+                <input id="popup_delay_seconds" name="popup_delay_seconds" type="number" min="1" max="600"
+                  value={values.popup.delaySeconds} class="w-full px-2 py-2 border border-gray-300 rounded-lg text-sm" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1" for="popup_scroll_percent">Scroll %</label>
+                <input id="popup_scroll_percent" name="popup_scroll_percent" type="number" min="5" max="100"
+                  value={values.popup.scrollPercent} class="w-full px-2 py-2 border border-gray-300 rounded-lg text-sm" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1" for="popup_frequency_days">Every N days</label>
+                <input id="popup_frequency_days" name="popup_frequency_days" type="number" min="1" max="365"
+                  value={values.popup.frequencyDays} class="w-full px-2 py-2 border border-gray-300 rounded-lg text-sm" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">Printing</label>
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" id="print_button" name="print_button"
+              checked={values.print_button === true} class="rounded border-gray-300" />
+            Show a "Print / Save as PDF" button on articles
+          </label>
+          <p class="mt-2 text-xs text-gray-500">
+            The print stylesheet applies whether or not this is ticked — navigation, footers,
+            the contents list and the share row are dropped, and links keep their addresses.
+            This only adds the button that tells a reader so. The reader's own browser makes
+            the PDF, with their paper size; nothing is generated on the server.
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2" for="related_posts_count">Related posts</label>
+          <input id="related_posts_count" name="related_posts_count" type="number" min="0" max="12"
+            value={values.related_posts_count}
+            class="w-32 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          <p class="mt-2 text-xs text-gray-500">
+            How many to show under an article. 0 turns them off. Only posts that share a
+            category or tags are ever offered, so a blog with neither shows none.
+          </p>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-3">Each feed item includes</label>
+        <div class="space-y-2">
+          <label class="flex items-center">
+            <input type="radio" name="feed_format" value="excerpt" checked={values.feed_format === 'excerpt'} class="text-blue-600 focus:ring-blue-500" />
+            <span class="ml-2 text-sm text-gray-700">Excerpt only</span>
+          </label>
+          <label class="flex items-center">
+            <input type="radio" name="feed_format" value="full" checked={values.feed_format === 'full'} class="text-blue-600 focus:ring-blue-500" />
+            <span class="ml-2 text-sm text-gray-700">Full content</span>
+          </label>
+        </div>
+      </div>
+
+      <div>
+        <label class="flex items-center">
+          <input id="discourage_indexing" name="discourage_indexing" type="checkbox" checked={values.discourage_indexing} class="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+          <span class="ml-2 text-sm text-gray-700">Discourage search engines from indexing this site</span>
+        </label>
+        <p class="text-xs text-gray-500 mt-1 ml-6">Adds a <code class="px-1 bg-gray-100 rounded">noindex</code> tag to public pages and tells <code class="px-1 bg-gray-100 rounded">/robots.txt</code> to disallow everything.</p>
+        {stagingForced && (
+          <p class="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-3 py-2 mt-2 ml-6">
+            This deployment is marked as staging (<code class="px-1 bg-amber-100 rounded">STAGING=1</code>),
+            so it is kept out of search regardless of this box. Unticking it here will not publish
+            this copy — remove the environment variable on the deployment you actually want indexed.
+          </p>
+        )}
+      </div>
+
+      <div>
+        <label class="flex items-center">
+          <input id="link_check_external" name="link_check_external" type="checkbox" checked={values.link_check_external} class="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+          <span class="ml-2 text-sm text-gray-700">Check outbound links for 404s</span>
+        </label>
+        <p class="text-xs text-gray-500 mt-1 ml-6">
+          Off by default, because it means this server making requests to other people's sites.
+          A few links a minute, one per site. Only 404 and 410 count as broken — a site that
+          blocks bots or rate-limits us is reported as unchecked, not dead.
+          Results appear under <a href="/admin/insights" class="text-blue-600 hover:underline">Insights</a>.
+          Links <em>inside</em> your own site are always checked and need nothing switched on.
+        </p>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2" for="search_synonyms">Search synonyms</label>
+        <textarea id="search_synonyms" name="search_synonyms" rows="5" spellcheck="false"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          placeholder={'σκελετός, μοντούρα, frame\niphone => phone'}>{values.search_synonyms}</textarea>
+        <p class="text-xs text-gray-500 mt-1">
+          One rule per line. <code class="px-1 bg-gray-100 rounded">a, b, c</code> makes all three
+          find each other; <code class="px-1 bg-gray-100 rounded">a =&gt; b</code> is one-way, for
+          when direction is genuinely meant. <code class="px-1 bg-gray-100 rounded">#</code> starts a
+          comment. Accents and capitals do not matter. Applies to posts and to the catalogue.
+        </p>
+      </div>
+
+      {/*
+        PER-CRAWLER POLICY.
+
+        A table rather than free text, because "block the AI crawlers" is the
+        request people actually arrive with and typing four User-agent groups by
+        hand is how one of them gets a typo nobody notices. The free-text box
+        below still exists for everything this cannot express.
+
+        The list is a SEED and says so. New crawlers appear monthly and tokens
+        get renamed, so a shipped constant is out of date the week it ships —
+        which is exactly why a maintained catalogue is a plugin's job and not a
+        promise core can keep.
+      */}
+      <div class="mb-8">
+        <label class="block text-sm font-medium text-gray-700 mb-2">Crawlers</label>
+        <p class="text-xs text-gray-500 mb-3">
+          Leave one on <strong>Default</strong> and it follows the site-wide rules.
+          <strong>Block</strong> writes <code class="px-1 bg-gray-100 rounded">Disallow: /</code> for it;
+          <strong>Allow</strong> says so explicitly (and still keeps
+          <code class="px-1 bg-gray-100 rounded">/admin</code> and
+          <code class="px-1 bg-gray-100 rounded">/api/</code> off-limits).
+          Note that robots.txt is a <em>request</em> — a crawler that ignores it is
+          not stopped by this file.
+        </p>
+        {/* Frontmatter and the <script> are separate module scopes, so the seed
+            reaches the script as data in the DOM rather than as a closure. */}
+        {/*
+          `jsonForScript`, not a bare stringify.
+
+          `crawler_policy` is an OPERATOR-SUPPLIED object whose KEYS are crawler
+          tokens, stored through POST /api/settings/update with no per-key
+          validation. A key containing `</script>` closes this element and
+          everything after it is parsed as markup — stored XSS on the settings
+          screen, executing in the next admin's session. The seed beside it is
+          developer data and was never at risk; it goes through the same helper
+          so the two lines cannot diverge and so nobody has to work out which is
+          which.
+        */}
+        <script type="application/json" id="crawler-seed" set:html={jsonForScript(KNOWN_CRAWLERS_SEED)} />
+        <script type="application/json" id="crawler-policy" set:html={jsonForScript(values.crawler_policy)} />
+        <table class="w-full text-sm">
+          <tbody id="crawler-rows"></tbody>
+        </table>
+        <div class="flex items-center gap-2 mt-3">
+          <button type="button" id="crawler-save"
+            class="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium">Save crawler policy</button>
+          <span id="crawler-status" class="text-sm text-gray-500"></span>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2" for="robots_txt">Extra robots.txt rules</label>
+        <textarea id="robots_txt" name="robots_txt" rows="6" spellcheck="false"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          placeholder={'Disallow: /search\n\nUser-agent: GPTBot\nDisallow: /'}>{values.robots_txt}</textarea>
+        <p class="text-xs text-gray-500 mt-1">
+          Appended to the rules AstroBaaS already serves — which always include
+          <code class="px-1 bg-gray-100 rounded">Disallow: /admin</code>,
+          <code class="px-1 bg-gray-100 rounded">Disallow: /api/</code> and the
+          <code class="px-1 bg-gray-100 rounded">Sitemap:</code> line, so you cannot remove them by
+          accident. To let a blocked path through, add an <code class="px-1 bg-gray-100 rounded">Allow:</code>
+          for it: robots.txt matches by specificity, not by order.
+          Start a new <code class="px-1 bg-gray-100 rounded">User-agent:</code> line to target one crawler.
+          The checkbox above overrides all of this.
+          <a href="/robots.txt" target="_blank" rel="noopener" class="text-blue-600 hover:underline">See the file</a>.
+        </p>
+      </div>
+
+      <div class="flex justify-end">
+        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium">
+          Save reading
+        </button>
+      </div>
+    </form>
+    </div>
+
+    <div class="flex flex-wrap items-baseline gap-x-3 mt-12 mb-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-500">Shop</h2>
+      <p class="text-sm text-gray-400">Selling: limits, payment, notifications, and the notices the law requires.</p>
+    </div>
+
+    <div id="set-shop" class="scroll-mt-20">
+    <form id="shop-toggle-form" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8 space-y-4">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Selling</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          The master switch for the shop. While it is off this install is a plain
+          site: the public product, order and payment endpoints answer as if they
+          never existed, and the Shop menu stays out of the sidebar. Staff screens
+          keep working, so you can stock the catalogue before opening.
+        </p>
+      </div>
+      <label class="flex items-start gap-3">
+        <input
+          type="checkbox"
+          name="commerce_enabled"
+          checked={commerceOn}
+          class="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+        />
+        <span class="text-sm text-gray-700">
+          <span class="font-medium">This site sells products</span><br />
+          <span class="text-gray-500">Turning it off does not delete anything — products and orders stay in the database.</span>
+        </span>
+      </label>
+      <div class="flex justify-end">
+        <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          Save
+        </button>
+      </div>
+    </form>
+    </div>
+
+    <div id="set-orderlimits" class="scroll-mt-20">
+    <!-- Reading -->
+    <form id="commerce-form" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8 space-y-6">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Currency</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          The currency new orders are priced in. Prices are entered in it — nothing is
+          converted, and this is not multi-currency. Existing orders keep the currency they
+          were placed in, because an invoice must say what was actually charged.
+        </p>
+      </div>
+      <div class="mb-8">
+        <label for="shop_currency" class="block text-sm font-medium text-gray-700 mb-1">
+          Currency code
+        </label>
+        <input
+          id="shop_currency"
+          name="shop_currency"
+          type="text"
+          maxlength="3"
+          value={values.shop_currency}
+          placeholder="EUR"
+          class="w-40 px-3 py-2 border border-gray-300 rounded-lg uppercase font-mono focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+        <p class="text-xs text-gray-500 mt-1">
+          Three letters, ISO 4217 — <code class="bg-gray-100 px-1 rounded">EUR</code>,
+          <code class="bg-gray-100 px-1 rounded">GBP</code>,
+          <code class="bg-gray-100 px-1 rounded">BGN</code>. Zero-decimal currencies such as
+          <code class="bg-gray-100 px-1 rounded">JPY</code> are handled correctly.
+        </p>
+      </div>
+      {/*
+        ADDITIONAL currencies, with the rate the shop quotes them at.
+
+        Its own <div> and its own save button, OUTSIDE #commerce-form, because
+        this posts to /api/commerce/currencies rather than the generic settings
+        endpoint. That is not tidiness: `updated_at` has to be stamped by the
+        server. Staleness is the whole safety mechanism here — the operator
+        types the rate, so the only defence against quoting a year-old number is
+        knowing when it was typed, and a client-settable timestamp defeats it.
+      */}
+      <div class="mt-8 pt-6 border-t border-gray-200">
+        <h2 class="text-lg font-semibold text-gray-900">Other currencies</h2>
+        <p class="text-sm text-gray-500 mt-1 mb-3">
+          Quote buyers in a currency other than {values.shop_currency || 'EUR'}. Rates are
+          <strong>yours</strong> — nothing here fetches a live rate, because a rate worth
+          trusting needs an account somewhere. What is charged is frozen onto each order
+          along with the rate used, so changing a rate never rewrites a past order.
+        </p>
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase tracking-wide text-gray-500">
+              <th class="pb-2">Code</th>
+              <th class="pb-2">1 {values.shop_currency || 'EUR'} =</th>
+              <th class="pb-2">Rate set</th>
+              <th class="pb-2">On offer</th>
+              <th class="pb-2"></th>
+            </tr>
+          </thead>
+          <tbody id="currency-rows"></tbody>
+        </table>
+        <p id="currency-empty" class="text-sm text-gray-400 py-2">
+          No other currencies. The shop quotes {values.shop_currency || 'EUR'} only.
+        </p>
+        <div class="flex items-center gap-2 mt-3">
+          <button type="button" id="currency-add"
+            class="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium">Add a currency</button>
+          <button type="button" id="currency-save"
+            class="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium">Save rates</button>
+          <span id="currency-status" class="text-sm text-gray-500"></span>
+        </div>
+      </div>
+      {/*
+        Fields the merchant declares on their own products.
+
+        Here rather than on the product form because a DEFINITION is a shop-wide
+        decision and a VALUE is a per-product one — putting the schema editor
+        inside the thing it describes is how a merchant deletes a field for
+        every product while meaning to clear it for one.
+      */}
+      <div class="mt-8 pt-6 border-t border-gray-200">
+        <h2 class="text-lg font-semibold text-gray-900">Product fields</h2>
+        <p class="text-sm text-gray-500 mt-1 mb-3">
+          Extra fields on every product — frame width, material, a supplier reference.
+          <strong>Staff-only unless you say otherwise</strong>: the first field most shops
+          add is a cost price, and it must not reach the storefront by accident. Removing a
+          field here hides it; it never deletes what products already store.
+        </p>
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase tracking-wide text-gray-500">
+              <th class="pb-2">Name</th><th class="pb-2">Label</th>
+              <th class="pb-2">Type</th><th class="pb-2">Visible to</th><th class="pb-2"></th>
+            </tr>
+          </thead>
+          <tbody id="pfield-rows"></tbody>
+        </table>
+        <p id="pfield-empty" class="text-sm text-gray-400 py-2">No extra product fields.</p>
+        <div class="flex items-center gap-2 mt-3">
+          <button type="button" id="pfield-add"
+            class="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium">Add a field</button>
+          <button type="button" id="pfield-save"
+            class="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium">Save fields</button>
+          <span id="pfield-status" class="text-sm text-gray-500"></span>
+        </div>
+      </div>
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Unpaid orders</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          An order nobody pays for holds its stock. The sweep cancels it and puts the
+          items back; the reminder asks the customer first.
+        </p>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
+        <div class="sm:col-span-2">
+          <label class="flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" name="orders_abandon_enabled" value="true"
+              checked={settingBool(values.orders_abandon_enabled, true)}
+              class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+            <span class="text-sm font-medium text-gray-700">Cancel unpaid orders and return their stock</span>
+          </label>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="orders_abandon_after_days">
+            Cancel after (days)
+          </label>
+          <input id="orders_abandon_after_days" name="orders_abandon_after_days" type="number" min="1" max="90"
+            value={values.orders_abandon_after_days}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+        </div>
+        <div class="sm:col-span-2 border-t border-gray-100 pt-4">
+          <label class="flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" name="orders_recovery_enabled" value="true"
+              checked={settingBool(values.orders_recovery_enabled, false)}
+              class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+            <span class="text-sm font-medium text-gray-700">Email the customer once before cancelling</span>
+          </label>
+          <p class="text-xs text-gray-500 mt-1 ml-7">
+            Off by default. Cancelling an order is housekeeping you do to your own records;
+            emailing the customer is a message from you to a person, so it is your choice to
+            make. On a bank-transfer order this is often the difference between a sale and a
+            cancellation, because paying takes a second visit.
+          </p>
+          {!emailTransport && (
+            <p class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 mt-2 ml-7">
+              No mail transport is configured, so this reminder would only be written to the
+              server log.
+            </p>
+          )}
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="orders_recovery_after_hours">
+            Remind after (hours)
+          </label>
+          <input id="orders_recovery_after_hours" name="orders_recovery_after_hours" type="number" min="1" max="720"
+            value={values.orders_recovery_after_hours}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          <p class="text-xs text-gray-500 mt-1">
+            Always pulled below the cancellation deadline — a reminder about an order that
+            has already been cancelled is a message about nothing.
+          </p>
+        </div>
+        <div class="sm:col-span-2 border-t border-gray-100 pt-4">
+          <p class="text-sm text-gray-600">
+            Card and wallet payments (Stripe, PayPal, Klarna) are settled in minutes, not days,
+            so an unpaid order paid that way lets go of its stock much sooner. Bank transfer and
+            cash on delivery keep the day-based cancellation above.
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="orders_payment_hold_minutes">
+            Online payment hold (minutes)
+          </label>
+          <input id="orders_payment_hold_minutes" name="orders_payment_hold_minutes" type="number"
+            min="0" max={MAX_HOLD_MINUTES}
+            value={values.orders_payment_hold_minutes}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          <p class="text-xs text-gray-500 mt-1">
+            Default 120. 0 switches it off. Otherwise {MIN_HOLD_MINUTES}–{MAX_HOLD_MINUTES}, because
+            Stripe's payment page can close no sooner than 30 minutes and no later than a day, and it
+            closes with the hold. PayPal's page stays open for 3 hours whatever this says. A payment
+            that arrives late reopens the order, or marks it "needs refund" if the stock has gone.
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="orders_max_unpaid_per_buyer">
+            Unpaid orders one buyer may hold
+          </label>
+          <input id="orders_max_unpaid_per_buyer" name="orders_max_unpaid_per_buyer" type="number"
+            min="0" max={MAX_MAX_UNPAID}
+            value={values.orders_max_unpaid_per_buyer}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          <p class="text-xs text-gray-500 mt-1">
+            Default 5. 0 switches it off. Counted by email, and for anonymous shoppers also by
+            network address, so one script cannot reserve your whole catalogue. Orders you place
+            yourself from the admin are never limited.
+          </p>
+        </div>
+        <div class="sm:col-span-2 border-t border-gray-100 pt-4">
+          <label class="flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" name="orders_risk_hold_enabled" value="true"
+              checked={values.orders_risk_hold_enabled}
+              class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+            <span class="text-sm font-medium text-gray-700">Put high-risk orders on hold for review</span>
+          </label>
+          <p class="text-xs text-gray-500 mt-1 ml-7">
+            Off by default. Risky-looking orders are always flagged; with this on, they are also placed
+            "on hold" instead of "pending". The customer can still pay, and nobody is turned away, but
+            the order does not move on until you move it.
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="orders_risk_hold_score">
+            Hold at risk score
+          </label>
+          <input id="orders_risk_hold_score" name="orders_risk_hold_score" type="number" min="1" max="100"
+            value={values.orders_risk_hold_score}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          <p class="text-xs text-gray-500 mt-1">
+            Default 5, the score at which an order is flagged.
+          </p>
+        </div>
+      </div>
+
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Order limits</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          Checkout is public, so these caps bound what a single anonymous request can
+          order. Values outside the allowed range are clamped.
+        </p>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <div>
+          <label for="order_max_qty_per_product" class="block text-sm font-medium text-gray-700 mb-1">
+            Max units per product
+          </label>
+          <input
+            id="order_max_qty_per_product"
+            name="order_max_qty_per_product"
+            type="number"
+            min={ORDER_LIMIT_BOUNDS.maxQtyPerProduct.min}
+            max={ORDER_LIMIT_BOUNDS.maxQtyPerProduct.max}
+            value={orderLimits.maxQtyPerProduct}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <p class="text-xs text-gray-500 mt-1">
+            How many of one product a single order may contain. Default 3
+            (allowed {ORDER_LIMIT_BOUNDS.maxQtyPerProduct.min}–{ORDER_LIMIT_BOUNDS.maxQtyPerProduct.max}).
+          </p>
+        </div>
+        <div>
+          <label for="order_max_items_per_order" class="block text-sm font-medium text-gray-700 mb-1">
+            Max line items per order
+          </label>
+          <input
+            id="order_max_items_per_order"
+            name="order_max_items_per_order"
+            type="number"
+            min={ORDER_LIMIT_BOUNDS.maxItemsPerOrder.min}
+            max={ORDER_LIMIT_BOUNDS.maxItemsPerOrder.max}
+            value={orderLimits.maxItemsPerOrder}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <p class="text-xs text-gray-500 mt-1">
+            Distinct products in one order. Default 50
+            (allowed {ORDER_LIMIT_BOUNDS.maxItemsPerOrder.min}–{ORDER_LIMIT_BOUNDS.maxItemsPerOrder.max}).
+          </p>
+        </div>
+      </div>
+      <div class="flex justify-end">
+        <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          Save order limits
+        </button>
+      </div>
+    </form>
+    </div>
+
+    <div id="set-payments" class="scroll-mt-20">
+    <!-- Payments (read-only: credentials come from the environment) -->
+    <section class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
+      <div class="mb-4">
+        <h2 class="text-lg font-semibold text-gray-900">Payment providers</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          Configured with environment variables, not here — settings are readable by
+          the public site, so provider secrets must never be stored in them. Set
+          <code class="bg-gray-100 px-1 rounded">PAYMENTS_ENABLED</code> plus each
+          provider's variables, then restart.
+        </p>
+      </div>
+      <ul class="divide-y divide-gray-200">
+        {payments.map((p) => (
+          <li class="py-3 flex items-start justify-between gap-4 flex-wrap">
+            <div class="min-w-0">
+              <span class="font-medium text-gray-900">{p.label}</span>
+              <span class="text-xs text-gray-500 ml-2">{p.id}</span>
+              {p.requested && p.missingEnv.length > 0 && (
+                <p class="text-xs text-red-700 mt-1">
+                  Enabled but not usable — set: {p.missingEnv.join(', ')}
+                </p>
+              )}
+              {p.requested && p.missingEnv.length === 0 && p.problems.length > 0 && (
+                <ul class="text-xs text-red-700 mt-1 list-disc pl-4 space-y-0.5">
+                  {p.problems.map((problem) => <li>{problem}</li>)}
+                </ul>
+              )}
+              {!p.requested && (
+                <p class="text-xs text-gray-500 mt-1">
+                  Add <code class="bg-gray-100 px-1 rounded">{p.id}</code> to PAYMENTS_ENABLED to offer it.
+                </p>
+              )}
+            </div>
+            <span class={`px-2 py-0.5 rounded-full text-xs shrink-0 ${
+              p.enabled ? 'bg-green-100 text-green-800'
+                : p.requested ? 'bg-red-100 text-red-800'
+                : 'bg-gray-100 text-gray-600'
+            }`}>
+              {p.enabled ? 'active' : p.requested ? 'misconfigured' : 'off'}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p class="text-xs text-gray-500 mt-4">
+        Manual methods (bank transfer, cash on delivery) are always available and need no configuration.
+      </p>
+    </section>
+    </div>
+
+    <div id="set-salenotify" class="scroll-mt-20">
+    <!-- New-sale notifications -->
+    <form id="sale-notify-form" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8 space-y-6">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">New-sale notifications</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          Email whoever runs the shop the moment an order comes in — the total, how it
+          is being paid, and whether the money has actually arrived.
+        </p>
+      </div>
+
+      {!emailTransport && (
+        <p class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3">
+          No mail transport is configured, so these would only be written to the server
+          log. Set <code class="bg-amber-100 px-1 rounded">SMTP2GO_API_KEY</code> and
+          <code class="bg-amber-100 px-1 rounded">SMTP2GO_SENDER</code>, then activate the
+          SMTP2GO plugin.
+        </p>
+      )}
+      {emailTransport && (
+        <p class="text-xs text-gray-500">Mail is being sent through {emailTransport}.</p>
+      )}
+
+      <label class="flex items-center gap-3">
+        <input id={SALE_NOTIFY_KEYS.enabled} name={SALE_NOTIFY_KEYS.enabled} type="checkbox"
+          checked={saleNotifyOn} class="w-4 h-4 rounded border-gray-300" />
+        <span class="text-sm font-medium text-gray-700">Email me about every new order</span>
+      </label>
+
+      <div>
+        <label for={SALE_NOTIFY_KEYS.recipients} class="block text-sm font-medium text-gray-700 mb-1">
+          Send to
+        </label>
+        <textarea id={SALE_NOTIFY_KEYS.recipients} name={SALE_NOTIFY_KEYS.recipients} rows="2"
+          placeholder="owner@example.gr, shop@example.gr"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm">{saleNotifyRaw}</textarea>
+        <p class="text-xs text-gray-500 mt-1">
+          Up to {MAX_SALE_RECIPIENTS} addresses, separated by commas, spaces or new lines.
+          Each is emailed separately, so nobody sees the others.
+          {saleNotifyOn && saleNotify.recipients.length === 0 && (
+            <span class="text-red-700"> Nothing here is a usable address, so no
+            notification is being sent.</span>
+          )}
+          {saleNotify.recipients.length > 0 && (
+            <span> Currently notifying {saleNotify.recipients.length}.</span>
+          )}
+        </p>
+      </div>
+
+      <p class="text-xs text-gray-500">
+        Want it on your phone instead? Add a webhook for the
+        <code class="bg-gray-100 px-1 rounded">order.created</code> event under
+        <a href="/admin/webhooks" class="text-blue-600 hover:underline">Webhooks</a> and point
+        it at whatever sends your WhatsApp or Viber messages. That path is signed, retried
+        and logged; this one is not.
+      </p>
+
+      <div class="flex justify-end">
+        <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          Save notifications
+        </button>
+      </div>
+    </form>
+    </div>
+
+    <div id="set-withdrawal" class="scroll-mt-20">
+    <!-- Consumer rights (EU) -->
+    <form id="withdrawal-form" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8 space-y-6">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Right of withdrawal (EU)</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          Selling to consumers in the EU at a distance means giving them at least 14 days to
+          withdraw, and telling them so <em>before</em> they order. Fill these in and
+          AstroBaaS publishes the notice and the model form at
+          <a href="/legal/withdrawal" class="text-blue-600 underline" target="_blank" rel="noopener">/legal/withdrawal</a>.
+          Not legal advice — national rules differ and some goods are exempt.
+        </p>
+      </div>
+
+      {withdrawal.enabled && withdrawalMissing.length > 0 && (
+        <div class="rounded-lg border border-amber-300 bg-amber-50 p-3">
+          <p class="text-sm text-amber-900">
+            Not published yet — still needed: {withdrawalMissing.join(', ')}.
+            An incomplete notice is worse than none: omitting required trader
+            information extends the withdrawal period by twelve months.
+          </p>
+        </div>
+      )}
+
+      <label class="flex items-center gap-3">
+        <input id={WITHDRAWAL_KEYS.enabled} name={WITHDRAWAL_KEYS.enabled} type="checkbox" checked={withdrawal.enabled}
+          class="w-4 h-4 rounded border-gray-300" />
+        <span class="text-sm font-medium text-gray-700">Publish a withdrawal notice</span>
+      </label>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <div>
+          <label for={WITHDRAWAL_KEYS.traderName} class="block text-sm font-medium text-gray-700 mb-1">Legal name</label>
+          <input id={WITHDRAWAL_KEYS.traderName} name={WITHDRAWAL_KEYS.traderName} type="text" value={withdrawal.traderName}
+            placeholder="Example Trading Ltd" class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+        </div>
+        <div>
+          <label for={WITHDRAWAL_KEYS.traderEmail} class="block text-sm font-medium text-gray-700 mb-1">Contact email</label>
+          <input id={WITHDRAWAL_KEYS.traderEmail} name={WITHDRAWAL_KEYS.traderEmail} type="email" value={withdrawal.traderEmail}
+            placeholder="returns@example.com" class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+        </div>
+      </div>
+      <div>
+        <label for={WITHDRAWAL_KEYS.traderAddress} class="block text-sm font-medium text-gray-700 mb-1">Postal address</label>
+        <textarea id={WITHDRAWAL_KEYS.traderAddress} name={WITHDRAWAL_KEYS.traderAddress} rows="3"
+          placeholder="Street, number&#10;Postcode, city&#10;Country"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg">{withdrawal.traderAddress}</textarea>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-6">
+        <div>
+          <label for={WITHDRAWAL_KEYS.traderPhone} class="block text-sm font-medium text-gray-700 mb-1">Phone (optional)</label>
+          <input id={WITHDRAWAL_KEYS.traderPhone} name={WITHDRAWAL_KEYS.traderPhone} type="text" value={withdrawal.traderPhone}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+        </div>
+        <div>
+          <label for={WITHDRAWAL_KEYS.days} class="block text-sm font-medium text-gray-700 mb-1">Withdrawal days</label>
+          <input id={WITHDRAWAL_KEYS.days} name={WITHDRAWAL_KEYS.days} type="number"
+            min={WITHDRAWAL_MINIMUM_DAYS} max={WITHDRAWAL_MAXIMUM_DAYS} value={withdrawal.days}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          <p class="text-xs text-gray-500 mt-1">Statutory minimum {WITHDRAWAL_MINIMUM_DAYS}; lower values are raised to it.</p>
+        </div>
+        <div>
+          <label for={WITHDRAWAL_KEYS.returnCosts} class="block text-sm font-medium text-gray-700 mb-1">Return postage paid by</label>
+          <select id={WITHDRAWAL_KEYS.returnCosts} name={WITHDRAWAL_KEYS.returnCosts}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+            <option value="customer" selected={withdrawal.returnCosts === 'customer'}>Customer</option>
+            <option value="trader" selected={withdrawal.returnCosts === 'trader'}>Us</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label for={WITHDRAWAL_KEYS.exemptions} class="block text-sm font-medium text-gray-700 mb-1">Exemptions (optional)</label>
+        <textarea id={WITHDRAWAL_KEYS.exemptions} name={WITHDRAWAL_KEYS.exemptions} rows="2"
+          placeholder="e.g. Made-to-measure lenses cannot be returned once produced."
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg">{withdrawal.exemptions}</textarea>
+        <p class="text-xs text-gray-500 mt-1">Goods you treat as exempt under Art. 16 (custom-made, perishable, sealed for hygiene…).</p>
+      </div>
+      <div class="flex justify-end">
+        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium">Save consumer rights</button>
+      </div>
+    </form>
+    </div>
+
+    <div class="flex flex-wrap items-baseline gap-x-3 mt-12 mb-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-500">Marketing</h2>
+      <p class="text-sm text-gray-400">Tags that other people’s scripts read.</p>
+    </div>
+
+    <div id="set-analytics" class="scroll-mt-20">
+    <!-- Analytics -->
+    <form id="analytics-form" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8 space-y-6">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Analytics &amp; marketing tags</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          Paste the <strong>ID</strong>, not the script snippet. AstroBaaS builds the loader,
+          which keeps the strict Content-Security-Policy intact and means a pasted
+          <code class="bg-gray-100 px-1 rounded">&lt;script&gt;</code> can never become
+          stored XSS. Tags fire only after the visitor consents to that category —
+          activate the <strong>Consent Banner</strong> plugin to ask them.
+        </p>
+      </div>
+
+      <div class="space-y-5">
+        {analyticsRows.map((row) => (
+          <div>
+            <div class="flex items-baseline justify-between gap-3 flex-wrap">
+              <label for={analyticsSettingKey(row.provider.id)} class="block text-sm font-medium text-gray-700">
+                {row.provider.label}
+                <span class="ml-2 text-xs font-normal text-gray-400">{row.provider.idLabel}</span>
+              </label>
+              <span class={`text-xs px-2 py-0.5 rounded-full ${
+                row.provider.category === 'marketing' ? 'bg-orange-100 text-orange-800' : 'bg-sky-100 text-sky-800'
+              }`}>{row.provider.category} consent</span>
+            </div>
+            <input
+              id={analyticsSettingKey(row.provider.id)}
+              name={analyticsSettingKey(row.provider.id)}
+              type="text"
+              value={row.value}
+              placeholder={row.provider.idPlaceholder}
+              class="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm"
+            />
+            {row.invalid && (
+              <p class="text-xs text-red-700 mt-1">
+                Saved value does not look like {row.provider.idPlaceholder} — it will not load until corrected.
+              </p>
+            )}
+            {row.configured && !row.allowedByCsp && (
+              <p class="text-xs text-amber-700 mt-1">
+                Configured, but blocked by the Content-Security-Policy. Rebuild with
+                <code class="bg-gray-100 px-1 rounded">ANALYTICS_PROVIDERS={row.provider.id}</code>
+                (comma-separated for several) so its origins are allowed.
+              </p>
+            )}
+            <p class="text-xs text-gray-400 mt-1">
+              <a href={row.provider.helpUrl} target="_blank" rel="noopener noreferrer" class="underline">Where do I find this?</a>
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div class="flex justify-end">
+        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium">Save tags</button>
+      </div>
+    </form>
+    </div>
+
+    <div class="flex flex-wrap items-baseline gap-x-3 mt-12 mb-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-500">Advanced</h2>
+      <p class="text-sm text-gray-400">Rarely, and carefully.</p>
+    </div>
+
+    <div id="set-assistant" class="scroll-mt-20">
+    <!-- AI assistant -->
+    <form id="assistant-form" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8 space-y-6">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">AI assistant</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          A chat bubble on every public page. Your API key stays on this server —
+          the widget talks to <code class="bg-gray-100 px-1 rounded">/api/assistant/chat</code>
+          here, never to the provider directly, so the key is never sent to visitors.
+          Activate the <strong>AI Assistant</strong> plugin to show the bubble.
+        </p>
+      </div>
+
+      {assistant.enabled && assistantGaps.length > 0 && (
+        <div class="rounded-lg border border-amber-300 bg-amber-50 p-3">
+          <p class="text-sm text-amber-900">Enabled but not usable — still needed: {assistantGaps.join(', ')}.</p>
+        </div>
+      )}
+      {assistantOk && !assistantError?.detail && (
+        <div class="rounded-lg border border-green-300 bg-green-50 p-3">
+          <p class="text-sm text-green-900">
+            Ready — {assistant.provider}, model <code>{assistant.model}</code>.
+          </p>
+        </div>
+      )}
+
+      {assistantError?.detail && (
+        <div class="rounded-lg border border-red-300 bg-red-50 p-3">
+          <p class="text-sm font-medium text-red-900">
+            Last provider failure
+            {assistantError.status ? ` — HTTP ${assistantError.status}` : ' — could not connect'}
+          </p>
+          {/* Interpolated, never set:html — this is provider output. */}
+          <p class="text-xs text-red-800 mt-1 font-mono break-words">{assistantError.detail}</p>
+          <p class="text-xs text-red-700 mt-2">
+            {assistantError.provider} · {assistantError.model}
+            {assistantError.at && <span> · {new Date(assistantError.at).toLocaleString()}</span>}
+          </p>
+          <p class="text-xs text-red-700 mt-2">
+            Credentials are redacted before this is stored or logged. It clears on the
+            next successful reply. The same line is in the server log — grep
+            <code class="bg-red-100 px-1 rounded">[assistant]</code>.
+          </p>
+        </div>
+      )}
+
+      <label class="flex items-center gap-3">
+        <input id={ASSISTANT_KEYS.enabled} name={ASSISTANT_KEYS.enabled} type="checkbox" checked={assistant.enabled}
+          class="w-4 h-4 rounded border-gray-300" />
+        <span class="text-sm font-medium text-gray-700">Enable the assistant</span>
+      </label>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <div>
+          <label for={ASSISTANT_KEYS.provider} class="block text-sm font-medium text-gray-700 mb-1">Provider</label>
+          <select id={ASSISTANT_KEYS.provider} name={ASSISTANT_KEYS.provider}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+            {ASSISTANT_PROVIDERS.map((p) => (
+              <option value={p.id} selected={assistant.provider === p.id}>{p.label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label for={ASSISTANT_KEYS.model} class="block text-sm font-medium text-gray-700 mb-1">Model</label>
+          <input id={ASSISTANT_KEYS.model} name={ASSISTANT_KEYS.model} type="text" value={assistant.model}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm" />
+        </div>
+      </div>
+
+      <div>
+        <label for={ASSISTANT_KEYS.apiKey} class="block text-sm font-medium text-gray-700 mb-1">API key</label>
+        <input id={ASSISTANT_KEYS.apiKey} name={ASSISTANT_KEYS.apiKey} type="password" autocomplete="off"
+          placeholder={assistantHasKey ? '•••••••• (leave blank to keep)' : 'sk-…'}
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm" />
+        <p class="text-xs text-gray-500 mt-1">
+          {assistantKeyFromEnv
+            ? 'Currently supplied by the ASSISTANT_API_KEY environment variable, which takes precedence over anything saved here.'
+            : 'Prefer the ASSISTANT_API_KEY environment variable — a key saved here is stored in the database in plain text (it is never public, and never sent to the browser, but a database backup contains it).'}
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <div>
+          <label for={ASSISTANT_KEYS.assistantId} class="block text-sm font-medium text-gray-700 mb-1">Assistant ID (optional)</label>
+          <input id={ASSISTANT_KEYS.assistantId} name={ASSISTANT_KEYS.assistantId} type="text" value={assistant.assistantId}
+            placeholder="asst_…" class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm" />
+        </div>
+        <div>
+          <label for={ASSISTANT_KEYS.baseUrl} class="block text-sm font-medium text-gray-700 mb-1">Base URL</label>
+          <input id={ASSISTANT_KEYS.baseUrl} name={ASSISTANT_KEYS.baseUrl} type="url" value={assistant.baseUrl}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm" />
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <div>
+          <label for={ASSISTANT_KEYS.title} class="block text-sm font-medium text-gray-700 mb-1">Widget title</label>
+          <input id={ASSISTANT_KEYS.title} name={ASSISTANT_KEYS.title} type="text" value={assistant.title}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+        </div>
+        <div>
+          <label for={ASSISTANT_KEYS.greeting} class="block text-sm font-medium text-gray-700 mb-1">Greeting</label>
+          <input id={ASSISTANT_KEYS.greeting} name={ASSISTANT_KEYS.greeting} type="text" value={assistant.greeting}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+        </div>
+      </div>
+
+      <div>
+        <label for={ASSISTANT_KEYS.systemPrompt} class="block text-sm font-medium text-gray-700 mb-1">System prompt</label>
+        <textarea id={ASSISTANT_KEYS.systemPrompt} name={ASSISTANT_KEYS.systemPrompt} rows="4"
+          placeholder="You are the assistant for … Answer only about our products and shipping."
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg">{assistant.systemPrompt}</textarea>
+        <p class="text-xs text-gray-500 mt-1">Added server-side on every request and never sent to the browser.</p>
+      </div>
+
+      <div class="flex justify-end">
+        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium">Save assistant</button>
+      </div>
+    </form>
+    </div>
+
+    <div id="set-captcha" class="scroll-mt-20">
+    <!-- Local anti-spam (proof-of-work) -->
+    <form id="captcha-form" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8 space-y-4">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Anti-spam check</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          A proof-of-work check that runs entirely on this server — no Google, no
+          Cloudflare, nothing for your visitors to consent to. Their browser
+          spends a fraction of a second of computation per submission; spam runs
+          have to pay that price on every attempt. Protected forms need
+          JavaScript enabled.
+        </p>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {([
+          ['contact', 'Contact form'],
+          ['newsletter', 'Newsletter signup'],
+          ['login', 'Login'],
+          ['forgot', 'Password reset request'],
+          ['forms', 'Public forms (content types that accept submissions)'],
+          // Both need the storefront to send the solved token — tick them only
+          // once yours does (INTEGRATION.md, "Checkout from a storefront").
+          ['checkout', 'Checkout (placing an order) — storefront must send the token'],
+          ['magic-link', 'Email sign-in link'],
+        ] as const).map(([id, label]) => (
+          <label class="flex items-center gap-3">
+            <input
+              type="checkbox"
+              name={`captcha_surface_${id}`}
+              data-surface={id}
+              checked={captchaSurfaces.has(id)}
+              class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            />
+            <span class="text-sm text-gray-700">{label}</span>
+          </label>
+        ))}
+      </div>
+      <div class="flex justify-end">
+        <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          Save anti-spam settings
+        </button>
+      </div>
+    </form>
+    </div>
+
+    <div id="set-maintenance" class="scroll-mt-20">
+    <!-- Maintenance mode -->
+    <form id="maintenance-form" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8 space-y-6">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Maintenance mode</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          Close the public site while you work on it. Visitors see a holding page;
+          you and your staff keep seeing the real thing, so you can check before
+          reopening.
+        </p>
+      </div>
+
+      {maintenanceByEnv && (
+        <p class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3">
+          <strong>Maintenance is currently forced on by the deployment</strong>
+          (<code class="bg-amber-100 px-1 rounded">MAINTENANCE_MODE</code>). That switch
+          lives in the server configuration and cannot be turned off from here — it is
+          the one that still works when the database does not.
+        </p>
+      )}
+
+      <label class="flex items-center gap-3">
+        <input id={MAINTENANCE_KEYS.enabled} name={MAINTENANCE_KEYS.enabled} type="checkbox"
+          checked={map[MAINTENANCE_KEYS.enabled] === true} class="w-4 h-4 rounded border-gray-300" />
+        <span class="text-sm font-medium text-gray-700">Close the public site</span>
+      </label>
+
+      <div>
+        <label for={MAINTENANCE_KEYS.message} class="block text-sm font-medium text-gray-700 mb-1">
+          What visitors are told
+        </label>
+        <input id={MAINTENANCE_KEYS.message} name={MAINTENANCE_KEYS.message} type="text"
+          value={maintenanceMessage} maxlength="500"
+          placeholder="We are carrying out scheduled maintenance and will be back shortly."
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+      </div>
+
+      <div>
+        <label for={MAINTENANCE_KEYS.until} class="block text-sm font-medium text-gray-700 mb-1">
+          Expected back (optional)
+        </label>
+        <input id={MAINTENANCE_KEYS.until} name={MAINTENANCE_KEYS.until} type="datetime-local"
+          value={maintenanceUntil ? maintenanceUntil.slice(0, 16) : ''}
+          class="px-3 py-2 border border-gray-300 rounded-lg" />
+        <p class="text-xs text-gray-500 mt-1">
+          Shown on the page and sent as <code class="bg-gray-100 px-1 rounded">Retry-After</code>,
+          which is what tells search engines when to come back.
+        </p>
+      </div>
+
+      <p class="text-xs text-gray-500">
+        The holding page answers <strong>503</strong>, not 200 — a success status would
+        tell Google this page is now your content. <code class="bg-gray-100 px-1 rounded">/admin</code>,
+        the login pages and the health checks stay reachable, so you can always get
+        back in and your host does not pull the site out of rotation.
+        {maintenance.active && <span class="text-amber-800"> The site is closed right now.</span>}
+      </p>
+
+      <div class="flex justify-end">
+        <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          Save maintenance settings
+        </button>
+      </div>
+    </form>
+    </div>
+
+    <div id="set-custom" class="scroll-mt-20">
+    <!-- Settings this install declared for itself (C-127) -->
+    {declaredGroups.map((g: any) => (
+      <form class="ab-group-form bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8 space-y-4" data-group={g.id}>
+        <div>
+          <h2 class="text-lg font-semibold text-gray-900">{g.label}</h2>
+          {g.description && <p class="text-sm text-gray-600 mt-1">{g.description}</p>}
+          <p class="text-xs text-gray-400 mt-1">
+            {g.public
+              ? 'Readable by anyone, including a decoupled storefront.'
+              : 'Staff only — not returned to anonymous callers.'}
+          </p>
+        </div>
+        {g.fields.map((f: any) => (
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1" for={`gf-${g.id}-${f.name}`}>
+              {f.name.replace(/[_-]+/g, ' ').replace(/^./, (c: string) => c.toUpperCase())}
+              {(f.rule as any).optional && <span class="text-gray-400 font-normal"> (optional)</span>}
+            </label>
+            {f.rule.type === 'boolean' ? (
+              <input id={`gf-${g.id}-${f.name}`} name={settingKeyFor(g, f.name)} type="checkbox"
+                class="rounded border-gray-300" checked={groupValues[settingKeyFor(g, f.name)] === true} />
+            ) : f.rule.type === 'enum' ? (
+              <select id={`gf-${g.id}-${f.name}`} name={settingKeyFor(g, f.name)}
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                <option value="">Choose…</option>
+                {((f.rule as any).values ?? []).map((v: string) => (
+                  <option value={v} selected={groupValues[settingKeyFor(g, f.name)] === v}>{v}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                id={`gf-${g.id}-${f.name}`}
+                name={settingKeyFor(g, f.name)}
+                type={f.rule.type === 'number' ? 'number' : f.rule.type === 'date' ? 'date'
+                  : f.rule.type === 'email' ? 'email' : f.rule.type === 'url' ? 'url' : 'text'}
+                value={String(groupValues[settingKeyFor(g, f.name)] ?? '')}
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+            )}
+          </div>
+        ))}
+        <div class="flex justify-end">
+          <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+            Save {g.label.toLowerCase()}
+          </button>
+        </div>
+      </form>
+    ))}
+
+    <!-- Declaring the groups themselves -->
+    <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
+      <h2 class="text-lg font-semibold text-gray-900 mb-1">Your own settings</h2>
+      <p class="text-sm text-gray-600 mb-4">
+        Fields this install needs and the product does not have — a booking mailbox, a lead time,
+        an opening-hours note. Each one is stored as an ordinary setting and validated against the
+        type you choose here, so a number field cannot end up holding the word “later”.
+        A group marked <strong>public</strong> is readable by a decoupled storefront through
+        <code>/api/settings/get</code>; anything else is staff-only.
+      </p>
+      <div id="sg-notice" class="hidden mb-3"></div>
+      {/*
+        The current definitions, handed to the script through a DATA ATTRIBUTE.
+        Not an inline <script set:html>: the hash-based CSP has no hash for one
+        the compiler did not see, and this needs no serialiser of its own.
+      */}
+      <div id="sg-data" hidden data-groups={JSON.stringify(declaredGroups)} data-key={SETTING_GROUPS_SETTING}></div>
+      <div id="sg-list" class="space-y-4 mb-3"></div>
+      <div class="flex items-center gap-2">
+        <button id="sg-add" type="button"
+          class="px-3 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">
+          + Add a group
+        </button>
+        <button id="sg-save" type="button"
+          class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          Save groups
+        </button>
+        <span class="text-xs text-gray-400">Saving reloads the page so the new fields appear above.</span>
+      </div>
+    </div>
+    </div>
+
+    <div id="set-tools" class="scroll-mt-20">
+    <!-- Tools shortcut -->
+    <div class="bg-gray-50 rounded-lg border border-gray-200 p-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-2">Tools</h2>
+      <p class="text-sm text-gray-600 mb-4">Backup, restore, and other operational actions live on the
+        <a href="/admin/tools" class="text-blue-600 hover:underline">Tools</a> page.</p>
+    </div>
+    </div>
+
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../../lib/apiClient';
+  import { flash as sharedFlash } from '../../../lib/admin-ui';
+
+  const notice = document.getElementById('settings-notice');
+  function flash(msg, kind = 'success') {
+    // The shared helper, not a seventh copy of the class string. Tailwind scans
+    // source TEXT for class names, so the branches there are written out in
+    // full — a composed `bg-${c}-50` is not in the stylesheet and the notice
+    // renders unstyled in a production build while looking right in dev.
+    sharedFlash(notice, msg, kind === 'success' ? 'success' : 'error');
+  }
+
+  async function save(form, fields) {
+    const payload = {};
+    // A control in the markup that is not in the caller's list renders, accepts
+    // input, reports "saved" and writes NOTHING. Complaining in the console is
+    // not a fix, but it turns a silent data loss into something the next person
+    // to open devtools finds in a second.
+    for (const el of form.querySelectorAll('[name]')) {
+      if (el.name && !fields.includes(el.name)) {
+        console.warn(`[astrobaas] settings: "${el.name}" is on the form but not in its save list — it will not be written.`);
+      }
+    }
+    for (const f of fields) {
+      const el = form.querySelector(`[name="${f}"]`);
+      if (!el) continue;
+      if (el.type === 'checkbox') payload[f] = el.checked;
+      else if (el.type === 'number') payload[f] = Number(el.value);
+      else if (form.querySelectorAll(`[name="${f}"]`).length > 1) {
+        // radio
+        const checked = form.querySelector(`[name="${f}"]:checked`);
+        payload[f] = checked ? checked.value : '';
+      } else {
+        payload[f] = el.value;
+      }
+    }
+    const res = await api.post('/api/settings/update', payload);
+    if (!res.ok) { flash(`Save failed: ${res.error}`, 'error'); return false; }
+    flash('Settings saved.');
+    return true;
+  }
+
+  document.getElementById('general-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    // The list is EXPLICIT, so a field added to the markup and not to this array
+    // renders, accepts input, reports "saved" and writes nothing. That is what
+    // happened to every field added in this session.
+    save(e.target, ['site_title', 'site_tagline', 'site_url', 'public_site_url', 'admin_email',
+      'contact_notify_email', 'order_confirmation_enabled',
+      'payment_instructions_bank_transfer', 'payment_instructions_cod',
+      'home_page_slug', 'site_author_name', 'site_author_url',
+      'admin_name', 'admin_logo']);
+  });
+  document.getElementById('assistant-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const keys = ['assistant_enabled', 'assistant_provider', 'assistant_model',
+      'assistant_id', 'assistant_base_url', 'assistant_title', 'assistant_greeting',
+      'assistant_system_prompt'];
+    // A blank key field means "keep the existing one" — sending '' would wipe a
+    // working credential every time someone edits the greeting.
+    const keyField = e.target.querySelector('[name="assistant_api_key"]');
+    if (keyField && keyField.value.trim() !== '') keys.push('assistant_api_key');
+    save(e.target, keys);
+    if (keyField) keyField.value = '';
+  });
+  document.getElementById('withdrawal-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    save(e.target, [
+      'withdrawal_enabled', 'withdrawal_days', 'trader_legal_name', 'trader_address',
+      'trader_email', 'trader_phone', 'withdrawal_exemptions', 'withdrawal_return_costs',
+    ]);
+  });
+  // ─── Settings this install declared for itself (C-127) ─────────────────
+  //
+  // The VALUE forms read their key list off the rendered inputs, exactly as the
+  // analytics form does — a hand-written key array beside a generated form is
+  // the shape where a field renders, accepts input, reports "saved" and writes
+  // nothing.
+  for (const form of document.querySelectorAll('.ab-group-form')) {
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const keys = [...e.target.querySelectorAll('[name]')].map((el) => el.name);
+      save(e.target, keys);
+    });
+  }
+
+  // ─── Declaring the groups ──────────────────────────────────────────────
+  const SG_FIELD_TYPES = [
+    ['string', 'Text'], ['number', 'Number'], ['boolean', 'Yes / No'],
+    ['enum', 'Choice (options)'], ['date', 'Date'], ['email', 'Email'],
+    ['url', 'URL'], ['slug', 'Slug'], ['id', 'Id (non-empty text)'],
+    ['array', 'List'], ['ref', 'Link to a type'], ['media', 'Image / file'],
+  ];
+
+  function sgFieldRow(f = { name: '', rule: { type: 'string' } }) {
+    const row = document.createElement('div');
+    row.className = 'sg-field flex flex-wrap items-center gap-2';
+
+    const name = document.createElement('input');
+    name.placeholder = 'field_name';
+    name.value = f.name ?? '';
+    name.className = 'sg-fname px-2 py-1 border border-gray-300 rounded w-36 text-sm';
+
+    const type = document.createElement('select');
+    type.className = 'sg-ftype px-2 py-1 border border-gray-300 rounded text-sm';
+    for (const [v, label] of SG_FIELD_TYPES) {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = label;
+      if (f.rule?.type === v) o.selected = true;
+      type.appendChild(o);
+    }
+
+    const opts = document.createElement('input');
+    opts.className = 'sg-fopts px-2 py-1 border border-gray-300 rounded flex-1 min-w-32 text-sm';
+    opts.value = f.rule?.type === 'ref'
+      ? (f.rule?.to ?? '')
+      : (Array.isArray(f.rule?.values) ? f.rule.values.join(', ') : '');
+    const syncOpts = () => {
+      opts.hidden = !(type.value === 'enum' || type.value === 'ref');
+      opts.placeholder = type.value === 'ref' ? 'which type?' : 'options, comma-separated';
+    };
+    type.addEventListener('change', syncOpts);
+    syncOpts();
+
+    const req = document.createElement('label');
+    req.className = 'flex items-center gap-1 text-xs text-gray-600';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'sg-freq';
+    cb.checked = !f.rule?.optional;
+    req.append(cb, document.createTextNode('required'));
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = '✕';
+    del.className = 'text-gray-400 hover:text-red-600 px-1';
+    del.addEventListener('click', () => row.remove());
+
+    row.append(name, type, opts, req, del);
+    return row;
+  }
+
+  function sgGroupRow(g = { id: '', label: '', fields: [] }) {
+    const box = document.createElement('div');
+    box.className = 'sg-group border border-gray-200 rounded-lg p-3 space-y-2';
+
+    const head = document.createElement('div');
+    head.className = 'flex flex-wrap items-center gap-2';
+    const id = document.createElement('input');
+    id.placeholder = 'group-id';
+    id.value = g.id ?? '';
+    id.className = 'sg-id px-2 py-1 border border-gray-300 rounded w-36 text-sm';
+    const label = document.createElement('input');
+    label.placeholder = 'Group name';
+    label.value = g.label ?? '';
+    label.className = 'sg-label px-2 py-1 border border-gray-300 rounded flex-1 min-w-40 text-sm';
+    const pub = document.createElement('label');
+    pub.className = 'flex items-center gap-1 text-xs text-gray-600';
+    const pubBox = document.createElement('input');
+    pubBox.type = 'checkbox';
+    pubBox.className = 'sg-public';
+    pubBox.checked = g.public === true;
+    pub.append(pubBox, document.createTextNode('public'));
+    const drop = document.createElement('button');
+    drop.type = 'button';
+    drop.textContent = '✕';
+    drop.className = 'text-gray-400 hover:text-red-600 px-2';
+    drop.addEventListener('click', () => box.remove());
+    head.append(id, label, pub, drop);
+
+    const list = document.createElement('div');
+    list.className = 'sg-fields space-y-2 ml-3 pl-3 border-l-2 border-gray-100';
+    for (const f of (g.fields ?? [])) list.appendChild(sgFieldRow(f));
+    if (list.children.length === 0) list.appendChild(sgFieldRow());
+
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.textContent = '+ Add field';
+    add.className = 'px-2 py-1 text-xs border border-gray-300 rounded text-gray-700 hover:bg-gray-50 ml-3';
+    add.addEventListener('click', () => list.appendChild(sgFieldRow()));
+
+    box.append(head, list, add);
+    return box;
+  }
+
+  function sgRead() {
+    return [...document.querySelectorAll('.sg-group')].map((box) => {
+      const fields = [...box.querySelectorAll('.sg-field')].map((row) => {
+        const rule = { type: row.querySelector('.sg-ftype').value };
+        if (!row.querySelector('.sg-freq').checked) rule.optional = true;
+        if (rule.type === 'enum') {
+          rule.values = row.querySelector('.sg-fopts').value.split(',').map((s) => s.trim()).filter(Boolean);
+        }
+        if (rule.type === 'ref') rule.to = row.querySelector('.sg-fopts').value.trim();
+        if (rule.type === 'array') rule.of = 'string';
+        return { name: row.querySelector('.sg-fname').value.trim(), rule };
+      }).filter((f) => f.name);
+      const group = {
+        id: box.querySelector('.sg-id').value.trim(),
+        label: box.querySelector('.sg-label').value.trim(),
+        fields,
+      };
+      if (box.querySelector('.sg-public').checked) group.public = true;
+      return group;
+    }).filter((g) => g.id && g.label && g.fields.length > 0);
+  }
+
+  const sgList = document.getElementById('sg-list');
+  const sgData = document.getElementById('sg-data');
+  if (sgList && sgData) {
+    const SG_SETTING = sgData.dataset.key;
+    let existing = [];
+    try { existing = JSON.parse(sgData.dataset.groups || '[]'); } catch { existing = []; }
+    for (const g of existing) sgList.appendChild(sgGroupRow(g));
+    document.getElementById('sg-add').addEventListener('click', () => sgList.appendChild(sgGroupRow()));
+    document.getElementById('sg-save').addEventListener('click', async () => {
+      const box = document.getElementById('sg-notice');
+      const res = await api.post('/api/settings/update', { [SG_SETTING]: sgRead() });
+      // sharedFlash, which takes the ELEMENT — the page's own local `flash`
+      // writes to the settings-wide notice at the top, which is the wrong end
+      // of a long page from the button that was just pressed.
+      if (!res.ok) { sharedFlash(box, `Could not save: ${res.error}`, 'error'); return; }
+      sharedFlash(box, 'Groups saved.');
+      // Reloaded because the VALUE forms above are rendered from the
+      // definitions: a new field that does not appear until the next visit
+      // reads as the save not having worked.
+      setTimeout(() => window.location.reload(), 600);
+    });
+  }
+
+  document.getElementById('analytics-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    // Read the field list off the rendered form rather than repeating the
+    // provider catalogue here — adding a connector must not require editing
+    // two places that can silently disagree.
+    const keys = [...e.target.querySelectorAll('input[name^="analytics_"]')].map((el) => el.name);
+    save(e.target, keys);
+  });
+  document.getElementById('shop-toggle-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    // Reload on success so the sidebar reflects the switch; the flash shows first.
+    save(e.target, ['commerce_enabled']).then((ok) => {
+      if (ok) setTimeout(() => window.location.reload(), 600);
+    });
+  });
+  /* ---------------- currency rates ----------------
+   * Rendered with textContent and element properties, never innerHTML with a
+   * value in it — these strings come back from the API and one of them is a
+   * currency code somebody typed.
+   *
+   * The rate is entered as a DECIMAL (1.087) and stored as an integer number of
+   * millionths (1087000). The operator should never see ppm: it exists so the
+   * arithmetic cannot drift, not to be typed.
+   */
+  {
+    const rowsEl = document.getElementById('currency-rows');
+    const emptyEl = document.getElementById('currency-empty');
+    const statusEl = document.getElementById('currency-status');
+    if (rowsEl) {
+      let rates = [];
+
+      const fmtAge = (iso) => {
+        const ms = Date.now() - Date.parse(iso);
+        if (!Number.isFinite(ms)) return 'never';
+        const days = Math.floor(ms / 86400000);
+        if (days > 0) return `${days} day${days === 1 ? '' : 's'} ago`;
+        const hours = Math.floor(ms / 3600000);
+        return hours > 0 ? `${hours}h ago` : 'just now';
+      };
+
+      function render() {
+        rowsEl.textContent = '';
+        emptyEl.hidden = rates.length > 0;
+        rates.forEach((r, i) => {
+          const tr = document.createElement('tr');
+          tr.className = 'border-t border-gray-100';
+
+          const code = document.createElement('input');
+          code.type = 'text';
+          code.maxLength = 3;
+          code.value = r.code || '';
+          code.placeholder = 'USD';
+          code.className = 'w-20 px-2 py-1 border border-gray-300 rounded uppercase font-mono';
+          code.addEventListener('input', () => { rates[i].code = code.value.toUpperCase(); });
+
+          const rate = document.createElement('input');
+          rate.type = 'text';
+          rate.inputMode = 'decimal';
+          // Six decimals, because that is exactly what a ppm integer holds.
+          rate.value = r.rate_ppm ? (r.rate_ppm / 1_000_000).toFixed(6).replace(/0+$/, '').replace(/\.$/, '') : '';
+          rate.placeholder = '1.087';
+          rate.className = 'w-32 px-2 py-1 border border-gray-300 rounded font-mono';
+          rate.addEventListener('input', () => {
+            const n = Number(rate.value);
+            rates[i].rate_ppm = Number.isFinite(n) && n > 0 ? Math.round(n * 1_000_000) : 0;
+          });
+
+          const age = document.createElement('span');
+          age.className = r.stale ? 'text-amber-700 font-medium' : 'text-gray-500';
+          // A stale rate is NAMED, not merely styled — colour alone is not a
+          // message, and this one decides what a customer is charged.
+          age.textContent = r.updated_at
+            ? (r.stale ? `${fmtAge(r.updated_at)} — out of date` : fmtAge(r.updated_at))
+            : 'not saved yet';
+
+          const on = document.createElement('input');
+          on.type = 'checkbox';
+          on.checked = r.enabled !== false;
+          on.addEventListener('change', () => { rates[i].enabled = on.checked; });
+
+          const del = document.createElement('button');
+          del.type = 'button';
+          del.className = 'text-red-600 hover:underline text-xs';
+          del.textContent = 'Remove';
+          del.addEventListener('click', () => { rates.splice(i, 1); render(); });
+
+          for (const [child, cls] of [[code, ''], [rate, ''], [age, 'text-xs'], [on, ''], [del, 'text-right']]) {
+            const td = document.createElement('td');
+            td.className = `py-2 pr-3 ${cls}`;
+            td.appendChild(child);
+            tr.appendChild(td);
+          }
+          rowsEl.appendChild(tr);
+        });
+      }
+
+      api.get('/api/commerce/currencies').then((res) => {
+        if (res.ok) { rates = (res.data?.rates ?? []).map((r) => ({ ...r })); render(); }
+      });
+
+      document.getElementById('currency-add')?.addEventListener('click', () => {
+        rates.push({ code: '', rate_ppm: 0, enabled: true, updated_at: '' });
+        render();
+      });
+
+      document.getElementById('currency-save')?.addEventListener('click', async () => {
+        // Refused HERE as well as on the server, so the operator learns which
+        // row is wrong instead of watching the whole save fail.
+        const badRow = rates.findIndex((r) => !/^[A-Z]{3}$/.test(r.code || '') || !(r.rate_ppm > 0));
+        if (badRow >= 0) {
+          statusEl.textContent = `Row ${badRow + 1}: needs a three-letter code and a rate above zero.`;
+          statusEl.className = 'text-sm text-red-600';
+          return;
+        }
+        statusEl.textContent = 'Saving…';
+        statusEl.className = 'text-sm text-gray-500';
+        const res = await api.put('/api/commerce/currencies', { rates });
+        if (res.ok) {
+          rates = (res.data?.rates ?? []).map((r) => ({ ...r }));
+          render();
+          statusEl.textContent = 'Rates saved.';
+          statusEl.className = 'text-sm text-green-600';
+        } else {
+          statusEl.textContent = res.error || 'Could not save the rates.';
+          statusEl.className = 'text-sm text-red-600';
+        }
+      });
+    }
+  }
+
+  /* ---------------- per-crawler policy ----------------
+   * Rendered from the seed the server injected, so the admin and robots.txt
+   * cannot disagree about which agents exist. Saved through the generic
+   * settings endpoint as one small object — `{ "GPTBot": "disallow" }` — which
+   * is what a plugin can extend without migrating anything.
+   */
+  {
+    const rowsEl = document.getElementById('crawler-rows');
+    const statusEl = document.getElementById('crawler-status');
+    if (rowsEl) {
+      const seed = JSON.parse(document.getElementById('crawler-seed')?.textContent || '[]');
+      const stored = JSON.parse(document.getElementById('crawler-policy')?.textContent || '{}');
+      const policy = { ...stored };
+      const PURPOSE = {
+        'search': 'Search',
+        'ai-training': 'AI training',
+        'ai-assistant': 'AI assistant',
+        'other': 'Other',
+      };
+
+      for (const c of seed) {
+        const tr = document.createElement('tr');
+        tr.className = 'border-t border-gray-100';
+
+        const name = document.createElement('td');
+        name.className = 'py-2 pr-3';
+        name.textContent = c.label;
+        const token = document.createElement('code');
+        token.className = 'ml-2 text-xs text-gray-400';
+        token.textContent = c.token;
+        name.appendChild(token);
+
+        const purpose = document.createElement('td');
+        purpose.className = 'py-2 pr-3 text-xs text-gray-500';
+        purpose.textContent = PURPOSE[c.purpose] || c.purpose;
+
+        const choice = document.createElement('td');
+        choice.className = 'py-2 text-right';
+        const sel = document.createElement('select');
+        sel.className = 'px-2 py-1 border border-gray-300 rounded text-sm';
+        for (const [val, label] of [['default', 'Default'], ['allow', 'Allow'], ['disallow', 'Block']]) {
+          const o = document.createElement('option');
+          o.value = val; o.textContent = label;
+          if ((policy[c.token] ?? 'default') === val) o.selected = true;
+          sel.appendChild(o);
+        }
+        sel.addEventListener('change', () => {
+          if (sel.value === 'default') delete policy[c.token];
+          else policy[c.token] = sel.value;
+        });
+        choice.appendChild(sel);
+
+        tr.append(name, purpose, choice);
+        rowsEl.appendChild(tr);
+      }
+
+      document.getElementById('crawler-save')?.addEventListener('click', async () => {
+        statusEl.textContent = 'Saving…';
+        statusEl.className = 'text-sm text-gray-500';
+        const res = await api.post('/api/settings/update', { crawler_policy: policy });
+        if (res.ok) {
+          statusEl.textContent = 'Crawler policy saved.';
+          statusEl.className = 'text-sm text-green-600';
+        } else {
+          statusEl.textContent = res.error || 'Could not save the policy.';
+          statusEl.className = 'text-sm text-red-600';
+        }
+      });
+    }
+  }
+
+  /* ---------------- merchant-declared product fields ---------------- */
+  {
+    const rowsEl = document.getElementById('pfield-rows');
+    const emptyEl = document.getElementById('pfield-empty');
+    const statusEl = document.getElementById('pfield-status');
+    if (rowsEl) {
+      let defs = [];
+      const TYPES = ['string', 'number', 'boolean', 'date', 'url', 'email', 'media'];
+
+      function render() {
+        rowsEl.textContent = '';
+        emptyEl.hidden = defs.length > 0;
+        defs.forEach((f, i) => {
+          const tr = document.createElement('tr');
+          tr.className = 'border-t border-gray-100';
+
+          const name = document.createElement('input');
+          name.type = 'text';
+          name.value = f.name || '';
+          name.placeholder = 'frame_width_mm';
+          name.className = 'w-44 px-2 py-1 border border-gray-300 rounded font-mono';
+          name.addEventListener('input', () => { defs[i].name = name.value.trim(); });
+
+          const label = document.createElement('input');
+          label.type = 'text';
+          label.value = f.label || '';
+          label.placeholder = 'Frame width (mm)';
+          label.className = 'w-48 px-2 py-1 border border-gray-300 rounded';
+          label.addEventListener('input', () => { defs[i].label = label.value; });
+
+          const type = document.createElement('select');
+          type.className = 'px-2 py-1 border border-gray-300 rounded';
+          for (const t of TYPES) {
+            const o = document.createElement('option');
+            o.value = t; o.textContent = t;
+            if ((f.rule?.type ?? 'string') === t) o.selected = true;
+            type.appendChild(o);
+          }
+          type.addEventListener('change', () => {
+            // `optional` always: a required custom field would make every
+            // EXISTING product unsaveable until somebody filled it in.
+            defs[i].rule = { type: type.value, optional: true };
+          });
+
+          const vis = document.createElement('select');
+          vis.className = 'px-2 py-1 border border-gray-300 rounded';
+          for (const [val, text] of [['staff', 'Staff only'], ['public', 'Storefront']]) {
+            const o = document.createElement('option');
+            o.value = val; o.textContent = text;
+            if ((f.visibility ?? 'staff') === val) o.selected = true;
+            vis.appendChild(o);
+          }
+          vis.addEventListener('change', () => {
+            defs[i].visibility = vis.value === 'public' ? 'public' : undefined;
+          });
+
+          const del = document.createElement('button');
+          del.type = 'button';
+          del.className = 'text-red-600 hover:underline text-xs';
+          del.textContent = 'Remove';
+          del.addEventListener('click', () => { defs.splice(i, 1); render(); });
+
+          for (const child of [name, label, type, vis, del]) {
+            const td = document.createElement('td');
+            td.className = 'py-2 pr-3';
+            td.appendChild(child);
+            tr.appendChild(td);
+          }
+          rowsEl.appendChild(tr);
+        });
+      }
+
+      api.get('/api/commerce/product-fields').then((res) => {
+        if (res.ok) { defs = (res.data?.fields ?? []).map((f) => ({ ...f })); render(); }
+      });
+
+      document.getElementById('pfield-add')?.addEventListener('click', () => {
+        defs.push({ name: '', label: '', rule: { type: 'string', optional: true } });
+        render();
+      });
+
+      document.getElementById('pfield-save')?.addEventListener('click', async () => {
+        statusEl.textContent = 'Saving…';
+        statusEl.className = 'text-sm text-gray-500';
+        const res = await api.put('/api/commerce/product-fields', { fields: defs });
+        if (res.ok) {
+          defs = (res.data?.fields ?? []).map((f) => ({ ...f }));
+          render();
+          statusEl.textContent = 'Product fields saved. Reload a product to see them.';
+          statusEl.className = 'text-sm text-green-600';
+        } else {
+          // Every reason, not just the first — the server returns them all.
+          const details = res.details ? Object.values(res.details).join(' · ') : '';
+          statusEl.textContent = details || res.error || 'Could not save the fields.';
+          statusEl.className = 'text-sm text-red-600';
+        }
+      });
+    }
+  }
+
+  document.getElementById('commerce-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    save(e.target, ['shop_currency', 'order_max_qty_per_product', 'order_max_items_per_order',
+      'orders_abandon_enabled', 'orders_abandon_after_days',
+      'orders_recovery_enabled', 'orders_recovery_after_hours',
+      'orders_payment_hold_minutes', 'orders_max_unpaid_per_buyer',
+      'orders_risk_hold_enabled', 'orders_risk_hold_score']);
+  });
+  document.getElementById('captcha-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const surfaces = Array.from(e.target.querySelectorAll('input[data-surface]:checked'))
+      .map((el) => el.dataset.surface);
+    const res = await api.post('/api/settings/update', { captcha_surfaces: surfaces });
+    if (!res.ok) flash(`Save failed: ${res.error}`, 'error');
+    else flash('Settings saved.');
+  });
+  document.getElementById('maintenance-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    save(e.target, ['maintenance_enabled', 'maintenance_message', 'maintenance_until']);
+  });
+  document.getElementById('sale-notify-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    save(e.target, ['sale_notify_enabled', 'sale_notify_recipients']);
+  });
+  document.getElementById('reading-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    save(e.target, ['posts_per_page', 'feed_items', 'feed_format', 'discourage_indexing', 'toc_min_headings', 'related_posts_count', 'robots_txt', 'link_check_external', 'search_synonyms', 'default_body_post', 'default_body_page', 'comments_enabled', 'reviews_enabled', 'editorial_review_required', 'author_archives_enabled', 'print_button', 'popup_enabled', 'popup_title', 'popup_text', 'popup_button_label', 'popup_button_url', 'popup_trigger', 'popup_delay_seconds', 'popup_scroll_percent', 'popup_frequency_days']);
+  });
+</script>

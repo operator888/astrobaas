@@ -1,0 +1,729 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import 'tailwindcss';
+/* Section styles for CMS-authored content (src/core/sections.ts). */
+@import './sections.css';
+
+/* Tailwind v4 CSS-first config (replaces tailwind.config.mjs). Keeps the
+   primary/secondary/accent palettes + Inter font + custom spacing so existing
+   utilities (bg-primary-600, text-secondary-800, .btn-primary, etc.) still
+   generate. */
+@theme {
+  --font-sans: 'Inter', system-ui, sans-serif;
+
+  --color-primary-50: #eff6ff;
+  --color-primary-100: #dbeafe;
+  --color-primary-200: #bfdbfe;
+  --color-primary-300: #93c5fd;
+  --color-primary-400: #60a5fa;
+  --color-primary-500: #3b82f6;
+  --color-primary-600: #2563eb;
+  --color-primary-700: #1d4ed8;
+  --color-primary-800: #1e40af;
+  --color-primary-900: #1e3a8a;
+
+  --color-secondary-50: #f5f3ff;
+  --color-secondary-100: #ede9fe;
+  --color-secondary-200: #ddd6fe;
+  --color-secondary-300: #c4b5fd;
+  --color-secondary-400: #a78bfa;
+  --color-secondary-500: #8b5cf6;
+  --color-secondary-600: #7c3aed;
+  --color-secondary-700: #6d28d9;
+  --color-secondary-800: #5b21b6;
+  --color-secondary-900: #4c1d95;
+
+  --color-accent-50: #ecfdf5;
+  --color-accent-100: #d1fae5;
+  --color-accent-200: #a7f3d0;
+  --color-accent-300: #6ee7b7;
+  --color-accent-400: #34d399;
+  --color-accent-500: #10b981;
+  --color-accent-600: #059669;
+  --color-accent-700: #047857;
+  --color-accent-800: #065f46;
+  --color-accent-900: #064e3b;
+
+  --spacing-18: 4.5rem;
+  --spacing-88: 22rem;
+}
+
+@layer base {
+  /* Theme tokens. BaseLayout injects an inline :root for the active theme that
+     overrides these, so the site themes correctly on first paint (no JS). The
+     fallbacks below match the original Tailwind palette so an un-themed render
+     looks identical to before. */
+  :root {
+    --primary-color: #2563eb;   /* blue-600 */
+    --secondary-color: #7c3aed; /* purple-600 */
+    --accent-color: #059669;    /* green-600 */
+    --background-color: #ffffff;
+    --text-color: #1f2937;
+    --heading-font: 'Inter';
+    --body-font: 'Inter';
+    --font-size-base: 16px;
+    /* Semantic colours + scales. These defaults reproduce the previous
+       hardcoded Tailwind look, so a site that never opens the customizer is
+       pixel-unchanged by this work. */
+    --surface-color: #ffffff;
+    --muted-color: #6b7280;
+    --border-color: #e5e7eb;
+    --on-primary: #ffffff;
+    --success-color: #059669;
+    --warning-color: #d97706;
+    --danger-color: #dc2626;
+    --line-height: 1.65;
+    --heading-line-height: 1.2;
+    --heading-weight: 700;
+    --letter-spacing: normal;
+    --h1: 2.5rem; --h2: 1.85rem; --h3: 1.4rem;
+    --radius-sm: 4px; --radius-md: 8px; --radius-lg: 12px; --radius-pill: 9999px;
+    --space-1: 0.25rem; --space-2: 0.5rem; --space-3: 1rem;
+    --space-4: 1.5rem; --space-6: 2.25rem; --space-8: 3rem; --section-y: 4rem;
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.04);
+    --shadow-md: 0 2px 8px rgb(0 0 0 / 0.06);
+    --shadow-lg: 0 8px 24px rgb(0 0 0 / 0.08);
+    --container: 72rem; --measure: 42rem;
+    --btn-bg: var(--primary-color); --btn-fg: var(--on-primary);
+    --btn-border: transparent; --btn-radius: var(--radius-md);
+    --header-align: space-between; --header-direction: row;
+    --header-pad: var(--space-3); --header-border: 1px;
+  }
+
+  html {
+    font-family: var(--body-font, 'Inter'), system-ui, sans-serif;
+    font-size: var(--font-size-base, 16px);
+    scroll-behavior: smooth;
+  }
+
+  body {
+    /* These were `@apply text-gray-900 bg-gray-50`, which meant the customizer's
+       background and text pickers round-tripped through the API, appeared in
+       /theme.css, and then painted nothing — the hardcoded utilities always won.
+       Two of five colour pickers did nothing, with a success toast either way.
+       The defaults above reproduce the previous appearance closely enough that
+       an untouched install looks the same. */
+    background-color: var(--background-color, #f9fafb);
+    color: var(--text-color, #111827);
+    line-height: 1.6;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-semibold;
+    font-family: var(--heading-font, 'Inter'), system-ui, sans-serif;
+    line-height: 1.2;
+  }
+  
+  h1 { @apply text-3xl md:text-4xl; }
+  h2 { @apply text-2xl md:text-3xl; }
+  h3 { @apply text-xl md:text-2xl; }
+  h4 { @apply text-lg md:text-xl; }
+  h5 { @apply text-base md:text-lg; }
+  h6 { @apply text-sm md:text-base; }
+  
+  p {
+    @apply mb-4;
+    line-height: 1.7;
+  }
+  
+  a {
+    @apply text-primary-600 hover:text-primary-700 transition-colors duration-200;
+  }
+  
+  button {
+    @apply transition-all duration-200;
+  }
+  
+  input, textarea, select {
+    @apply transition-all duration-200;
+  }
+  
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    @apply bg-gray-100;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 rounded-full;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400;
+  }
+}
+
+/* Component classes. Only the ones actually used in the app are kept; Tailwind
+   v4 doesn't support @apply-ing custom (non-utility) classes, so each is a flat
+   utility chain. `.prose` styles the rendered post HTML (set:html) on the blog
+   and the rich-text editor. */
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center px-4 py-2 text-sm font-medium rounded-lg bg-primary-600 text-white transition-colors duration-200 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2;
+  }
+
+  /* Was `text-gray-700` / `text-gray-900`: post BODY text ignored the theme
+     entirely, so choosing a text colour changed the chrome and left every
+     article grey — and under dark mode it would have been grey-on-black. */
+  .prose {
+    color: var(--text-color, #374151);
+    line-height: var(--line-height, 1.65);
+  }
+  .prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 {
+    @apply mt-6 mb-4;
+    color: var(--text-color, #111827);
+    font-weight: var(--heading-weight, 600);
+    line-height: var(--heading-line-height, 1.2);
+  }
+  .prose h1 { font-size: var(--h1, 2.5rem); }
+  .prose h2 { font-size: var(--h2, 1.85rem); }
+  .prose h3 { font-size: var(--h3, 1.4rem); }
+  .prose p { @apply mb-4; }
+  .prose ul, .prose ol { @apply mb-4 pl-6; }
+  .prose ul { @apply list-disc; }
+  .prose ol { @apply list-decimal; }
+  .prose li { @apply mb-2; }
+  .prose a { @apply text-primary-600 underline hover:text-primary-700; }
+  .prose blockquote {
+    @apply border-l-4 pl-4 italic my-6;
+    border-color: var(--border-color, #d1d5db);
+    color: var(--muted-color, #4b5563);
+  }
+  .prose code {
+    @apply px-1 py-0.5 text-sm;
+    background: color-mix(in srgb, var(--text-color, #111827) 8%, transparent);
+    border-radius: var(--radius-sm, 4px);
+  }
+  .prose pre { @apply bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto my-6; }
+  .prose img { @apply rounded-lg shadow-sm my-6; }
+  .prose table { @apply w-full border-collapse my-6; border: 1px solid var(--border-color, #d1d5db); }
+  .prose th, .prose td { @apply px-4 py-2; border: 1px solid var(--border-color, #d1d5db); }
+  .prose th { @apply font-semibold; background: color-mix(in srgb, var(--text-color, #111827) 5%, transparent); }
+  .prose hr {
+    @apply my-8 border-0;
+    height: 1px;
+    background: var(--border-color, #d1d5db);
+  }
+  /* Legal-template drafts mark unfilled business details with <mark>; the
+     browser default (pure yellow) reads as a highlighter accident. This reads
+     as what it is: something deliberate awaiting attention. */
+  .prose mark {
+    @apply px-1 py-0.5 font-medium;
+    background: #fef3c7;
+    color: #92400e;
+    border-radius: var(--radius-sm, 4px);
+  }
+}
+
+/* Theme-token utilities.
+
+   Inline `style="color: var(--text-color)"` is the obvious way to paint with a
+   theme token, and it does not work: the production CSP is hash-based with no
+   'unsafe-inline' and no 'unsafe-hashes', and hashes never cover style
+   ATTRIBUTES — so the browser drops every one of them silently. It looks right
+   in dev (no CSP) and loses its colour in production, which is the worst shape
+   a bug can have.
+
+   These classes live in a real stylesheet, which is always allowed. A theme
+   that needs more than a colour uses a scoped <style> in its own .astro file;
+   Astro hashes those. */
+.ab-ink { color: var(--text-color, #111827); }
+.ab-muted { color: var(--muted-color, #6b7280); }
+.ab-accent { color: var(--accent-color, #2563eb); }
+.ab-on-accent { color: var(--on-primary, #ffffff); }
+.ab-inherit { color: inherit; }
+.ab-surface { background: var(--surface-color, #ffffff); }
+.ab-bg-accent { background: var(--accent-color, #2563eb); }
+.ab-border-ink { border-color: var(--text-color, #111827); }
+.ab-border-on-accent { border-color: var(--on-primary, #ffffff); }
+.ab-heading-font { font-family: var(--heading-font, inherit); }
+
+/* Keyboard focus, in the theme's own accent.
+
+   `:focus-visible` only — pointer clicks stay clean, tab stops light up.
+   Driven by the theme token so the ring matches whichever theme is active;
+   the fallback is the default blue. Elements with their own ring utilities
+   (admin buttons) simply layer on top. */
+:focus-visible {
+  outline: 2px solid var(--primary-color, #2563eb);
+  outline-offset: 2px;
+}
+
+/* Loading animations */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes bounce {
+  0%, 100% {
+    transform: translateY(-25%);
+    animation-timing-function: cubic-bezier(0.8, 0, 1, 1);
+  }
+  50% {
+    transform: none;
+    animation-timing-function: cubic-bezier(0, 0, 0.2, 1);
+  }
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+.animate-bounce {
+  animation: bounce 1s infinite;
+}
+
+/* Custom animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideIn {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.5s ease-out;
+}
+
+.animate-slideIn {
+  animation: slideIn 0.3s ease-out;
+}
+
+/* Print styles (C-152)
+   ---------------------------------------------------------------------------
+   These rules are in the CORE stylesheet, not in the print-styles plugin.
+   `ensurePlugins` seeds every bundled plugin as INACTIVE, so a fresh install
+   printed the whole navigation and footer while a plugin nobody had heard of
+   sat in the list with the fix inside it. Printing an article is not an
+   opt-in feature.
+   The plugin remains as the reference example for the `plugin_styles` hook,
+   and its rules are a subset of these, so an install with it active is
+   unchanged. */
+@media print {
+  /* Applied to real chrome now — the nav, the footer, the contents list, the
+     locale switcher, the related-posts strip, the share row. Before this the
+     class was DEFINED and used on nothing, so every one of them printed. */
+  .no-print {
+    display: none !important;
+  }
+
+  body {
+    color: #000;
+    background: #fff;
+  }
+
+  /* Give the article the page. */
+  main, article {
+    width: 100% !important;
+    max-width: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* A link is useless on paper unless it says where it goes — but only an
+     EXTERNAL one. Printing "(/blog/x)" after every internal link is noise, and
+     printing the href of a link whose text already IS the href doubles it. */
+  a[href^="http"]::after {
+    content: " (" attr(href) ")";
+    font-size: 0.85em;
+    word-break: break-all;
+  }
+  a[href^="#"]::after,
+  a[href^="/"]::after,
+  a[href^="mailto:"]::after { content: ""; }
+
+  /* An interactive frame prints as a grey rectangle. Kept in THIS block rather
+     than a second `@media print` further down: two blocks are valid CSS and
+     make "is this rule inside the print rules?" ambiguous to read and to
+     check. */
+  .ab-embed-facade { display: none; }
+
+  /* Same reason, and the same block. The download line survives, so a printed
+     article still says where the document was. */
+  .ab-pdf-frame { display: none; }
+
+  /* Never split a heading from what follows it, or a picture across pages. */
+  h1, h2, h3, h4 { break-after: avoid-page; }
+  figure, img, table { break-inside: avoid; }
+  p { orphans: 3; widows: 3; }
+}
+
+/* ---------------------------------------------------------------------------
+   Theme token mapping. The UI is built with fixed Tailwind utilities
+   (bg-blue-600, text-blue-600, the blue→purple gradients). Rather than rewrite
+   every component, we remap those specific utilities to the active theme's CSS
+   variables. Combined with BaseLayout's SSR :root injection this themes the
+   whole site (public + admin) on first paint. Scoped to the exact classes in
+   use so unrelated blues/greens are untouched.
+   --------------------------------------------------------------------------- */
+.bg-blue-500, .bg-blue-600, .bg-blue-700 { background-color: var(--primary-color) !important; }
+.hover\:bg-blue-600:hover, .hover\:bg-blue-700:hover { background-color: var(--primary-color) !important; filter: brightness(0.92); }
+.text-blue-600, .text-blue-700, .text-blue-800 { color: var(--primary-color) !important; }
+.hover\:text-blue-600:hover, .hover\:text-blue-700:hover { color: var(--primary-color) !important; filter: brightness(0.92); }
+.border-blue-500, .border-blue-600 { border-color: var(--primary-color) !important; }
+.focus\:ring-blue-500:focus { --tw-ring-color: var(--primary-color) !important; }
+
+.bg-purple-600 { background-color: var(--secondary-color) !important; }
+.text-purple-600 { color: var(--secondary-color) !important; }
+
+.bg-green-600 { background-color: var(--accent-color) !important; }
+.text-green-600 { color: var(--accent-color) !important; }
+
+.bg-gradient-to-r.from-blue-600.to-purple-600,
+.bg-gradient-to-br.from-blue-600.to-purple-600 {
+  background-image: linear-gradient(to right, var(--primary-color), var(--secondary-color)) !important;
+}
+
+/* ---------------------------------------------------------------------------
+   Surfaces that were hardcoded to Tailwind greys. Until these read the tokens,
+   choosing a background in the customizer changed the page but left every card,
+   header and section stubbornly white — which is what made presets look broken
+   rather than applied.
+   --------------------------------------------------------------------------- */
+.bg-white { background-color: var(--surface-color) !important; }
+.bg-gray-50 { background-color: color-mix(in srgb, var(--text-color) 3%, var(--background-color)) !important; }
+.bg-gray-100 { background-color: color-mix(in srgb, var(--text-color) 6%, var(--background-color)) !important; }
+.border-gray-100, .border-gray-200, .border-gray-300 { border-color: var(--border-color) !important; }
+.text-gray-500, .text-gray-600 { color: var(--muted-color) !important; }
+.text-gray-700, .text-gray-800, .text-gray-900 { color: var(--text-color) !important; }
+
+/* Gradient washes were fixed blue→purple, so every preset still looked blue
+   above the fold.
+
+   ALL stops must be mapped, not just the ones that look brand-coloured. A
+   half-mapped gradient is worse than none: the blog band kept `from-gray-50
+   to-blue-50` while its heading correctly followed --text-color, so in dark
+   mode the title rendered light-on-light and was effectively invisible. Caught
+   by looking at the rendered page, not by any assertion. */
+.from-blue-50, .from-gray-50 {
+  --tw-gradient-from: color-mix(in srgb, var(--primary-color) 8%, var(--background-color)) !important;
+}
+.via-white { --tw-gradient-via: var(--background-color) !important; }
+.to-purple-50 { --tw-gradient-to: color-mix(in srgb, var(--secondary-color) 10%, var(--background-color)) !important; }
+.to-blue-50 { --tw-gradient-to: color-mix(in srgb, var(--primary-color) 12%, var(--background-color)) !important; }
+/* The strong brand gradients (hero CTAs, cards) follow the brand colours. */
+.from-blue-600 { --tw-gradient-from: var(--primary-color) !important; }
+.to-purple-600 { --tw-gradient-to: var(--secondary-color) !important; }
+
+/* Shape and elevation follow the theme rather than Tailwind's fixed scale. */
+.rounded-lg { border-radius: var(--radius-md) !important; }
+.rounded-xl, .rounded-2xl { border-radius: var(--radius-lg) !important; }
+.shadow-sm { box-shadow: var(--shadow-sm) !important; }
+.shadow, .shadow-md { box-shadow: var(--shadow-md) !important; }
+.shadow-lg, .shadow-xl { box-shadow: var(--shadow-lg) !important; }
+
+
+/* ---------------------------------------------------------------------------
+   Consumers for the layout, spacing and button tokens.
+
+   Emitting a token that nothing reads is the exact bug this whole pass exists
+   to fix — the customizer used to offer a background colour that no rule ever
+   applied. A token test now fails the build if any emitted token has no
+   `var()` consumer, and these are the consumers for the layout scale.
+   --------------------------------------------------------------------------- */
+
+/* Content width follows the theme rather than a fixed Tailwind container. */
+.max-w-7xl { max-width: var(--container) !important; }
+/* Article text gets a measure, so a wide container doesn't produce 200-character lines. */
+.prose { max-width: var(--measure); }
+
+/* Vertical rhythm between page sections. */
+.ab-section { padding-top: var(--section-y); padding-bottom: var(--section-y); }
+.ab-stack > * + * { margin-top: var(--space-4); }
+.ab-stack-tight > * + * { margin-top: var(--space-1); }
+.ab-stack-loose > * + * { margin-top: var(--space-6); }
+
+/* Buttons. The four buttonStyle presets differ only in these tokens, so a theme
+   or a plugin restyles every button by selecting a key — no class coordination. */
+.ab-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: var(--space-2) var(--space-4);
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  border: 1px solid var(--btn-border);
+  border-radius: var(--btn-radius);
+  font-weight: 500; text-decoration: none; cursor: pointer;
+  transition: filter .15s ease;
+}
+.ab-btn:hover { filter: brightness(0.94); }
+
+
+/* ---------------------------------------------------------------------------
+   Content alignment classes.
+
+   The editor's alignment buttons used to emit `style="text-align:center"`,
+   which the sanitizer strips — so alignment worked in the editor and was
+   destroyed on save. These classes are what it emits now, and they are the
+   first two entries of the strict content class allow-list.
+
+   `ab-` is a one-way prefix: once these are in stored HTML on a live site,
+   renaming them breaks real content.
+   --------------------------------------------------------------------------- */
+.ab-text-left { text-align: left; }
+.ab-text-center { text-align: center; }
+.ab-text-right { text-align: right; }
+
+
+/* ---------------------------------------------------------------------------
+   Touch targets.
+
+   Admin row actions render at roughly 25x20px — below the ~44px that a finger
+   can reliably hit, and sitting immediately beside a destructive Delete. On a
+   phone that is not a cosmetic problem: it is a mis-tap that deletes a product.
+
+   Applied at the pointer level rather than the viewport, because the problem is
+   the input device, not the screen width — a touchscreen laptop has it too.
+   --------------------------------------------------------------------------- */
+@media (pointer: coarse) {
+  .ab-touch-target,
+  table button,
+  table a[href],
+  td button,
+  td a[href] {
+    min-height: 44px;
+    min-width: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Inline links inside prose are text, not controls — forcing them to 44px
+     would break the line box. Scope the rule back off them. */
+  .prose a[href],
+  td a[href].ab-inline-link {
+    min-height: 0;
+    min-width: 0;
+    display: inline;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   EMBED FACADES (C-44)
+   ---------------------------------------------------------------------------
+   The box is reserved with `padding-top` on a wrapper rather than with
+   `aspect-ratio`, so the space is held before any stylesheet has applied —
+   which is the same layout shift the image-dimension work went after. Swapping
+   the facade for the iframe then changes nothing about the page's geometry.
+
+   No third-party asset is referenced here. A YouTube poster image is served by
+   Google, and fetching one would tell them who is reading the article before
+   the reader had agreed to anything — which is the entire thing a facade is
+   for. A LOCAL poster from the media library is supported instead.
+   --------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+   THE INLINE PDF VIEWER (pdf-embed.ts)
+
+   A height in `vh`, not an aspect ratio. A PDF is not 16:9 and is not any
+   other fixed shape — A4 portrait, US Letter, a landscape datasheet and a
+   scanned receipt all arrive through the same upload button — so a ratio would
+   letterbox most of them. What a reader actually wants is a window of a
+   readable size, which is what `min(80vh, 46rem)` is: tall enough to read a
+   page of text in, never taller than the screen, and capped so it does not
+   become absurd on a 4K monitor.
+
+   The download link is not decoration. On iOS Safari an inline PDF renders
+   only its first page, so it is the only way out for a reader who needs page
+   four — and it is the whole answer in a browser with no PDF viewer at all.
+   --------------------------------------------------------------------------- */
+.ab-pdf-viewer {
+  margin: 1.5rem 0;
+}
+
+.ab-pdf-frame {
+  display: block;
+  width: 100%;
+  height: min(80vh, 46rem);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md, 0.5rem);
+  background: var(--surface-color, #fff);
+}
+
+.ab-pdf-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.9375rem;
+}
+
+.ab-pdf-name {
+  color: var(--muted-color);
+  /* A long filename must not push the link off the row on a phone. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* An unexpanded figure — a consumer that renders stored `content` itself, or a
+   PDF this app does not serve — is a plain link and should look like one
+   rather than like an empty box waiting for something. */
+.ab-pdf:not(.ab-pdf-viewer) {
+  margin: 1rem 0;
+}
+
+.ab-embed-facade {
+  position: relative;
+  width: 100%;
+  margin: 1.5rem 0;
+  border-radius: 0.75rem;
+  overflow: hidden;
+  background: #111827;
+}
+
+.ab-embed-box {
+  position: relative;
+  width: 100%;
+  /* 16:9, the video default. */
+  padding-top: 56.25%;
+}
+
+/* A map is not a video. Selected on the provider attribute rather than set
+   inline: the CSP has no `unsafe-inline` for styles, so a style attribute in
+   content is dropped and every map would silently render letterboxed. */
+.ab-embed-facade[data-embed-provider="openstreetmap"] .ab-embed-box {
+  padding-top: 75%;
+}
+
+.ab-embed-poster,
+.ab-embed-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  object-fit: cover;
+}
+
+.ab-embed-load {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 1.5rem;
+  color: #f9fafb;
+  background: rgba(17, 24, 39, 0.72);
+  cursor: pointer;
+  text-align: center;
+  border: 0;
+}
+
+.ab-embed-load:hover,
+.ab-embed-load:focus-visible {
+  background: rgba(17, 24, 39, 0.82);
+}
+
+.ab-embed-title {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+/* The sentence that makes this a facade rather than a placeholder: it names
+   the host the click will contact. Deliberately not hidden behind a hover. */
+.ab-embed-note {
+  font-size: 0.8125rem;
+  opacity: 0.85;
+  max-width: 32rem;
+}
+
+/* ---------------------------------------------------------------------------
+   RIGHT-TO-LEFT (C-135)
+   ---------------------------------------------------------------------------
+   The UI is built from FIXED Tailwind utilities — ml-4, pr-2, text-left — and
+   there are ~500 of them across the components. Rewriting each one to its
+   logical equivalent (ms-4, pe-2, text-start) would touch every screen at once
+   and could not be reviewed meaningfully.
+
+   So the physical utilities that are ACTUALLY USED are flipped here instead.
+   `scripts/gen-rtl.mjs` reads the utilities the source actually uses and
+   reports any this block does not flip; `--check` runs in the test suite, so
+   "the list is complete" is a checked claim rather than a comment. It found
+   six missing flips the first time it ran.
+
+   What this does NOT cover, stated rather than implied: arbitrary markup from a
+   third-party theme or a plugin's CSS. Those own their own direction, and a
+   theme that wants to support RTL uses logical properties.
+
+   `[dir="rtl"]` rather than `:dir(rtl)`: the pseudo-class is newer than some of
+   the browsers a Greek optician's customers are on, and the attribute is set on
+   <html> by BaseLayout from the reader's locale either way. */
+  /* NEGATIVE margins flip side and keep their sign. The generator's token
+     regex could not see a class beginning with `-`, so these were invisible to
+     both the flip list and the check that is supposed to catch a missing one. */
+  [dir="rtl"] .-ml-1 { margin-left: 0; margin-right: -0.25rem; }
+  [dir="rtl"] .-mr-12 { margin-right: 0; margin-left: -3rem; }
+  [dir="rtl"] .ml-0 { margin-left: 0; margin-right: 0px; }
+  [dir="rtl"] .ml-0\.5 { margin-left: 0; margin-right: 0.125rem; }
+  [dir="rtl"] .ml-1 { margin-left: 0; margin-right: 0.25rem; }
+  [dir="rtl"] .ml-2 { margin-left: 0; margin-right: 0.5rem; }
+  [dir="rtl"] .ml-3 { margin-left: 0; margin-right: 0.75rem; }
+  [dir="rtl"] .ml-4 { margin-left: 0; margin-right: 1rem; }
+  [dir="rtl"] .ml-5 { margin-left: 0; margin-right: 1.25rem; }
+  [dir="rtl"] .ml-6 { margin-left: 0; margin-right: 1.5rem; }
+  [dir="rtl"] .ml-7 { margin-left: 0; margin-right: 1.75rem; }
+  [dir="rtl"] .mr-12 { margin-right: 0; margin-left: 3rem; }
+  [dir="rtl"] .mr-2 { margin-right: 0; margin-left: 0.5rem; }
+  [dir="rtl"] .mr-3 { margin-right: 0; margin-left: 0.75rem; }
+  [dir="rtl"] .mr-4 { margin-right: 0; margin-left: 1rem; }
+  [dir="rtl"] .pl-10 { padding-left: 0; padding-right: 2.5rem; }
+  [dir="rtl"] .pl-12 { padding-left: 0; padding-right: 3rem; }
+  [dir="rtl"] .pl-3 { padding-left: 0; padding-right: 0.75rem; }
+  [dir="rtl"] .pl-4 { padding-left: 0; padding-right: 1rem; }
+  [dir="rtl"] .pl-5 { padding-left: 0; padding-right: 1.25rem; }
+  [dir="rtl"] .pl-8 { padding-left: 0; padding-right: 2rem; }
+  [dir="rtl"] .pr-2 { padding-right: 0; padding-left: 0.5rem; }
+  [dir="rtl"] .pr-3 { padding-right: 0; padding-left: 0.75rem; }
+  [dir="rtl"] .pr-4 { padding-right: 0; padding-left: 1rem; }
+
+  /* Text alignment. `text-left` in a right-to-left document means "the start of
+     the line", which is the right-hand side. */
+  [dir="rtl"] .text-left { text-align: right; }
+  [dir="rtl"] .text-right { text-align: left; }
+
+  /* Floats and edges. */
+  [dir="rtl"] .float-left { float: right; }
+  [dir="rtl"] .float-right { float: left; }
+  [dir="rtl"] .left-0 { left: auto; right: 0; }
+  [dir="rtl"] .right-0 { right: auto; left: 0; }
+  [dir="rtl"] .left-1 { left: auto; right: 0.25rem; }
+  [dir="rtl"] .left-3 { left: auto; right: 0.75rem; }
+  [dir="rtl"] .left-4 { left: auto; right: 1rem; }
+  [dir="rtl"] .right-1 { right: auto; left: 0.25rem; }
+  [dir="rtl"] .right-4 { right: auto; left: 1rem; }
+
+  /* A border used as a rule down one side of a block — a quote, a nested list,
+     the sub-field editor in the content-type builder. */
+  [dir="rtl"] .border-l { border-left-width: 0; border-right-width: 1px; }
+  [dir="rtl"] .border-r { border-right-width: 0; border-left-width: 1px; }
+  [dir="rtl"] .border-l-2 { border-left-width: 0; border-right-width: 2px; }
+  [dir="rtl"] .border-l-4 { border-left-width: 0; border-right-width: 4px; }
+
+  /* Variant-prefixed utilities. The compiled class name CONTAINS the variant —
+     `file:mr-4` is the class `file\:mr-4` — so a bare `.mr-4` selector never
+     matches one. These three are the only ones in the codebase; the generator
+     fails the gate if a fourth appears, rather than emitting a rule that
+     silently cannot apply. */
+  [dir="rtl"] .file\:mr-3::file-selector-button { margin-right: 0; margin-left: 0.75rem; }
+  [dir="rtl"] .file\:mr-4::file-selector-button { margin-right: 0; margin-left: 1rem; }
+  [dir="rtl"] .first\:ml-0:first-child { margin-left: 0; margin-right: 0; }
+
+  /* An arrow that says "back" points the other way. */
+  [dir="rtl"] .rtl-flip { transform: scaleX(-1); }

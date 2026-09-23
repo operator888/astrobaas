@@ -1,0 +1,22 @@
+---
+/**
+ * Editorial theme — `PageArticle` override.
+ *
+ * Pages get the same typographic register as articles: centred serif title over
+ * a hairline, measured prose column. `isHome` drops the title band — a Page
+ * serving as the front door usually carries its own opening inside the content,
+ * and a second big heading above it reads as a template showing through.
+ */
+import type { PageArticleProps } from '../../core/theme-slots';
+
+const { post, contentHtml, isHome } = Astro.props as PageArticleProps;
+---
+
+<article class="editorial-page max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-14">
+  {!isHome && (
+    <header class="text-center pb-8 mb-10 border-b border-gray-300">
+      <h1 class="font-serif text-4xl md:text-5xl leading-tight text-gray-900">{post.title}</h1>
+    </header>
+  )}
+  <div class="prose prose-lg mx-auto" set:html={contentHtml} />
+</article>

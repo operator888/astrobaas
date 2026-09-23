@@ -1,0 +1,283 @@
+---
+const { slug } = Astro.params;
+
+import PublicLayout from '../../layouts/PublicLayout.astro';
+import { mediaKindOf } from '../../lib/product-fields';
+import { jsonForScript } from '../../lib/json-in-html';
+import { resolveSiteUrl } from '../../lib/site-url';
+import { resolveActiveTheme } from '../../lib/theme-runtime';
+import { LocalDB } from '../../lib/localdb';
+import { recordView, isCountableAgent } from '../../lib/views';
+import { tocThreshold, tocLabel } from '../../lib/toc';
+import { renderContentHtml, renderTitle, withImageDimensions } from '../../lib/content-render';
+import { estimateReadTime, prepareCards } from '../../lib/post-cards';
+import { isPage } from '../../lib/post-kind';
+import { hreflangFor } from '../../lib/hreflang';
+import { switcherOptions, postHref } from '../../lib/locale-links';
+import { resolveByline } from '../../lib/byline';
+import { getSiteSettings } from '../../lib/site';
+import { trailForPost, breadcrumbListJsonLd } from '../../lib/breadcrumbs';
+import { articleNode, siteIdentityNodes, structuredData } from '../../lib/structured-data';
+import { mediaBaseFor } from '../../lib/media-base';
+import PrintButton from '../../components/public/PrintButton.astro';
+import TermChips from '../../components/public/TermChips.astro';
+import { relatedPosts } from '../../lib/related';
+import PostComments from '../../components/public/PostComments.astro';
+import { settingBool } from '../../lib/settings-map';
+import { PRINT_BUTTON_SETTING, printButtonEnabled } from '../../lib/print-view';
+import { COMMENTS_ENABLED_SETTING } from '../../core/builtin-collections';
+import { relatedCount } from '../../lib/related-count';
+
+// Load posts from database
+await LocalDB.init();
+const allPosts = await LocalDB.getPosts();
+const allUsers = await LocalDB.getUsers();
+const allCategories = await LocalDB.getCategories();
+
+// Find the specific post
+const post = allPosts.find(p => p.slug === slug);
+
+// A Page lives at `/about`, not `/blog/about`. Serving it from both would
+// publish the same content at two URLs and split its search ranking, so the
+// blog permalink declines it rather than rendering a second copy.
+if (!post || post.status !== 'published' || isPage(post)) {
+  return Astro.redirect('/404');
+}
+
+// Enrich post data
+const siteForByline = await getSiteSettings({ astroSite: Astro.site, requestUrl: Astro.url, locale: Astro.locals.locale });
+const byline = resolveByline(post, allUsers, {
+  siteAuthorName: siteForByline.siteAuthorName,
+  siteAuthorUrl: siteForByline.siteAuthorUrl,
+  siteTitle: siteForByline.siteTitle,
+});
+const author = byline.name;
+// The RECORD, not just the name: a linked category crumb needs `.slug`, and
+// throwing the record away is what forced the old breadcrumb to be a
+// hardcoded two-level trail.
+const categoryRecord = allCategories.find(c => c.id === post.category_id);
+const category = categoryRecord?.name || 'Uncategorized';
+
+
+// One pipeline, four renderers — filters, sanitizer, lazy hints, anchors. See
+// lib/content-render.ts for why the ORDER is load-bearing and why this is a
+// function rather than four copies of a convention.
+// The CONTENT locale, so the print button and any embed facade read in the
+// language of the page they are on.
+const contentToc = renderContentHtml(post, Astro.locals.locale);
+const filteredContent = await withImageDimensions(contentToc.html);
+const filteredTitle = renderTitle(post);
+
+// Count the view. Anonymous humans only: a signed-in editor previewing their
+// own draft is not a reader, and a crawler is not one either.
+if (!Astro.locals.user && isCountableAgent(Astro.request.headers.get('user-agent'))) {
+  recordView(post.id);
+}
+
+const enrichedPost = {
+  ...post,
+  title: filteredTitle,
+  content: filteredContent,
+  author,
+  category,
+  image: post.featured_image || '/default-cover.svg',
+  date: new Date(post.publish_date || post.created_at).toISOString().split('T')[0],
+  readTime: estimateReadTime(filteredContent)
+};
+
+// Canonical origin, from the same helper the sitemap and feed use, so a
+// canonical tag and a sitemap entry can never disagree about where this site
+// lives.
+const seoSettings = await LocalDB.getSettings();
+const seoMap: Record<string, any> = {};
+seoSettings.forEach((x) => (seoMap[x.key] = x.value));
+const siteUrl = resolveSiteUrl({
+  setting: seoMap.site_url,
+  astroSite: Astro.site,
+  requestUrl: Astro.url,
+});
+
+// SEO fields, finally used.
+//
+// `meta_title` and `meta_description` were declared on the model, validated
+// with max lengths in post-service, stored by the editor's "SEO Settings"
+// panel — and rendered nowhere. The page used the excerpt instead, so every
+// author who filled in a search-result description was writing into a field
+// nothing read.
+//
+// Fall back the way an author expects: an explicit meta value wins, otherwise
+// the visible title / excerpt.
+const pageTitle = post.meta_title?.trim() || enrichedPost.title;
+const pageDescription = post.meta_description?.trim() || enrichedPost.excerpt || '';
+/*
+ * A featured VIDEO must not become the social card.
+ *
+ * og:image is fetched by a scraper that expects an image; handed an .mp4 it
+ * renders nothing, and the post shares as a blank card. Falling through to the
+ * generated /og/<slug>.png is strictly better than a broken one — it is the
+ * same fallback a post with no featured image already gets.
+ */
+const featuredIsVideo = mediaKindOf(post.featured_image ?? '') === 'video';
+const ogImage = (!featuredIsVideo && post.featured_image) || `/og/${post.slug}.png`;
+
+// Structured data, from the shared builders in lib/structured-data.ts — the
+// same ones the archive and CMS Pages use, so a fix lands everywhere at once.
+// Emitted as application/ld+json, which is DATA: no executable content, so no
+// CSP hash needed. It DOES still need escaping — JSON.stringify does not
+// escape `<`, so a title containing `</script>` would close the element and
+// the rest would parse as markup. jsonForScript handles that.
+//
+// The breadcrumb trail is built ONCE and used twice: rendered by the theme's
+// Breadcrumbs slot, and serialized into the BreadcrumbList below. What the
+// reader sees and what the crawler is told cannot disagree.
+const trail = trailForPost(enrichedPost, {
+  locale: Astro.locals.locale,
+  categoryName: categoryRecord?.name,
+  categorySlug: categoryRecord?.slug,
+});
+// Images live at the CMS's own address, which on a decoupled storefront is a
+// different host from the site URL — hence the media base, not string concat.
+const mediaBase = await mediaBaseFor(Astro.request);
+const sdCtx = { origin: siteUrl, mediaBase, siteTitle: siteForByline.siteTitle };
+// Computed ONCE and used by the canonical, og:url and the JSON-LD, so the
+// document cannot advertise two different self-addresses. It did: the canonical
+// was locale-prefixed here while `articleNode` below was handed the bare
+// `/blog/<slug>`, so a German post told crawlers its canonical was
+// /de/blog/hallo and its schema.org `url`/`mainEntityOfPage` was /blog/hallo —
+// a live 200 serving the same article. Two self-addresses is a duplicate signal
+// the page creates about itself.
+const postPath = postHref(`/blog/${post.slug}`, post);
+
+const jsonLd = structuredData([
+  // The Organization the article's `publisher` names, in the SAME graph —
+  // @id resolution is per-document.
+  ...siteIdentityNodes(sdCtx),
+  articleNode({
+    title: enrichedPost.title,
+    description: pageDescription,
+    // The SAME string the canonical uses, by construction rather than by
+    // coincidence. `recordLocale(post)`, never the reader's locale: the
+    // unprefixed /blog/hallo also serves the German post, and a reader-locale
+    // path would emit an English URL for a German record, contradicting the
+    // canonical, the sitemap and the feed all at once.
+    path: postPath,
+    datePublished: post.publish_date || post.created_at,
+    dateModified: post.updated_at || post.publish_date || post.created_at,
+    authorName: author,
+    image: post.featured_image,
+    categoryName: categoryRecord?.name,
+  }, sdCtx),
+  breadcrumbListJsonLd(trail, siteUrl),
+]);
+
+// The active theme may replace the whole single-post view.
+const { slots } = await resolveActiveTheme();
+const PostArticle = slots.PostArticle as any;
+const PostCard = slots.PostCard as any;
+const TableOfContents = slots.TableOfContents as any;
+
+/*
+ * Related posts.
+ *
+ * Built from `allPosts`, which this route already loaded at the top, so the
+ * strip costs ZERO extra reads. `lib/related.ts` decides what "related" means —
+ * category and tag overlap, never the reader — and returns nothing rather than
+ * filling the space with whatever is newest.
+ *
+ * Rendered through the theme's own PostCard so it inherits the site's card
+ * styling, and NOT behind a new theme slot: adding one would change the theme
+ * contract, and every shipped theme would need updating before the feature
+ * appeared anywhere.
+ */
+const relatedLimit = relatedCount((await LocalDB.getSetting('related_posts_count'))?.value);
+
+// Comments (C-142). Off unless the operator switched them on — the collection
+// is not even registered otherwise, so the component would render a section
+// whose endpoint 404s.
+const commentsOn = settingBool((await LocalDB.getSetting(COMMENTS_ENABLED_SETTING))?.value, false);
+const related = prepareCards(
+  relatedPosts(post, allPosts, {
+    limit: Number.isFinite(relatedLimit) ? Math.max(0, Math.min(12, relatedLimit)) : 3,
+  }).map((r) => r.post),
+  { users: allUsers, categories: allCategories, byline: {
+    siteAuthorName: siteForByline.siteAuthorName,
+    siteAuthorUrl: siteForByline.siteAuthorUrl,
+    siteTitle: siteForByline.siteTitle,
+  } },
+);
+
+// The contents list, if the operator turned it on AND the article is long
+// enough to need one. `0` is off — one number, the same shape
+// `related_posts_count` uses, so there is no "enabled but never reached" state.
+const tocMin = tocThreshold((await LocalDB.getSetting('toc_min_headings'))?.value);
+const tocItems = tocMin > 0 && contentToc.items.length >= tocMin ? contentToc.items : [];
+
+// The print affordance. Default ON: the print stylesheet already applies to
+// every article, and a reader has no way to know that without the button.
+const printButton = printButtonEnabled((await LocalDB.getSetting(PRINT_BUTTON_SETTING))?.value);
+
+const localeOptions = switcherOptions({
+  path: `/blog/${post.slug}`,
+  current: Astro.locals.locale,
+  post,
+  all: allPosts,
+  pathFor: (p) => `/blog/${p.slug}`,
+});
+
+// An EXPLICIT canonical, from the post's own locale — not BaseLayout's fallback
+// to the request path. The middleware only ever strips a locale prefix, so a
+// German post is served at `/blog/<slug>` as readily as at `/de/blog/<slug>`,
+// and the request-path canonical named whichever URL the reader happened to
+// use. The sitemap and the feed have always listed it under `recordLocale`, so
+// the fallback did not merely pick a different URL — it contradicted them. Same
+// rule, same reason, as `buildPageView` applies on the Pages route.
+const postCanonical = siteUrl ? `${siteUrl}${postPath}` : undefined;
+---
+
+<PublicLayout title={pageTitle} description={pageDescription} image={ogImage} sidebarContext="post" breadcrumbs={trail} noindex={post.noindex} canonical={postCanonical} localeOptions={localeOptions}>
+  <Fragment slot="head">
+    {jsonLd && <script type="application/ld+json" set:html={jsonForScript(jsonLd)} />}
+    {/* Reciprocal by construction: hreflangFor returns the WHOLE set for every
+        member, so each translation lists all the others and itself. A partial
+        set is not a smaller benefit — search engines discard it entirely. */}
+    {hreflangFor(post, allPosts, { origin: siteUrl, pathFor: (p) => `/blog/${p.slug}` })
+      .map((l) => <link rel="alternate" hreflang={l.hreflang} href={l.href} />)}
+  </Fragment>
+  {tocItems.length > 0 && (
+    <div class="max-w-4xl mx-auto px-4 pt-8">
+      <TableOfContents items={tocItems} label={tocLabel(Astro.locals.locale)} />
+    </div>
+  )}
+  {printButton && <PrintButton />}
+  {/* The article's terms (C-128), rendered here rather than inside the article
+      component — the active theme overrides that slot, and the first version
+      of this was invisible on every install running one. */}
+  <TermChips post={post} />
+  <PostArticle
+    post={post}
+    contentHtml={enrichedPost.content}
+    author={enrichedPost.author}
+    category={enrichedPost.category}
+    date={enrichedPost.date}
+    readTime={enrichedPost.readTime}
+  />
+
+  {related.length > 0 && (
+    <section class="no-print max-w-4xl mx-auto px-4 pb-16" aria-labelledby="related-heading">
+      <h2 id="related-heading" class="text-2xl font-bold text-gray-900 mb-6">Related articles</h2>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {related.map((p) => <PostCard post={p} />)}
+      </div>
+    </section>
+  )}
+
+  {commentsOn && <PostComments post={post} />}
+  {/*
+    The anti-spam solver. The comment form advertises data-captcha="forms", and
+    WITHOUT this include nothing serves the solver — so the surface an operator
+    switched on would refuse every comment with "anti-spam check failed". Same
+    include the contact page and the public forms use.
+  */}
+  {commentsOn && <script is:inline src="/captcha.js" defer></script>}
+</PublicLayout>
+

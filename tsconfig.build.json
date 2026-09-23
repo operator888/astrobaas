@@ -1,0 +1,14 @@
+{
+  "//": "Emits .d.ts for the public package entrypoints into pkg/ (JS is bundled by scripts/build-pkg.mjs). Used by `npm run build:pkg` / prepublishOnly.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "pkg",
+    "rootDir": "src",
+    "skipLibCheck": true
+  },
+  "include": ["src/env.d.ts", "src/core/index.ts", "src/client/index.ts", "src/plugins/index.ts"],
+  "exclude": ["dist", "pkg", "scripts", "tests"]
+}

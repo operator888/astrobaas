@@ -1,0 +1,91 @@
+---
+/**
+ * A term's public archive — `/t/<taxonomy>/<term>` (C-128).
+ *
+ * ## Opt-in per taxonomy, and off by default
+ *
+ * An internal grouping — "supplier", "margin band" — is one an operator uses to
+ * filter the admin. Publishing it would put the shop's own vocabulary on the
+ * open web without anybody asking for that, so a taxonomy has to declare
+ * `publicArchive`.
+ *
+ * A 404 rather than an empty page when it has not: a soft 404 is indexed,
+ * linked, and reported as a working page. Same rule as the author archive.
+ *
+ * ## `/t/` rather than `/<taxonomy>/`
+ *
+ * A taxonomy named `about` would otherwise take the About page's URL, and the
+ * operator would find out from a customer. One reserved prefix costs a segment
+ * and removes the whole class of collision.
+ */
+import PublicLayout from '../../../layouts/PublicLayout.astro';
+import { LocalDB } from '../../../lib/localdb';
+import { articlesOnly } from '../../../lib/post-kind';
+import { visibleContent } from '../../../lib/visibility';
+import { filterByLocale } from '../../../lib/i18n';
+import { prepareCards } from '../../../lib/post-cards';
+import { settingsMap } from '../../../lib/settings-map';
+import { resolveActiveTheme } from '../../../lib/theme-runtime';
+import { postHref } from '../../../lib/locale-links';
+import {
+  TAXONOMIES_SETTING, TERM_COLLECTION, validateTaxonomies, getTaxonomy, recordsWithTerm,
+} from '../../../core/taxonomy';
+
+export const prerender = false;
+
+const taxonomySlug = String(Astro.params.taxonomy || '');
+const termSlugParam = String(Astro.params.term || '');
+await LocalDB.init();
+
+const map = settingsMap(await LocalDB.getSettings());
+const defs = validateTaxonomies(map[TAXONOMIES_SETTING]).defs;
+const taxonomy = getTaxonomy(defs, taxonomySlug);
+if (!taxonomy || taxonomy.publicArchive !== true) {
+  return new Response('Not found', { status: 404 });
+}
+
+// The TERM has to exist, not just be a string somebody typed into the address
+// bar. Without this every misspelling is a live page with a heading nobody
+// wrote and zero results — which is a soft 404 with extra steps.
+const termRows = await LocalDB.getCustomEntities(TERM_COLLECTION);
+const term = termRows
+  .map((r: any) => r.data ?? {})
+  .find((d: any) => d.taxonomy === taxonomySlug && d.slug === termSlugParam);
+if (!term) return new Response('Not found', { status: 404 });
+
+const all = articlesOnly(visibleContent(await LocalDB.getPosts(), null)).filter((p) => !p.noindex);
+const matching = recordsWithTerm(all, taxonomySlug, termSlugParam);
+const posts = filterByLocale(matching, Astro.locals.locale);
+
+const cards = prepareCards(posts, {
+  users: await LocalDB.getUsers(),
+  categories: await LocalDB.getCategories(),
+  byline: { siteAuthorName: String(map.site_author_name ?? ''), siteTitle: String(map.site_title ?? '') },
+});
+
+const { slots } = await resolveActiveTheme();
+const PostCard = slots.PostCard as any;
+const heading = String(term.name || termSlugParam);
+const label = taxonomy.labelPlural || taxonomy.label;
+---
+
+<PublicLayout
+  title={`${heading} — ${label}`}
+  description={term.description ? String(term.description) : `Everything filed under ${heading}.`}
+>
+  <section class="max-w-4xl mx-auto px-4 py-12">
+    <p class="text-sm uppercase tracking-wide text-gray-500 mb-1">{taxonomy.label}</p>
+    <h1 class="text-3xl font-bold text-gray-900 mb-2">{heading}</h1>
+    {term.description && <p class="text-gray-600 mb-4">{term.description}</p>}
+    <p class="text-sm text-gray-500 mb-8">
+      {cards.length} {cards.length === 1 ? 'article' : 'articles'}
+    </p>
+    {cards.length === 0 ? (
+      <p class="text-gray-500">Nothing published under this yet.</p>
+    ) : (
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {cards.map((p) => <PostCard post={p} href={postHref(`/blog/${p.slug}`, p)} />)}
+      </div>
+    )}
+  </section>
+</PublicLayout>

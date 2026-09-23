@@ -1,0 +1,662 @@
+---
+import AdminLayout from '../../../layouts/AdminLayout.astro';
+import { jsonForScript } from '../../../lib/json-in-html';
+import { PRESETS } from '../../../themes/presets';
+import { TOKEN_SCALES } from '../../../lib/theme-tokens';
+import { LocalDB } from '../../../lib/localdb';
+import { ensureThemesBootstrapped, getThemeDefinition } from '../../../themes';
+import { overriddenSlots, THEME_SLOTS } from '../../../core/theme-slots';
+import { isDeclarativeTheme } from '../../../core/theme-manifest';
+import { canOpenAdminPage } from '../../../lib/admin-access';
+
+await LocalDB.init();
+// Make sure every bundled theme is selectable here.
+await ensureThemesBootstrapped();
+const user = Astro.locals.user;
+const t = Astro.locals.t;
+// One rule, asked — not re-implemented. A hand-written role test here is
+// how the page, the middleware and the sidebar drift apart.
+if (!canOpenAdminPage('/admin/themes', user?.role)) {
+  return Astro.redirect('/admin');
+}
+
+// The CODE registry is the catalog: a DB row whose theme module isn't in this
+// build can't render, so it isn't offered. (It degrades to the stock look if it
+// somehow stays active.)
+const allThemeRows = await LocalDB.getThemes();
+// Two tiers are listed: compiled-in themes this build actually ships, and themes
+// INSTALLED from a manifest. The filter used to keep only the first kind — a row
+// for a theme the build cannot render must not be offered — but that also hid
+// every declarative theme, so an operator could install one and never see it.
+const themes = allThemeRows
+  .filter((t) => !!getThemeDefinition(t.id) || isDeclarativeTheme(t))
+  .map((t) => ({
+    ...t,
+    overrides: overriddenSlots(getThemeDefinition(t.id)?.components),
+    // A declarative theme is data, so it can never override a slot component.
+    tier: getThemeDefinition(t.id) ? ('bundled' as const) : ('declarative' as const),
+    patternCount: isDeclarativeTheme(t) ? (t.manifest.patterns?.length ?? 0) : 0,
+    hasCss: isDeclarativeTheme(t) ? !!t.manifest.css : false,
+    // Child themes (C-170). The parent is shown because it is the only way an
+    // operator can tell WHY a theme looks the way it does — a child that
+    // inherits most of its design from somewhere else is otherwise a theme
+    // whose settings do not explain its appearance. A parent that is not
+    // installed is named too: "the theme looks wrong" is not a debuggable
+    // report, and this is where that becomes visible.
+    parentId: getThemeDefinition(t.id)?.extends ?? null,
+    parentMissing: (() => {
+      const parent = getThemeDefinition(t.id)?.extends;
+      return typeof parent === 'string' && !getThemeDefinition(parent);
+    })(),
+  }));
+const active = themes.find((t) => t.status === 'active') || themes[0];
+const settingsRows = await LocalDB.getSettings();
+const settingsMap: Record<string, any> = Object.fromEntries(settingsRows.map((r) => [r.key, r.value]));
+const siteTitle = typeof settingsMap.site_title === 'string' ? settingsMap.site_title : 'AstroBaaS';
+const siteTagline = typeof settingsMap.site_tagline === 'string' ? settingsMap.site_tagline : '';
+
+// Flat initial values for the customizer, from the active theme's nested config.
+//
+// `c?.colors?.primary` optional-chains on `c` and then dereferences `.colors`
+// unconditionally — so a theme with no `colors` (a child theme that overrides
+// only a component, which the external loader explicitly permits) threw here
+// and 500'd the one screen an operator would use to switch away from it.
+const c = active?.settings as (typeof active extends undefined ? undefined : any);
+const init = {
+  primary: c?.colors?.primary ?? '#3B82F6',
+  secondary: c?.colors?.secondary ?? '#8B5CF6',
+  accent: c?.colors?.accent ?? '#10B981',
+  background: c?.colors?.background ?? '#FFFFFF',
+  text: c?.colors?.text ?? '#1F2937',
+  headingFont: c?.typography?.headingFont ?? 'Inter',
+  bodyFont: c?.typography?.bodyFont ?? 'Inter',
+  customCSS: c?.customCSS ?? '',
+};
+const STYLE_INIT = {
+  surface: c?.colors?.surface ?? '',
+  muted: c?.colors?.muted ?? '',
+  border: c?.colors?.border ?? '',
+  fontSize: c?.typography?.fontSize ?? '16px',
+  typeScale: c?.typography?.scale ?? 'normal',
+  headingWeight: c?.typography?.headingWeight ?? 'bold',
+  radius: c?.style?.radius ?? 'md',
+  density: c?.style?.density ?? 'normal',
+  shadow: c?.style?.shadow ?? 'soft',
+  containerWidth: c?.style?.containerWidth ?? 'normal',
+  buttonStyle: c?.style?.buttonStyle ?? 'solid',
+  headerStyle: c?.style?.headerStyle ?? 'split',
+  colorScheme: c?.colorScheme ?? 'light',
+};
+
+const FONTS = ['Inter', 'Roboto', 'Open Sans', 'Lato', 'Poppins', 'Montserrat', 'Playfair Display', 'Nunito', 'Raleway'];
+
+// A stored font outside FONTS matches no <option>, so the browser shows the
+// first entry — and the next Save writes that back, destroying the stored value
+// with no warning. Offer whatever is actually stored.
+const fontOptions = (current: string) =>
+  FONTS.includes(current) || !current ? FONTS : [current, ...FONTS];
+
+// Enum controls are generated from the token vocabulary, so adding a scale in
+// theme-tokens.ts surfaces a control here automatically — the admin can never
+// drift out of sync with what /theme.css actually emits.
+const SELECTS = [
+  { id: 'type-scale', key: 'typeScale', keys: TOKEN_SCALES.typeScale.keys },
+  { id: 'heading-weight', key: 'headingWeight', keys: TOKEN_SCALES.headingWeight.keys },
+  { id: 'radius', key: 'radius', keys: TOKEN_SCALES.radius.keys },
+  { id: 'density', key: 'density', keys: TOKEN_SCALES.density.keys },
+  { id: 'shadow', key: 'shadow', keys: TOKEN_SCALES.shadow.keys },
+  { id: 'container-width', key: 'containerWidth', keys: TOKEN_SCALES.containerWidth.keys },
+  { id: 'button-style', key: 'buttonStyle', keys: TOKEN_SCALES.buttonStyle.keys },
+  { id: 'header-style', key: 'headerStyle', keys: TOKEN_SCALES.headerStyle.keys },
+] as const;
+
+// An option's TEXT is translated; its VALUE stays the enum key, which is what
+// /theme.css, the validator and the preset data all match on — translating the
+// two together is how a Greek admin would start writing "Μεσαία" into the
+// database. A scale key that theme-tokens.ts gains before the catalogue does
+// falls back to the raw key, so a new control reads as it did before it was
+// translated rather than printing a message id into the dropdown.
+const scaleLabel = (group: string, key: string) => {
+  const id = `admin.themes.scale.${group}.${key}`;
+  const text = t(id);
+  return text === id ? key : text;
+};
+---
+
+<AdminLayout title={t('admin.themes.title')}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="mb-8">
+      <h1 class="text-3xl font-bold text-gray-900">{t('admin.themes.title')}</h1>
+      <p class="text-gray-600 mt-2">{t('admin.themes.subtitle')}</p>
+    </div>
+
+    <!-- Install a theme from a manifest -->
+    <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
+      <h2 class="text-lg font-semibold text-gray-900 mb-1">{t('admin.themes.installTitle')}</h2>
+      <p class="text-sm text-gray-600 mb-3">{t('admin.themes.installHelp')}</p>
+      <textarea id="theme-manifest" rows="6" spellcheck="false"
+        class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        placeholder={'{\n  "id": "sunset",\n  "name": "Sunset",\n  "version": "1.0.0",\n  "tokens": { "colors": { "primary": "#e2571e" } }\n}'}></textarea>
+      <div id="theme-install-result" class="hidden mt-3 text-sm"></div>
+      <div class="flex justify-end mt-3">
+        <button id="install-theme" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium">
+          {t('admin.themes.install')}
+        </button>
+      </div>
+    </div>
+
+    <!-- Installed themes -->
+    <h2 class="text-lg font-semibold text-gray-900 mb-4">{t('admin.themes.installedTitle')}</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
+      {themes.map((theme) => (
+        <div class={`bg-white rounded-lg shadow-sm border-2 overflow-hidden transition-all duration-200 ${
+          theme.status === 'active' ? 'border-blue-500 ring-2 ring-blue-200' : 'border-gray-200'
+        }`}>
+          <div class="h-24 flex" aria-hidden="true">
+            {/* Guarded, like the customizer above. A theme installed from npm
+                may legitimately have no `settings` — the loader accepts one, and
+                a pure child theme that only overrides a component has no tokens
+                of its own. Unguarded, this 500'd the ONE screen an operator
+                would use to switch away from that theme. */}
+            <div class="flex-1 theme-swatch" data-bg={theme.settings?.colors?.primary ?? '#3B82F6'}></div>
+            <div class="flex-1 theme-swatch" data-bg={theme.settings?.colors?.secondary ?? '#8B5CF6'}></div>
+            <div class="flex-1 theme-swatch" data-bg={theme.settings?.colors?.accent ?? '#10B981'}></div>
+          </div>
+          <div class="p-4">
+            <div class="flex items-center justify-between mb-1">
+              <h3 class="text-lg font-medium text-gray-900">
+                {theme.name}
+                {theme.tier === 'declarative' && (
+                  <span class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[11px] font-medium">{t('admin.themes.installedBadge')}</span>
+                )}
+                {theme.parentId && !theme.parentMissing && (
+                  <span class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 text-[11px] font-medium">
+                    based on {theme.parentId}
+                  </span>
+                )}
+                {theme.parentMissing && (
+                  <span class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[11px] font-medium">
+                    needs "{theme.parentId}", which is not installed
+                  </span>
+                )}
+              </h3>
+              {theme.status === 'active' && (
+                <span class="bg-blue-600 text-white px-2 py-0.5 rounded text-xs font-medium">{t('admin.themes.activeBadge')}</span>
+              )}
+            </div>
+            <p class="text-sm text-gray-600 mb-3">{theme.description}</p>
+            <div class="flex items-center justify-between text-xs text-gray-500 mb-3">
+              <span>{t('admin.themes.version', { version: theme.version })}</span>
+              <span>{t('admin.themes.byAuthor', { author: theme.author })}</span>
+            </div>
+            <div class="mb-4">
+              <div class="text-xs text-gray-500 mb-1">
+                {theme.tier === 'declarative'
+                  ? t('admin.themes.declarativeSummary', {
+                      // Joined here rather than concatenated in the catalogue: a
+                      // translator gets one whole sentence and one list, not three
+                      // fragments whose order they cannot change.
+                      parts: [
+                        t('admin.themes.partTokens'),
+                        ...(theme.hasCss ? [t('admin.themes.partStylesheet')] : []),
+                        ...(theme.patternCount
+                          ? [t('admin.themes.partPatterns', undefined, { count: theme.patternCount })]
+                          : []),
+                      ].join(' + '),
+                    })
+                  : theme.overrides.length === 0
+                    ? t('admin.themes.tokensOnly')
+                    : t('admin.themes.overridesCount', {
+                        count: theme.overrides.length,
+                        total: THEME_SLOTS.length,
+                      })}
+              </div>
+              {theme.overrides.length > 0 && (
+                <div class="flex flex-wrap gap-1">
+                  {theme.overrides.map((slot) => (
+                    <span class="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[11px] font-medium">{slot}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+            {theme.status !== 'active' && (
+              <div class="flex gap-2">
+                <button class="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded text-sm font-medium transition-colors duration-200 activate-theme" data-theme-id={theme.id}>
+                  {t('admin.themes.activate')}
+                </button>
+                {theme.tier === 'declarative' && (
+                  <button class="px-3 py-2 border border-red-200 text-red-600 rounded text-sm font-medium hover:bg-red-50 uninstall-theme" data-theme-id={theme.id} data-theme-name={theme.name}>
+                    {t('admin.themes.uninstall')}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+
+    <!-- Customizer -->
+    <h2 class="text-lg font-semibold text-gray-900 mb-4">{t('admin.themes.customizeHeading', { name: active?.name ?? '' })}</h2>
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div class="lg:col-span-1 space-y-6">
+        <!-- Site identity -->
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <h3 class="text-base font-semibold text-gray-900 mb-4">{t('admin.themes.siteIdentity')}</h3>
+          <div class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">{t('admin.themes.siteTitle')}</label>
+              <input type="text" id="site-title" value={siteTitle} class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">{t('admin.themes.tagline')}</label>
+              <input type="text" id="site-tagline" value={siteTagline} class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Colors -->
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <h3 class="text-base font-semibold text-gray-900 mb-4">{t('admin.themes.colors')}</h3>
+          <div class="space-y-4">
+            {[
+              // `id` is the control id the script reads; `labelKey` is only ever
+              // shown. They are separate fields so no translation can move a
+              // control out from under $('primary-color').
+              { id: 'primary', labelKey: 'admin.themes.colorPrimary', val: init.primary },
+              { id: 'secondary', labelKey: 'admin.themes.colorSecondary', val: init.secondary },
+              { id: 'accent', labelKey: 'admin.themes.colorAccent', val: init.accent },
+              { id: 'background', labelKey: 'admin.themes.colorBackground', val: init.background },
+              { id: 'text', labelKey: 'admin.themes.colorText', val: init.text },
+            ].map((color) => (
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">{t(color.labelKey)}</label>
+                <div class="flex items-center space-x-3">
+                  <input type="color" id={`${color.id}-color`} value={color.val} class="w-12 h-8 border border-gray-300 rounded cursor-pointer" />
+                  <input type="text" id={`${color.id}-color-text`} value={color.val} class="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <!-- Typography -->
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <h3 class="text-base font-semibold text-gray-900 mb-4">{t('admin.themes.typography')}</h3>
+          <div class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">{t('admin.themes.headingFont')}</label>
+              <select id="heading-font" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                {fontOptions(init.headingFont).map((f) => <option value={f} selected={f === init.headingFont}>{f}</option>)}
+              </select>
+            </div>
+                    <!-- One-click presets: ~30 knobs is the right amount of power and the
+             wrong amount of work for someone who just wants their site to stop
+             looking like a default. -->
+        <div class="mb-6">
+          <label class="block text-sm font-medium mb-2">{t('admin.themes.presets')}</label>
+          <div class="grid grid-cols-4 gap-2">
+            {PRESETS.map((p) => (
+              <button
+                type="button"
+                class="preset-btn group rounded-lg border border-gray-200 p-2 text-left hover:border-blue-500 transition-colors"
+                data-preset={p.id}
+                title={p.description}
+              >
+                <span class="flex gap-1 mb-1">
+                  <span class="w-4 h-4 rounded-full border border-black/10" style={`background:${p.swatch[0]}`}></span>
+                  <span class="w-4 h-4 rounded-full border border-black/10" style={`background:${p.swatch[1]}`}></span>
+                </span>
+                <span class="block text-xs font-medium">{p.name}</span>
+              </button>
+            ))}
+          </div>
+          <p class="text-xs text-gray-400 mt-1">{t('admin.themes.presetsHelp')}</p>
+          <!-- Data, not code: a JSON script block carries no executable content,
+               so it needs no CSP hash.
+
+               It is NOT inherently safe from injection, though — the previous
+               wording said so and was wrong. Any value containing `</script>`
+               closes the element whatever its type, which is what
+               `jsonForScript` exists to prevent. These presets are developer
+               data and could not carry one; the helper is used anyway, because
+               "this particular source is trusted" is a fact that stops being
+               true without the line changing. -->
+          <script type="application/json" id="preset-data" set:html={jsonForScript(
+            Object.fromEntries(PRESETS.map((p) => [p.id, p.settings]))
+          )} />
+        </div>
+
+        <!-- Style scales. Every option's VALUE here is an enum KEY (its text is
+             a translated label); the CSS it selects lives in
+             src/lib/theme-tokens.ts, so a stored value can choose a look but can
+             never be CSS. -->
+        <div class="grid grid-cols-2 gap-4 mb-6">
+          {SELECTS.map((sel) => (
+            <label class="text-sm">
+              <span class="block mb-1 font-medium">{scaleLabel(sel.key, 'label')}</span>
+              <select id={sel.id} class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                {sel.keys.map((k) => (
+                  <option value={k} selected={k === STYLE_INIT[sel.key]}>{scaleLabel(sel.key, k)}</option>
+                ))}
+              </select>
+            </label>
+          ))}
+          <label class="text-sm">
+            <span class="block mb-1 font-medium">{t('admin.themes.baseFontSize')}</span>
+            <input id="font-size" type="text" value={STYLE_INIT.fontSize}
+                   class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+          </label>
+          <label class="text-sm">
+            <span class="block mb-1 font-medium">{scaleLabel('colorScheme', 'label')}</span>
+            <select id="color-scheme" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+              {['light', 'dark', 'auto'].map((k) => (
+                <option value={k} selected={k === STYLE_INIT.colorScheme}>{scaleLabel('colorScheme', k)}</option>
+              ))}
+            </select>
+            <span class="text-xs text-gray-400">{t('admin.themes.colorSchemeHelp')}</span>
+          </label>
+        </div>
+
+<div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">{t('admin.themes.bodyFont')}</label>
+              <select id="body-font" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                {fontOptions(init.bodyFont).map((f) => <option value={f} selected={f === init.bodyFont}>{f}</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Custom CSS -->
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <h3 class="text-base font-semibold text-gray-900 mb-1">{t('admin.themes.customCss')}</h3>
+          {/* set:html because the sentence wraps a filename in <code> and the
+              markup sits in a different place in each language. The template is
+              a catalogue string and `{file}` is the constant below — no request
+              data reaches this. */}
+          <p class="text-xs text-gray-500 mb-3" set:html={t('admin.themes.customCssHelp', {
+            file: '<code class="bg-gray-100 px-1 rounded">/theme.css</code>',
+          })} />
+          <textarea
+            id="custom-css"
+            rows="8"
+            spellcheck="false"
+            placeholder={'.site-header { border-bottom: 2px solid var(--primary-color); }'}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          >{init.customCSS ?? ''}</textarea>
+          <p class="text-xs text-gray-400 mt-1">
+            <span id="custom-css-count">0</span>{t('admin.themes.customCssLimit', { max: 20000 })}
+            <code>@import</code> {t('admin.themes.customCssStripped')}
+          </p>
+        </div>
+
+        <div class="flex space-x-3">
+          <button id="save-theme-changes" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-lg transition-colors duration-200">{t('admin.themes.save')}</button>
+        </div>
+        <p data-theme-status class="text-sm text-center"></p>
+      </div>
+
+      <!-- Live preview -->
+      <div class="lg:col-span-2">
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden sticky top-6">
+          <div class="bg-gray-100 px-4 py-2 border-b border-gray-200 text-sm text-gray-600">{t('admin.themes.livePreview')}</div>
+          <div id="theme-preview" class="p-8 min-h-96">
+            <div id="pv-header" class="rounded-lg p-6 mb-6 text-white">
+              <h1 id="pv-title" class="text-3xl font-bold mb-2">{siteTitle}</h1>
+              <p id="pv-tagline" class="opacity-90">{siteTagline}</p>
+            </div>
+            <h2 id="pv-h2" class="text-2xl font-bold mb-3">{t('admin.themes.previewPostTitle')}</h2>
+            <p id="pv-body" class="mb-4">{t('admin.themes.previewBody')} <a id="pv-link" href="#" class="underline">{t('admin.themes.previewLink')}</a></p>
+            <div class="flex gap-3">
+              <button id="pv-btn-primary" class="text-white px-4 py-2 rounded-lg">{t('admin.themes.previewPrimary')}</button>
+              <button id="pv-btn-accent" class="text-white px-4 py-2 rounded-lg">{t('admin.themes.previewAccent')}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../../lib/apiClient';
+
+  // Paint the theme preview swatches via CSSOM (the hash-based CSP blocks inline
+  // `style` attributes; JS-set styles are not governed by style-src).
+  document.querySelectorAll('.theme-swatch').forEach((el) => {
+    if (el.dataset.bg) el.style.background = el.dataset.bg;
+  });
+
+  function csrf() {
+    return (window.__ASTROBAAS__ && window.__ASTROBAAS__.csrf)
+      || document.querySelector('meta[name="csrf-token"]')?.content || '';
+  }
+
+  const $ = (id) => document.getElementById(id);
+  const COLORS = ['primary', 'secondary', 'accent', 'background', 'text'];
+
+  function readSettings() {
+    return {
+      primaryColor: $('primary-color').value,
+      secondaryColor: $('secondary-color').value,
+      accentColor: $('accent-color').value,
+      backgroundColor: $('background-color').value,
+      textColor: $('text-color').value,
+      headingFont: $('heading-font').value,
+      bodyFont: $('body-font').value,
+      siteTitle: $('site-title').value,
+      siteTagline: $('site-tagline').value,
+      customCSS: $('custom-css').value,
+      // Every control below must appear here. A field that exists in the UI and
+      // not in this object saves successfully and changes nothing — which is
+      // exactly how fontSize stayed inert for months.
+      fontSize: $('font-size').value,
+      colorScheme: $('color-scheme').value,
+      typeScale: $('type-scale').value,
+      headingWeight: $('heading-weight').value,
+      radius: $('radius').value,
+      density: $('density').value,
+      shadow: $('shadow').value,
+      containerWidth: $('container-width').value,
+      buttonStyle: $('button-style').value,
+      headerStyle: $('header-style').value,
+    };
+  }
+
+  // Applying a preset just fills the controls; Save is still an explicit act,
+  // so a mis-click never writes to the database.
+  const PRESET_DATA = JSON.parse(document.getElementById('preset-data')?.textContent || '{}');
+  const FIELD_IDS = {
+    primaryColor: 'primary-color', secondaryColor: 'secondary-color', accentColor: 'accent-color',
+    backgroundColor: 'background-color', textColor: 'text-color',
+    headingFont: 'heading-font', bodyFont: 'body-font', fontSize: 'font-size',
+    typeScale: 'type-scale', headingWeight: 'heading-weight', radius: 'radius',
+    density: 'density', shadow: 'shadow', containerWidth: 'container-width',
+    buttonStyle: 'button-style', headerStyle: 'header-style', colorScheme: 'color-scheme',
+  };
+  document.querySelectorAll('.preset-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const preset = PRESET_DATA[btn.dataset.preset];
+      if (!preset) return;
+      for (const [key, id] of Object.entries(FIELD_IDS)) {
+        const el = $(id);
+        if (el && preset[key] != null) el.value = preset[key];
+      }
+      updatePreview?.();
+      const status = document.querySelector('[data-theme-status]');
+      if (status) {
+        status.textContent = t('admin.themes.presetApplied');
+        status.className = 'text-sm text-center text-blue-600';
+      }
+    });
+  });
+
+  // Live character count for the custom-CSS editor.
+  const cssBox = $('custom-css');
+  const cssCount = $('custom-css-count');
+  const renderCssCount = () => {
+    cssCount.textContent = String(cssBox.value.length);
+  };
+  cssBox.addEventListener('input', renderCssCount);
+  renderCssCount();
+
+  function loadGoogleFont(name) {
+    if (!name || name === 'Inter') return;
+    const id = `gf-${name.replace(/\s+/g, '-')}`;
+    if (document.getElementById(id)) return;
+    const link = document.createElement('link');
+    link.id = id;
+    link.rel = 'stylesheet';
+    link.href = `https://fonts.googleapis.com/css2?family=${name.replace(/\s+/g, '+')}:wght@400;600;700&display=swap`;
+    document.head.appendChild(link);
+  }
+
+  function updatePreview() {
+    const s = readSettings();
+    $('pv-title').textContent = s.siteTitle;
+    $('pv-tagline').textContent = s.siteTagline;
+    $('theme-preview').style.background = s.backgroundColor;
+    $('theme-preview').style.color = s.textColor;
+    $('theme-preview').style.fontFamily = `'${s.bodyFont}', sans-serif`;
+    $('pv-header').style.background = `linear-gradient(135deg, ${s.primaryColor}, ${s.secondaryColor})`;
+    $('pv-title').style.fontFamily = `'${s.headingFont}', sans-serif`;
+    $('pv-h2').style.color = s.primaryColor;
+    $('pv-h2').style.fontFamily = `'${s.headingFont}', sans-serif`;
+    $('pv-link').style.color = s.primaryColor;
+    $('pv-btn-primary').style.background = s.primaryColor;
+    $('pv-btn-accent').style.background = s.accentColor;
+    loadGoogleFont(s.headingFont);
+    loadGoogleFont(s.bodyFont);
+  }
+
+  // Sync color picker <-> text input
+  COLORS.forEach((id) => {
+    const picker = $(`${id}-color`);
+    const text = $(`${id}-color-text`);
+    if (!picker || !text) return;
+    picker.addEventListener('input', () => { text.value = picker.value; updatePreview(); });
+    text.addEventListener('input', () => {
+      if (/^#[0-9a-fA-F]{6}$/.test(text.value)) { picker.value = text.value; updatePreview(); }
+    });
+  });
+  ['heading-font', 'body-font', 'site-title', 'site-tagline'].forEach((id) => {
+    $(id)?.addEventListener('input', updatePreview);
+    $(id)?.addEventListener('change', updatePreview);
+  });
+
+  // Save
+  $('save-theme-changes')?.addEventListener('click', async () => {
+    const status = document.querySelector('[data-theme-status]');
+    const btn = $('save-theme-changes');
+    btn.disabled = true;
+    const res = await api.post('/api/themes/update', { settings: readSettings() });
+    btn.disabled = false;
+    if (res.ok) {
+      if (status) { status.textContent = t('admin.themes.saved'); status.className = 'text-sm text-center text-green-600'; }
+      setTimeout(() => window.location.reload(), 600);
+    } else if (status) {
+      status.textContent = res.error || t('admin.themes.saveFailed');
+      status.className = 'text-sm text-center text-red-600';
+    }
+  });
+
+  // Activate a theme
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.activate-theme');
+    if (!btn) return;
+    btn.disabled = true;
+    const res = await api.post('/api/themes/activate', { id: btn.dataset.themeId });
+    if (res.ok) {
+      window.location.reload();
+    } else {
+      btn.disabled = false;
+      alert(res.error || t('admin.themes.activateFailed'));
+    }
+  });
+
+  // Install a theme from a pasted manifest.
+  const installBtn = document.getElementById('install-theme');
+  const manifestBox = document.getElementById('theme-manifest');
+  const installResult = document.getElementById('theme-install-result');
+
+  const showInstallResult = (html, kind) => {
+    installResult.className =
+      'mt-3 text-sm px-3 py-2 rounded-md border ' +
+      (kind === 'ok'
+        ? 'bg-green-50 border-green-200 text-green-800'
+        : 'bg-red-50 border-red-200 text-red-800');
+    installResult.innerHTML = html;
+    installResult.classList.remove('hidden');
+  };
+
+  installBtn?.addEventListener('click', async () => {
+    const raw = manifestBox.value.trim();
+    if (!raw) return showInstallResult(t('admin.themes.manifestRequired'), 'err');
+
+    let manifest;
+    try {
+      manifest = JSON.parse(raw);
+    } catch (err) {
+      // Report the parse error rather than a generic failure — a stray comma is
+      // the single most common thing wrong with a hand-edited manifest.
+      // The message is escaped BEFORE interpolation: window.t substitutes raw,
+      // and this lands in innerHTML.
+      return showInstallResult(
+        t('admin.themes.invalidJson', { message: escapeHtml(String(err.message)) }),
+        'err',
+      );
+    }
+
+    installBtn.disabled = true;
+    const res = await api.post('/api/themes/install', { manifest });
+    installBtn.disabled = false;
+
+    if (res.ok) {
+      showInstallResult(t('admin.themes.installed'), 'ok');
+      window.location.reload();
+      return;
+    }
+
+    // Surface every reason at once, and the sanitizer diff when a pattern was
+    // refused: "rejected" is not something a theme author can act on.
+    const details = res.details || {};
+    const lines = (details.errors || [res.error || t('admin.themes.installFailed')]).map(
+      (e) => `<li>${escapeHtml(String(e))}</li>`,
+    );
+    let html = `<p class="font-medium mb-1">${t('admin.themes.installRejected')}</p><ul class="list-disc pl-5 space-y-0.5">${lines.join('')}</ul>`;
+    for (const p of details.patterns || []) {
+      const heading = t('admin.themes.patternRejected', {
+        name: escapeHtml(p.name),
+        reason: escapeHtml(p.reason),
+      });
+      html += `<div class="mt-2"><p class="font-medium">${heading}</p>`
+        + `<p class="mt-1 text-xs">${t('admin.themes.youWrote')}</p><pre class="text-xs bg-white/60 p-2 rounded overflow-x-auto">${escapeHtml(p.submitted)}</pre>`
+        + `<p class="mt-1 text-xs">${t('admin.themes.sanitizerKeeps')}</p><pre class="text-xs bg-white/60 p-2 rounded overflow-x-auto">${escapeHtml(p.sanitized)}</pre></div>`;
+    }
+    showInstallResult(html, 'err');
+  });
+
+  // The manifest is operator-supplied text going into innerHTML on the error
+  // path, so it is escaped rather than trusted.
+  function escapeHtml(v) {
+    return String(v).replace(/[&<>"']/g, (ch) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+    ));
+  }
+
+  // Uninstall a declarative theme.
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.uninstall-theme');
+    if (!btn) return;
+    // Confirmed because it is not undoable from here — the manifest would have
+    // to be pasted again — unlike the section toolbar's delete.
+    if (!confirm(t('admin.themes.uninstallConfirm', { name: btn.dataset.themeName }))) return;
+    btn.disabled = true;
+    const res = await api.delete('/api/themes/install', { id: btn.dataset.themeId });
+    if (res.ok) window.location.reload();
+    else { btn.disabled = false; alert(res.error || t('admin.themes.uninstallFailed')); }
+  });
+
+  updatePreview();
+</script>

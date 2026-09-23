@@ -1,0 +1,293 @@
+---
+/**
+ * The editorial AI panel — writing assistance (C-163) and draft translation
+ * (C-134), in the post editor.
+ *
+ * ## One panel, not a button per field
+ *
+ * The obvious design is a little sparkle button beside every field. It is worse
+ * here for two concrete reasons:
+ *
+ *  - There are TWO post editors (`posts/new` and `posts/[id]/edit`) with
+ *    different ids on the same fields, plus the product and page editors behind
+ *    them. A button per field is a change per field per editor, and the one
+ *    that gets forgotten is invisible until an author looks for it.
+ *  - A button injected next to a field by script cannot be styled by this
+ *    component's scoped `<style>` — Astro compiles those selectors with a
+ *    `data-astro-cid-…` attribute a created element does not carry. That trap
+ *    has produced bugs here before.
+ *
+ * So: one panel, which asks which field to work on. It also makes the cost
+ * visible, which a sparkle deliberately does not.
+ *
+ * ## Nothing is applied without a person
+ *
+ * The answer lands in a read-only box. `Apply` is a separate press, and it is
+ * the only thing that touches the form. That is what makes "draft translation"
+ * safe to offer at all — a machine translation nobody read is exactly the
+ * failure C-134 must not ship.
+ */
+---
+
+<div
+  id="ai-assist"
+  class="hidden bg-white border border-gray-200 rounded-lg p-6"
+  data-ai-assist
+>
+  <div class="flex items-center justify-between mb-2">
+    <h3 class="text-lg font-semibold text-gray-900">Writing assistant</h3>
+    <span class="text-xs text-gray-500">Uses your own AI provider — each run costs you</span>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+    <div>
+      <label class="block text-xs font-medium text-gray-700 mb-1" for="ai-assist-field">Work on</label>
+      <select id="ai-assist-field" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+        <option value="content">The body</option>
+        <option value="title">The title</option>
+        <option value="excerpt">The excerpt</option>
+        <option value="meta_description">The search description</option>
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-gray-700 mb-1" for="ai-assist-task">Action</label>
+      <select id="ai-assist-task" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"></select>
+    </div>
+    <div id="ai-assist-locale-wrap" class="hidden">
+      <label class="block text-xs font-medium text-gray-700 mb-1" for="ai-assist-locale">Into</label>
+      <select id="ai-assist-locale" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"></select>
+    </div>
+  </div>
+
+  <p id="ai-assist-hint" class="mt-2 text-xs text-gray-500"></p>
+  <p id="ai-assist-field-note" class="mt-1 text-xs text-gray-500"></p>
+
+  <div class="mt-3 flex items-center gap-3">
+    <button type="button" id="ai-assist-run"
+      class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+      Run
+    </button>
+    <span id="ai-assist-status" class="text-sm text-gray-600" role="status" aria-live="polite"></span>
+  </div>
+
+  <div id="ai-assist-result" class="hidden mt-4">
+    <label class="block text-xs font-medium text-gray-700 mb-1" for="ai-assist-output">
+      Suggestion — nothing changes until you apply it
+    </label>
+    <textarea id="ai-assist-output" rows="8" readonly
+      class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono bg-gray-50"></textarea>
+    <div class="mt-2 flex items-center gap-2">
+      <button type="button" id="ai-assist-apply"
+        class="px-3 py-1.5 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700">
+        Apply to the field
+      </button>
+      <button type="button" id="ai-assist-discard"
+        class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50">
+        Discard
+      </button>
+      <span id="ai-assist-applied" class="hidden text-sm text-green-700">Applied — remember to save.</span>
+    </div>
+  </div>
+</div>
+
+<script>
+  import { syncEditorSurface } from '../../lib/editor-insert';
+
+  const panel = document.getElementById('ai-assist');
+  if (panel) {
+    const fieldSel = document.getElementById('ai-assist-field') as HTMLSelectElement;
+    const taskSel = document.getElementById('ai-assist-task') as HTMLSelectElement;
+    const localeWrap = document.getElementById('ai-assist-locale-wrap') as HTMLElement;
+    const localeSel = document.getElementById('ai-assist-locale') as HTMLSelectElement;
+    const hint = document.getElementById('ai-assist-hint') as HTMLElement;
+    const fieldNote = document.getElementById('ai-assist-field-note') as HTMLElement;
+    const runBtn = document.getElementById('ai-assist-run') as HTMLButtonElement;
+    const status = document.getElementById('ai-assist-status') as HTMLElement;
+    const resultBox = document.getElementById('ai-assist-result') as HTMLElement;
+    const output = document.getElementById('ai-assist-output') as HTMLTextAreaElement;
+    const applyBtn = document.getElementById('ai-assist-apply') as HTMLButtonElement;
+    const discardBtn = document.getElementById('ai-assist-discard') as HTMLButtonElement;
+    const applied = document.getElementById('ai-assist-applied') as HTMLElement;
+
+    type Task = { id: string; label: string; hint: string; needsLocale: boolean; output?: string };
+    let tasks: Task[] = [];
+
+    /**
+     * The double-submit CSRF token every admin write needs.
+     *
+     * Its absence is why the first version of this panel could never work: the
+     * dropdowns populated (a GET needs no token) and Run answered 403 on every
+     * press. Every sibling in this codebase sends it — the importer, the term
+     * picker, the switch banner, `lib/apiClient`.
+     */
+    const csrf = () => decodeURIComponent((document.cookie.match(/(?:^|; )astrobaas_csrf=([^;]*)/) ?? [])[1] ?? '');
+
+    /**
+     * The rich-text editor, found by CLASS rather than by id.
+     *
+     * `posts/new` gives it `id="post-content"` and `posts/[id]/edit` takes the
+     * default `id="editor"`. Selecting by id here would work in one editor and
+     * silently do nothing in the other — which is the same sibling-gap shape
+     * this panel exists to avoid.
+     */
+    const surface = () => document.querySelector('.rich-text-editor .editor-content') as HTMLElement | null;
+
+    /** Read a field. The body's truth is the contenteditable, not the textarea. */
+    function readField(name: string): string {
+      if (name === 'content') return surface()?.innerHTML ?? '';
+      const el = document.querySelector(`[name="${name}"]`) as HTMLInputElement | HTMLTextAreaElement | null;
+      return el?.value ?? '';
+    }
+
+    function writeField(name: string, value: string) {
+      if (name === 'content') {
+        const el = surface();
+        if (!el) return;
+        // Server-sanitized before it got here — the endpoint puts every HTML
+        // answer through the same sanitizer post bodies go through.
+        el.innerHTML = value;
+        // Without this the change is VISIBLE and not saved: the hidden textarea
+        // is what the form posts.
+        syncEditorSurface(el as any);
+        return;
+      }
+      const el = document.querySelector(`[name="${name}"]`) as HTMLInputElement | HTMLTextAreaElement | null;
+      if (!el) return;
+      el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    function currentTask(): Task | undefined {
+      return tasks.find((t) => t.id === taskSel.value);
+    }
+
+    /**
+     * Which field a task is FOR.
+     *
+     * "Draft an excerpt" reads the body and writes the excerpt. With one field
+     * selector defaulting to "The body", pressing Apply replaced the whole
+     * article with two sentences — and the panel's safety argument ("nothing is
+     * applied without a person") is about REVIEW, not about destination. The
+     * destination was wrong by default, which is the one thing a person
+     * reviewing the text would not notice.
+     *
+     * So a task that produces a specific field now targets it: the reader is
+     * chosen by the task, and only the tasks that genuinely rewrite in place
+     * leave the choice open.
+     */
+    const WRITES_TO: Record<string, string> = {
+      excerpt: 'excerpt',
+      title: 'title',
+      meta_description: 'meta_description',
+    };
+    /** What a task READS. The three above summarise the body. */
+    const READS_FROM: Record<string, string> = {
+      excerpt: 'content',
+      title: 'content',
+      meta_description: 'content',
+    };
+
+    function refresh() {
+      const t = currentTask();
+      hint.textContent = t?.hint ?? '';
+      localeWrap.classList.toggle('hidden', !t?.needsLocale);
+      // A task with a fixed destination shows it and locks it, rather than
+      // letting the previous selection quietly stand.
+      const fixed = t ? WRITES_TO[t.id] : undefined;
+      if (fixed) {
+        fieldSel.value = fixed;
+        fieldSel.disabled = true;
+        fieldNote.textContent = `Reads the body, writes the ${fieldSel.options[fieldSel.selectedIndex]?.text?.toLowerCase() ?? fixed}.`;
+      } else {
+        fieldSel.disabled = false;
+        fieldNote.textContent = '';
+      }
+    }
+
+    fieldSel.addEventListener('change', refresh);
+    taskSel.addEventListener('change', refresh);
+
+    discardBtn.addEventListener('click', () => {
+      resultBox.classList.add('hidden');
+      applied.classList.add('hidden');
+      output.value = '';
+    });
+
+    applyBtn.addEventListener('click', () => {
+      if (!output.value) return;
+      writeField(fieldSel.value, output.value);
+      applied.classList.remove('hidden');
+    });
+
+    runBtn.addEventListener('click', async () => {
+      const t = currentTask();
+      if (!t) return;
+      // Read what the task reads, which is not always the field it writes.
+      const source = READS_FROM[t.id] ?? fieldSel.value;
+      const text = readField(source);
+      if (!text.trim()) {
+        status.textContent = 'That field is empty.';
+        return;
+      }
+      runBtn.disabled = true;
+      status.textContent = 'Working…';
+      applied.classList.add('hidden');
+      try {
+        const res = await fetch('/api/assistant/assist', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf() },
+          body: JSON.stringify({
+            task: t.id,
+            text,
+            ...(t.needsLocale ? { locale: localeSel.value } : {}),
+          }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.data?.text) {
+          // `error` is an OBJECT ({message, code}) in this codebase's envelope,
+          // so `|| json?.error` rendered `[object Object]` for every failure.
+          status.textContent = json?.message || json?.error?.message || 'That did not work.';
+          return;
+        }
+        // textContent/value, never innerHTML: the suggestion is shown as TEXT so
+        // an editor reads exactly what would be applied.
+        output.value = json.data.text;
+        resultBox.classList.remove('hidden');
+        status.textContent = '';
+      } catch {
+        status.textContent = 'Could not reach the assistant.';
+      } finally {
+        runBtn.disabled = false;
+      }
+    });
+
+    // The panel stays hidden unless the assistant is actually live — an
+    // operator who has not configured a provider should not see a control that
+    // can only ever fail.
+    (async () => {
+      try {
+        const res = await fetch('/api/assistant/assist');
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!json?.data?.live) return;
+        tasks = json.data.tasks ?? [];
+        for (const t of tasks) {
+          const opt = document.createElement('option');
+          opt.value = t.id;
+          opt.textContent = t.label;
+          taskSel.appendChild(opt);
+        }
+        for (const l of (json.data.locales ?? [])) {
+          const opt = document.createElement('option');
+          opt.value = l;
+          opt.textContent = l;
+          localeSel.appendChild(opt);
+        }
+        refresh();
+        panel.classList.remove('hidden');
+      } catch {
+        /* An assistant that cannot be reached simply does not appear. */
+      }
+    })();
+  }
+</script>

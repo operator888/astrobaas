@@ -1,0 +1,48 @@
+---
+/**
+ * Marquee theme — `Breadcrumbs` override.
+ *
+ * The poster register: caps, letterspaced, a slash between steps instead of a
+ * chevron, sitting on the accent rule. Same contract as every other override
+ * — presentation only, the trail arrives from the route.
+ */
+import type { BreadcrumbsProps } from '../../core/theme-slots';
+import { breadcrumbLabel } from '../../lib/breadcrumbs';
+
+interface Props extends BreadcrumbsProps {}
+const { items, locale } = Astro.props;
+const trail = items ?? [];
+// The landmark speaks the reader's language too, not just the crumbs.
+const label = breadcrumbLabel(locale);
+---
+
+{trail.length >= 2 && (
+  <nav aria-label={label} class="mq-crumbs max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
+    <ol class="flex flex-wrap items-center gap-x-2 text-[11px] font-bold uppercase tracking-[0.14em]">
+      {trail.map((item, i) => (
+        <li class="flex items-center gap-x-2">
+          {i > 0 && <span aria-hidden="true" class="mq-crumb-sep">/</span>}
+          {item.href && i < trail.length - 1 ? (
+            <a href={item.href} class="mq-crumb-link hover:underline underline-offset-4">
+              {item.name}
+            </a>
+          ) : (
+            <span aria-current="page" class="mq-crumb-current">{item.name}</span>
+          )}
+        </li>
+      ))}
+    </ol>
+  </nav>
+)}
+
+<style>
+  .mq-crumb-sep {
+    color: var(--accent-color, #e2442f);
+  }
+  .mq-crumb-link {
+    color: var(--muted-color, #5c564a);
+  }
+  .mq-crumb-current {
+    color: var(--text-color, #16130d);
+  }
+</style>

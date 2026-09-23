@@ -1,0 +1,351 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { LocalDB } from '../../lib/localdb';
+import { toPublicUser } from '../../lib/auth';
+import { emailChannelActive } from '../../lib/email';
+import { settingBool, settingsMap } from '../../lib/settings-map';
+import { AUTHOR_ARCHIVES_SETTING } from '../../lib/archive-view';
+
+const session = Astro.locals.user;
+if (!session) {
+  return Astro.redirect('/login?next=/admin/profile');
+}
+
+await LocalDB.init();
+const user = await LocalDB.getUser(session.id);
+if (!user) {
+  return Astro.redirect('/login');
+}
+const safe = toPublicUser(user);
+const t = Astro.locals.t;
+
+// The per-user opt-in only appears when the SITE offers archives (C-153).
+// Showing a checkbox that writes a flag nothing reads is the write-only-phantom
+// shape this codebase keeps finding.
+const archivesOn = settingBool(
+  settingsMap(await LocalDB.getSettings())[AUTHOR_ARCHIVES_SETTING], false,
+);
+// 2FA enrollment is gated on a working email channel (lockout recovery runs
+// through email); the API refuses without it, so the button explains instead.
+const emailReady = emailChannelActive();
+---
+
+<AdminLayout title={t('admin.profile.pageTitle')}>
+  <div class="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="mb-6">
+      <h1 class="text-3xl font-bold text-gray-900">{t('admin.profile.title')}</h1>
+      <p class="text-gray-600 mt-2">{t('admin.profile.subtitle')}</p>
+    </div>
+
+    <div id="profile-notice" class="hidden mb-4 px-3 py-2 rounded-md border text-sm"></div>
+
+    <!-- Profile details -->
+    <form id="profile-form" class="bg-white border border-gray-200 rounded-lg p-6 mb-6 space-y-4">
+      <input type="hidden" id="user-id" value={safe.id} />
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="user-name">{t('admin.profile.nameLabel')}</label>
+        <input
+          id="user-name"
+          type="text"
+          required
+          value={safe.name}
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        />
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="user-email">{t('admin.profile.emailLabel')}</label>
+        <input
+          id="user-email"
+          type="email"
+          required
+          value={safe.email}
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        />
+      </div>
+      {archivesOn && (
+        <div>
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" id="user-public-archive"
+              checked={(safe as any).public_archive === true} class="rounded border-gray-300" />
+            Publish an archive page of my posts
+          </label>
+          <p class="mt-1 ml-6 text-xs text-gray-500">
+            Puts your display name at a public URL. Off unless you choose it —
+            on a shop, the “authors” are staff rather than bylined journalists.
+          </p>
+        </div>
+      )}
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">{t('admin.profile.roleLabel')}</label>
+        <p class="text-sm text-gray-600 px-3 py-2 bg-gray-50 rounded-lg">{safe.role}</p>
+      </div>
+      <div class="flex justify-end">
+        <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          {t('admin.profile.saveChanges')}
+        </button>
+      </div>
+    </form>
+
+    <!-- Password -->
+    <form id="password-form" class="bg-white border border-gray-200 rounded-lg p-6 space-y-4">
+      <h2 class="text-lg font-semibold text-gray-900">{t('admin.profile.passwordHeading')}</h2>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="new-password">{t('admin.profile.newPassword')}</label>
+        <input
+          id="new-password"
+          type="password"
+          autocomplete="new-password"
+          minlength="8"
+          required
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        />
+        <p class="text-xs text-gray-500 mt-1">{t('admin.profile.passwordHint')}</p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="confirm-password">{t('admin.profile.confirmPassword')}</label>
+        <input
+          id="confirm-password"
+          type="password"
+          autocomplete="new-password"
+          minlength="8"
+          required
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        />
+      </div>
+      <div class="flex justify-end">
+        <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          {t('admin.profile.updatePassword')}
+        </button>
+      </div>
+    </form>
+
+    <!-- Two-factor authentication -->
+    <div
+      id="twofa-card"
+      data-enabled={safe.two_factor_enabled ? '1' : '0'}
+      class="bg-white border border-gray-200 rounded-lg p-6 mt-6 space-y-4"
+    >
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="text-lg font-semibold text-gray-900">{t('admin.profile.twoFactorHeading')}</h2>
+          <p class="text-sm text-gray-600 mt-1">
+            {t('admin.profile.twoFactorIntro')}
+          </p>
+        </div>
+        <span id="twofa-status" class="shrink-0 text-xs font-semibold px-2.5 py-1 rounded-full"></span>
+      </div>
+
+      <div id="twofa-notice" class="hidden px-3 py-2 rounded-md border text-sm"></div>
+
+      <!-- Disabled → offer to enable -->
+      <div id="twofa-disabled-view" class="hidden">
+        {emailReady ? (
+          <button id="twofa-enable-btn" type="button" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+            {t('admin.profile.enableTwoFactor')}
+          </button>
+        ) : (
+          <p class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3">
+            {t('admin.profile.twoFactorNeedsEmail')}
+          </p>
+        )}
+      </div>
+
+      <!-- Setup → show secret + confirm a code -->
+      <div id="twofa-setup-view" class="hidden space-y-3">
+        <ol class="text-sm text-gray-700 space-y-3 list-decimal list-inside">
+          <li>
+            {t('admin.profile.setupStep1')}
+            <code id="twofa-secret" class="block mt-1 font-mono text-sm bg-gray-50 border border-gray-200 rounded px-3 py-2 break-all select-all"></code>
+          </li>
+          <li>
+            {t('admin.profile.setupStep2')}
+            <input id="twofa-uri" readonly class="w-full mt-1 font-mono text-xs bg-gray-50 border border-gray-200 rounded px-3 py-2 select-all" />
+          </li>
+          <li>
+            {t('admin.profile.setupStep3')}
+            <input
+              id="twofa-confirm-code"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              maxlength="6"
+              placeholder="123456"
+              class="w-40 mt-1 block px-3 py-2 border border-gray-300 rounded-lg font-mono tracking-widest focus:ring-2 focus:ring-blue-500"
+            />
+          </li>
+        </ol>
+        <div class="flex gap-2">
+          <button id="twofa-confirm-btn" type="button" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+            {t('admin.profile.confirmEnable')}
+          </button>
+          <button id="twofa-cancel-btn" type="button" class="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium">
+            {t('admin.common.cancel')}
+          </button>
+        </div>
+      </div>
+
+      <!-- Backup codes (shown once) -->
+      <div id="twofa-backup-view" class="hidden space-y-2">
+        <p class="text-sm font-medium text-green-700">
+          {t('admin.profile.backupCodesIntro')}
+        </p>
+        <pre id="twofa-backup-codes" class="font-mono text-sm bg-gray-50 border border-gray-200 rounded p-3 whitespace-pre-wrap select-all"></pre>
+        <button id="twofa-backup-done" type="button" class="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium">
+          {t('admin.profile.backupCodesDone')}
+        </button>
+      </div>
+
+      <!-- Enabled → offer to disable -->
+      <div id="twofa-enabled-view" class="hidden space-y-3">
+        <p class="text-sm text-gray-600">
+          {t('admin.profile.disableIntro')}
+        </p>
+        <input
+          id="twofa-disable-code"
+          inputmode="numeric"
+          autocomplete="one-time-code"
+          placeholder="123456"
+          class="w-48 block px-3 py-2 border border-gray-300 rounded-lg font-mono tracking-widest focus:ring-2 focus:ring-red-500"
+        />
+        <button id="twofa-disable-btn" type="button" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium">
+          {t('admin.profile.disableTwoFactor')}
+        </button>
+      </div>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../lib/apiClient';
+  import { flash as sharedFlash } from '../../lib/admin-ui';
+
+  const notice = document.getElementById('profile-notice');
+  function flash(msg, kind = 'success') {
+    // The shared helper, not a seventh copy of the class string. Tailwind scans
+    // source TEXT for class names, so the branches there are written out in
+    // full — a composed `bg-${c}-50` is not in the stylesheet and the notice
+    // renders unstyled in a production build while looking right in dev.
+    sharedFlash(notice, msg, kind === 'success' ? 'success' : 'error');
+  }
+
+  document.getElementById('profile-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const id = document.getElementById('user-id').value;
+    const name = document.getElementById('user-name').value.trim();
+    const email = document.getElementById('user-email').value.trim();
+    const archiveBox = document.getElementById('user-public-archive');
+    const res = await api.post('/api/users/update', {
+      id, name, email,
+      // Only sent when the site offers archives at all — otherwise this would
+      // write a flag nothing reads, which is the write-only-phantom shape.
+      ...(archiveBox ? { public_archive: archiveBox.checked } : {}),
+    });
+    if (!res.ok) return flash(window.t('admin.profile.saveFailed', { error: res.error }), 'error');
+    flash(window.t('admin.profile.profileUpdated'));
+  });
+
+  document.getElementById('password-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const id = document.getElementById('user-id').value;
+    const p1 = document.getElementById('new-password').value;
+    const p2 = document.getElementById('confirm-password').value;
+    if (p1.length < 8) return flash(window.t('admin.profile.passwordTooShort'), 'error');
+    if (p1 !== p2) return flash(window.t('admin.profile.passwordMismatch'), 'error');
+    const res = await api.post('/api/users/update', { id, password: p1 });
+    if (!res.ok) {
+      return flash(window.t('admin.profile.passwordChangeFailed', { error: res.error }), 'error');
+    }
+    document.getElementById('password-form').reset();
+    flash(window.t('admin.profile.passwordUpdated'));
+  });
+
+  /* ---------- Two-factor auth ---------- */
+  const card = document.getElementById('twofa-card');
+  const $ = (id) => document.getElementById(id);
+  const views = ['twofa-disabled-view', 'twofa-setup-view', 'twofa-backup-view', 'twofa-enabled-view'];
+  const tfNotice = $('twofa-notice');
+
+  function tfFlash(msg, kind = 'error') {
+    // Same helper as the profile notice above; this was the seventh copy, and
+    // the only one whose base string lacked the mb-4 the other six had.
+    sharedFlash(tfNotice, msg, kind === 'success' ? 'success' : 'error');
+  }
+
+  function showView(id) {
+    for (const v of views) $(v).classList.toggle('hidden', v !== id);
+  }
+
+  function renderStatus(enabled) {
+    const badge = $('twofa-status');
+    badge.textContent = enabled
+      ? window.t('admin.profile.statusEnabled')
+      : window.t('admin.profile.statusDisabled');
+    badge.className =
+      'shrink-0 text-xs font-semibold px-2.5 py-1 rounded-full ' +
+      (enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600');
+  }
+
+  function setEnabledState(enabled) {
+    card.dataset.enabled = enabled ? '1' : '0';
+    renderStatus(enabled);
+    showView(enabled ? 'twofa-enabled-view' : 'twofa-disabled-view');
+  }
+
+  // Initial paint from the server-rendered flag.
+  setEnabledState(card.dataset.enabled === '1');
+
+  /**
+   * The Enable button is only RENDERED when an email channel is configured
+   * (`emailReady` above) — 2FA without one locks an operator out of their own
+   * account with no way back.
+   *
+   * `getElementById` therefore returns null on a fresh install, and
+   * `.addEventListener` on null throws. Because this is one module, that throw
+   * aborted the whole script: every listener registered AFTER it never
+   * attached, so on an install with no email the profile form did not save, the
+   * password could not be changed, and nothing on screen said why.
+   *
+   * `on()` attaches when the element exists and does nothing when it does not.
+   * Used for every conditionally-rendered control below, not just this one —
+   * the next control someone makes conditional must not resurrect this.
+   */
+  const on = (id, event, handler) => $(id)?.addEventListener(event, handler);
+
+  on('twofa-enable-btn', 'click', async () => {
+    tfNotice.classList.add('hidden');
+    const res = await api.post('/api/2fa/setup');
+    if (!res.ok) return tfFlash(res.error || window.t('admin.profile.setupFailed'));
+    $('twofa-secret').textContent = res.data.secret;
+    $('twofa-uri').value = res.data.otpauth_uri;
+    $('twofa-confirm-code').value = '';
+    showView('twofa-setup-view');
+  });
+
+  on('twofa-cancel-btn', 'click', () => {
+    tfNotice.classList.add('hidden');
+    setEnabledState(false);
+  });
+
+  on('twofa-confirm-btn', 'click', async () => {
+    const code = $('twofa-confirm-code').value.trim();
+    if (!/^\d{6}$/.test(code)) return tfFlash(window.t('admin.profile.enterCode'));
+    const res = await api.post('/api/2fa/enable', { code });
+    if (!res.ok) return tfFlash(res.error || window.t('admin.profile.invalidCode'));
+    // Show the one-time backup codes.
+    $('twofa-backup-codes').textContent = (res.data.backup_codes || []).join('\n');
+    renderStatus(true);
+    showView('twofa-backup-view');
+  });
+
+  on('twofa-backup-done', 'click', () => setEnabledState(true));
+
+  on('twofa-disable-btn', 'click', async () => {
+    const code = $('twofa-disable-code').value.trim();
+    if (!code) return tfFlash(window.t('admin.profile.enterDisableCode'));
+    const res = await api.post('/api/2fa/disable', { code });
+    if (!res.ok) return tfFlash(res.error || window.t('admin.profile.invalidCode'));
+    $('twofa-disable-code').value = '';
+    tfFlash(window.t('admin.profile.twoFactorDisabled'), 'success');
+    setEnabledState(false);
+  });
+</script>

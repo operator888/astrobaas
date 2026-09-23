@@ -1,0 +1,47 @@
+---
+/**
+ * Editorial theme — `Breadcrumbs` override.
+ *
+ * The magazine register: small caps in the serif face, centred over a
+ * hairline, the way a section rule sits above a feature. Presentation only.
+ */
+import type { BreadcrumbsProps } from '../../core/theme-slots';
+import { breadcrumbLabel } from '../../lib/breadcrumbs';
+
+interface Props extends BreadcrumbsProps {}
+const { items, locale } = Astro.props;
+const trail = items ?? [];
+// The landmark speaks the reader's language too, not just the crumbs.
+const label = breadcrumbLabel(locale);
+---
+
+{trail.length >= 2 && (
+  <nav aria-label={label} class="editorial-crumbs max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 pt-10">
+    <ol class="flex flex-wrap items-center justify-center gap-x-3 text-xs tracking-[0.12em] uppercase">
+      {trail.map((item, i) => (
+        <li class="flex items-center gap-x-3">
+          {i > 0 && <span aria-hidden="true" class="editorial-crumb-sep">·</span>}
+          {item.href && i < trail.length - 1 ? (
+            <a href={item.href} class="hover:underline underline-offset-4 editorial-crumb-link">
+              {item.name}
+            </a>
+          ) : (
+            <span aria-current="page" class="editorial-crumb-current">{item.name}</span>
+          )}
+        </li>
+      ))}
+    </ol>
+  </nav>
+)}
+
+<style>
+  .editorial-crumb-sep {
+    color: var(--border-color, #d1d5db);
+  }
+  .editorial-crumb-link {
+    color: var(--muted-color, #6b7280);
+  }
+  .editorial-crumb-current {
+    color: var(--text-color, #1f2937);
+  }
+</style>

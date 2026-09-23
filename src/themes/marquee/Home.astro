@@ -1,0 +1,52 @@
+---
+/**
+ * Marquee theme — `Home` override.
+ *
+ * The front page as a poster wall: the tagline set enormous on the accent
+ * block, then the latest posts as stamped tiles in a hard grid. Empty install
+ * still posters — the site title carries the block alone.
+ */
+import type { HomeProps } from '../../core/theme-slots';
+import { postHref } from '../../lib/locale-links';
+
+const { siteTitle = 'AstroBaaS', siteTagline = '', posts = [] } = Astro.props as HomeProps;
+---
+
+<div class="mq-home">
+  <section class="ab-bg-accent mq-poster-band">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-16 md:py-24">
+      <p
+        class="font-bold uppercase leading-[0.95] tracking-tight ab-heading-font ab-on-accent mq-poster-title"
+      >{siteTagline || siteTitle}</p>
+    </div>
+  </section>
+
+  {posts.length > 0 && (
+    <section class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-14">
+      <h2 class="text-xs font-bold uppercase tracking-widest mb-6 ab-muted">Latest</h2>
+      <div class="grid gap-0 sm:grid-cols-2 lg:grid-cols-3">
+        {posts.map((post) => (
+          <article class="mq-tile p-6 border-4 -mt-1 -ml-1 ab-border-ink ab-surface">
+            <p class="text-xs font-bold uppercase tracking-widest mb-3 ab-accent">{post.category}</p>
+            <h3 class="font-bold uppercase leading-tight text-xl mb-3 ab-heading-font ab-ink">
+              <a href={postHref(`/blog/${post.slug}`, post)} class="hover:underline underline-offset-4 ab-inherit">{post.title}</a>
+            </h3>
+            <p class="text-sm leading-relaxed mb-4 ab-muted">{post.excerpt}</p>
+            <p class="text-xs font-bold uppercase tracking-widest ab-ink">{post.date} · {post.readTime} min</p>
+          </article>
+        ))}
+      </div>
+    </section>
+  )}
+</div>
+
+<style>
+  .mq-poster-band {
+    border-bottom: 4px solid var(--text-color);
+  }
+
+  .mq-poster-title {
+    font-size: clamp(2.2rem, 7vw, 5rem);
+    max-width: 18ch;
+  }
+</style>

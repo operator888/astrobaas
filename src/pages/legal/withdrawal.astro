@@ -1,0 +1,79 @@
+---
+import PublicLayout from '../../layouts/PublicLayout.astro';
+import { LocalDB } from '../../lib/localdb';
+import {
+  resolveWithdrawalPolicy, withdrawalInstructions, modelWithdrawalForm,
+  policyIsPublishable, missingTraderFields,
+} from '../../lib/withdrawal';
+
+/**
+ * Public "Right of withdrawal" page.
+ *
+ * Consumer-facing text is rendered with `{}` interpolation, never `set:html` —
+ * every word of it comes from operator-supplied settings, so building markup
+ * from it would turn the trader-address field into a stored-XSS vector.
+ */
+await LocalDB.init();
+const rows = await LocalDB.getSettings();
+const map: Record<string, unknown> = {};
+for (const r of rows) map[r.key] = r.value;
+
+const policy = resolveWithdrawalPolicy(map);
+const publishable = policyIsPublishable(policy);
+const missing = missingTraderFields(policy);
+const instructions = publishable ? withdrawalInstructions(policy) : '';
+const form = publishable ? modelWithdrawalForm(policy) : '';
+---
+
+<PublicLayout
+  title="Right of withdrawal"
+  description="Your right to withdraw from a purchase, and the model withdrawal form."
+>
+  <section class="py-16 bg-white">
+    <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
+      <h1 class="text-3xl md:text-4xl font-bold text-gray-900 mb-2">Right of withdrawal</h1>
+
+      {!policy.enabled && (
+        <p class="text-gray-600 mt-6">
+          This shop does not publish a withdrawal notice. If you are a consumer in the EU
+          buying at a distance, you may still have a statutory right of withdrawal — contact
+          the shop directly.
+        </p>
+      )}
+
+      {policy.enabled && !publishable && (
+        <div class="mt-6 rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <p class="text-sm text-amber-900">
+            This notice is not published yet: the shop operator still has to provide
+            {' '}{missing.join(', ')}. Until then, please contact the shop directly to
+            exercise your right of withdrawal.
+          </p>
+        </div>
+      )}
+
+      {publishable && (
+        <>
+          <p class="text-sm text-gray-500 mb-8">
+            You have {policy.days} days to withdraw from a purchase without giving a reason.
+          </p>
+
+          <div class="prose prose-gray max-w-none">
+            <pre class="whitespace-pre-wrap font-sans text-gray-800 text-base leading-relaxed">{instructions}</pre>
+          </div>
+
+          <hr class="my-10 border-gray-200" />
+
+          <div class="prose prose-gray max-w-none">
+            <pre class="whitespace-pre-wrap font-sans text-gray-800 text-base leading-relaxed">{form}</pre>
+          </div>
+
+          <p class="mt-10 text-xs text-gray-500">
+            Generated from the model texts in Annex I of Directive 2011/83/EU using this
+            shop’s configured details. National implementations differ and some goods are
+            exempt, so this is a starting point rather than legal advice.
+          </p>
+        </>
+      )}
+    </div>
+  </section>
+</PublicLayout>

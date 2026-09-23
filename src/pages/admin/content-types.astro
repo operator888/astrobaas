@@ -1,0 +1,788 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+
+/**
+ * The content-type builder — AstroBaaS's answer to "I want my own fields".
+ *
+ * An admin defines a collection (name, labels, visibility, fields) and it is
+ * REAL on the next request: REST endpoints at /api/content/<name>, validation
+ * from the field rules, an entries screen — no plugin, no deploy, no restart.
+ *
+ * Plugin-defined types appear in the same list, read-only, with the source
+ * named: one registry, two doors, and the admin can always see the whole truth
+ * of what the API serves.
+ */
+---
+
+<AdminLayout title="Content types">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">Content types</h1>
+    <p class="text-sm text-gray-500 mb-6">
+      Define your own collections — fields, validation and API included. A saved type answers
+      at <code>/api/content/&lt;name&gt;</code> immediately.
+    </p>
+
+    <div id="ct-notice" class="hidden mb-4 px-3 py-2 rounded-md border text-sm"></div>
+
+    <div class="bg-white border border-gray-200 rounded-xl overflow-x-auto mb-8">
+      <table class="min-w-full text-sm">
+        <thead class="bg-gray-50 text-gray-500">
+          <tr>
+            <th class="px-4 py-3 text-left font-medium">Type</th>
+            <th class="px-4 py-3 text-left font-medium">Fields</th>
+            <th class="px-4 py-3 text-left font-medium">Read access</th>
+            <th class="px-4 py-3 text-left font-medium">Who can add</th>
+            <th class="px-4 py-3 text-left font-medium">Source</th>
+            <th class="px-4 py-3 text-right font-medium">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="ct-body" class="divide-y divide-gray-100">
+          <tr><td colspan="6" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!--
+      Taxonomies (C-128). On this screen rather than its own, because both
+      answer the same question — what shape is content on this site — and an
+      operator looking for "how do I add a Brand" should not have to guess which
+      of two pages it lives on.
+    -->
+    <section class="bg-white border border-gray-200 rounded-xl p-6 mb-8">
+      <h2 class="text-lg font-semibold text-gray-900 mb-1">Taxonomies</h2>
+      <p class="text-sm text-gray-500 mb-4">
+        Groupings of your own — Brand, Lens type, Supplier — with terms an editor picks while
+        writing. Categories and tags stay exactly as they are; this is in addition to them.
+        Removing a taxonomy leaves every record alone: the assignments simply stop being read,
+        and come back if you define it again.
+      </p>
+      <div id="tax-notice" class="hidden mb-4 px-3 py-2 rounded-md border text-sm"></div>
+      <div id="tax-list" class="space-y-3 mb-4"></div>
+      <div class="flex flex-wrap items-end gap-2 border-t border-gray-100 pt-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1" for="tax-slug">Slug</label>
+          <input id="tax-slug" type="text" placeholder="brand" class="px-3 py-2 border border-gray-300 rounded-lg text-sm w-32" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1" for="tax-label">Label</label>
+          <input id="tax-label" type="text" placeholder="Brand" class="px-3 py-2 border border-gray-300 rounded-lg text-sm w-40" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1" for="tax-applies">Applies to</label>
+          <input id="tax-applies" type="text" placeholder="post, page, product" class="px-3 py-2 border border-gray-300 rounded-lg text-sm w-56" />
+        </div>
+        <label class="flex items-center gap-2 text-sm text-gray-700 pb-2">
+          <input type="checkbox" id="tax-public" class="rounded border-gray-300" />
+          Public page
+        </label>
+        <button type="button" id="tax-add"
+          class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium">
+          Add
+        </button>
+      </div>
+      <p class="mt-2 text-xs text-gray-500">
+        <strong>Public page</strong> gives each term an address at <code>/t/&lt;slug&gt;/&lt;term&gt;</code>.
+        Leave it off for an internal grouping — a supplier list has no business on the open web
+        unless you put it there.
+      </p>
+    </section>
+
+    <div class="bg-white border border-gray-200 rounded-xl p-6">
+      <h2 id="ct-form-title" class="text-lg font-semibold text-gray-900 mb-4">New content type</h2>
+      <div class="grid gap-4 md:grid-cols-3 mb-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="ct-name">Name (API id)</label>
+          <input id="ct-name" placeholder="event" pattern="[a-z][a-z0-9-]{1,40}"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" />
+          <p class="text-xs text-gray-400 mt-1">kebab-case. Becomes <code>/api/content/&lt;name&gt;</code>.</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="ct-label">Label</label>
+          <input id="ct-label" placeholder="Event"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="ct-visibility">Who can read it</label>
+          <select id="ct-visibility" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+            <option value="staff">Staff only (default)</option>
+            <option value="public">Public — anyone, no login</option>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">Public means a storefront — or anyone — can read every entry.</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="ct-writable">Who can add entries</label>
+          <select id="ct-writable" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+            <option value="staff">Staff only (default)</option>
+            <option value="public">Anyone — this is a form</option>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">
+            Opens an anonymous submission endpoint, protected by a honeypot, a rate limit,
+            and the local anti-spam check when it is switched on for public forms.
+          </p>
+        </div>
+        <div class="sm:col-span-2">
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" id="ct-moderated" class="rounded border-gray-300" />
+            Hold public submissions until somebody approves them
+            <span class="text-xs text-gray-400">(comments, reviews — anything a stranger writes)</span>
+          </label>
+          <label class="flex items-center gap-2 text-sm text-gray-700 mt-2">
+            <input type="checkbox" id="ct-notify" class="rounded border-gray-300" />
+            Email me when someone submits
+            <span class="text-xs text-gray-400">(needs an email channel configured)</span>
+          </label>
+          <p id="ct-open-warning" class="hidden text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 mt-3">
+            <strong>Anyone can read what anyone submits.</strong> That is right for a guestbook
+            and wrong for an enquiry or a job application. If this is a form people fill in
+            privately, set “Who can read it” back to staff only.
+          </p>
+        </div>
+      </div>
+
+      <h3 class="text-sm font-semibold text-gray-900 mb-2">Steps</h3>
+      <p class="text-xs text-gray-500 mb-2">
+        Leave empty for a single-page form. Add a title per step and each field can then say
+        which step it belongs to — a visitor answers one group at a time instead of meeting
+        thirty boxes at once.
+      </p>
+      <div id="ct-steps" class="space-y-2 mb-2"></div>
+      <button id="ct-add-step" type="button"
+        class="px-3 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 mb-5">
+        + Add step
+      </button>
+
+      <h3 class="text-sm font-semibold text-gray-900 mb-2">Fields</h3>
+      <div id="ct-fields" class="space-y-2 mb-3"></div>
+      <button id="ct-add-field" type="button"
+        class="px-3 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">
+        + Add field
+      </button>
+
+      <div class="mt-6 flex items-center gap-3">
+        <button id="ct-save" type="button"
+          class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          Save type
+        </button>
+        <button id="ct-cancel" type="button" class="hidden px-4 py-2 border border-gray-300 rounded-lg text-gray-700">
+          Cancel edit
+        </button>
+        <span id="ct-error" class="text-sm text-red-600"></span>
+      </div>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../lib/apiClient';
+  import { flash as sharedFlash } from '../../lib/admin-ui';
+
+  const FIELD_TYPES = [
+    ['string', 'Text'], ['number', 'Number'], ['boolean', 'Yes / No'],
+    ['enum', 'Choice (options)'], ['date', 'Date'], ['email', 'Email'],
+    ['url', 'URL'], ['slug', 'Slug'], ['id', 'Id (non-empty text)'],
+    ['array', 'List'],
+    // The two that make a collection-only site real: without them an "event"
+    // cannot name its venue and a "team member" cannot have a photograph.
+    ['ref', 'Link to another type'], ['media', 'Image / file'],
+    // A repeating group of sub-fields — the "team members", "opening hours",
+    // "price tiers" shape. One level deep, deliberately: see field-rule-build.
+    ['repeater', 'Repeating group'],
+  ];
+
+  /** The kinds a field INSIDE a repeater may be — everything but another repeater. */
+  const SUB_FIELD_TYPES = FIELD_TYPES.filter(([v]) => v !== 'repeater');
+
+  let adminTypes = [];      // the editable set, mirrored to the server as a whole
+  let editingIndex = -1;    // -1 = creating
+
+  const $ = (id) => document.getElementById(id);
+  const notice = (msg, kind = 'success') => {
+    // lib/admin-ui — was one of six identical class-string builders.
+    const n = $('ct-notice');
+    sharedFlash(n, msg, kind === 'success' ? 'success' : 'error');
+    setTimeout(() => n.classList.add('hidden'), 4000);
+  };
+
+  /* ---- step rows (C-22) ---- */
+
+  function stepRow(title = '') {
+    const row = document.createElement('div');
+    row.className = 'ct-step flex items-center gap-2';
+    const n = document.createElement('span');
+    n.className = 'ct-step-n text-xs text-gray-400 w-6';
+    const input = document.createElement('input');
+    input.className = 'ct-stitle px-2 py-1.5 border border-gray-300 rounded flex-1 text-sm';
+    input.placeholder = 'Step title, e.g. About you';
+    input.value = title;
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = '✕';
+    del.className = 'text-gray-400 hover:text-red-600 px-2';
+    del.addEventListener('click', () => { row.remove(); renumberSteps(); syncAllFieldSteps(); });
+    row.append(n, input, del);
+    return row;
+  }
+
+  function stepTitles() {
+    return [...document.querySelectorAll('.ct-stitle')].map((i) => i.value.trim()).filter(Boolean);
+  }
+
+  function renumberSteps() {
+    [...document.querySelectorAll('.ct-step')].forEach((row, i) => {
+      row.querySelector('.ct-step-n').textContent = String(i + 1);
+    });
+  }
+
+  /**
+   * Re-offer every field's step choice after the step list changes.
+   *
+   * A field pointing at step 4 when there are three is refused by the
+   * validator, and the operator would have to work out which of forty rows was
+   * the problem. Re-rendering the choices here means the invalid state cannot
+   * be reached: a removed step's fields fall back to step 1.
+   */
+  function syncAllFieldSteps() {
+    const titles = stepTitles();
+    for (const sel of document.querySelectorAll('.ct-fstep')) {
+      const want = Number(sel.value || '1');
+      sel.replaceChildren();
+      if (titles.length < 2) {
+        sel.hidden = true;
+        continue;
+      }
+      sel.hidden = false;
+      titles.forEach((title, i) => {
+        const o = document.createElement('option');
+        o.value = String(i + 1);
+        o.textContent = `${i + 1}. ${title.slice(0, 24)}`;
+        if (want === i + 1) o.selected = true;
+        sel.appendChild(o);
+      });
+      if (want > titles.length) sel.value = '1';
+    }
+  }
+
+  /**
+   * Re-offer every field's condition target.
+   *
+   * A condition may only name a field declared EARLIER — that is what makes a
+   * cycle impossible by construction rather than by a check somebody has to
+   * remember to run — so each row is offered exactly the rows above it.
+   */
+  function syncAllConditions() {
+    const rows = [...document.querySelectorAll('.ct-field')];
+    rows.forEach((row, i) => {
+      const sel = row.querySelector('.ct-fcond');
+      const want = sel.value;
+      const earlier = rows.slice(0, i)
+        .map((r) => r.querySelector('.ct-fname').value.trim())
+        .filter(Boolean);
+      sel.replaceChildren();
+      const none = document.createElement('option');
+      none.value = ''; none.textContent = 'always shown';
+      sel.appendChild(none);
+      for (const name of earlier) {
+        const o = document.createElement('option');
+        o.value = name; o.textContent = `when ${name} is…`;
+        if (name === want) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.disabled = earlier.length === 0;
+      row.querySelector('.ct-fcondval').hidden = !sel.value;
+    });
+  }
+
+  $('ct-add-step').addEventListener('click', () => {
+    $('ct-steps').appendChild(stepRow());
+    renumberSteps();
+    syncAllFieldSteps();
+  });
+  $('ct-steps').addEventListener('input', syncAllFieldSteps);
+
+  /**
+   * One field INSIDE a repeating group.
+   *
+   * Deliberately a smaller control set than a top-level field: no step (a group
+   * lives on one step, the one its parent is on) and no condition (a condition
+   * may only name an EARLIER field, and "earlier" across the group boundary
+   * would mean two scopes to reason about for one word).
+   */
+  function subFieldRow(f = { name: '', rule: { type: 'string' } }) {
+    const row = document.createElement('div');
+    row.className = 'ct-subfield flex flex-wrap items-center gap-2';
+
+    const name = document.createElement('input');
+    name.placeholder = 'field_name';
+    name.value = f.name ?? '';
+    name.className = 'ct-sfname px-2 py-1 border border-gray-300 rounded w-36 text-sm';
+
+    const type = document.createElement('select');
+    type.className = 'ct-sftype px-2 py-1 border border-gray-300 rounded text-sm';
+    for (const [v, label] of SUB_FIELD_TYPES) {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = label;
+      if (f.rule?.type === v) o.selected = true;
+      type.appendChild(o);
+    }
+
+    const options = document.createElement('input');
+    options.className = 'ct-sfopts px-2 py-1 border border-gray-300 rounded flex-1 min-w-32 text-sm';
+    options.value = f.rule?.type === 'ref'
+      ? (f.rule?.to ?? '')
+      : (Array.isArray(f.rule?.values) ? f.rule.values.join(', ') : '');
+    const syncOpts = () => {
+      options.hidden = !(type.value === 'enum' || type.value === 'ref');
+      options.placeholder = type.value === 'ref' ? 'which type?' : 'options, comma-separated';
+    };
+    type.addEventListener('change', syncOpts);
+    syncOpts();
+
+    const req = document.createElement('label');
+    req.className = 'flex items-center gap-1 text-xs text-gray-600';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'ct-sfreq';
+    cb.checked = !f.rule?.optional;
+    req.append(cb, document.createTextNode('required'));
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = '✕';
+    del.className = 'text-gray-400 hover:text-red-600 px-1';
+    del.addEventListener('click', () => row.remove());
+
+    row.append(name, type, options, req, del);
+    return row;
+  }
+
+  /** Read one sub-row back into a `{name, rule}`. Mirrors readForm's field loop. */
+  function readSubField(row) {
+    const rule = { type: row.querySelector('.ct-sftype').value };
+    if (!row.querySelector('.ct-sfreq').checked) rule.optional = true;
+    if (rule.type === 'enum') {
+      rule.values = row.querySelector('.ct-sfopts').value.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    if (rule.type === 'ref') rule.to = row.querySelector('.ct-sfopts').value.trim();
+    if (rule.type === 'array') rule.of = 'string';
+    return { name: row.querySelector('.ct-sfname').value.trim(), rule };
+  }
+
+  /* ---- field rows ---- */
+
+  function fieldRow(f = { name: '', rule: { type: 'string' } }) {
+    const row = document.createElement('div');
+    row.className = 'ct-field flex flex-wrap items-center gap-2 p-2 border border-gray-200 rounded-lg';
+
+    const name = document.createElement('input');
+    name.placeholder = 'field_name';
+    name.value = f.name;
+    name.className = 'ct-fname px-2 py-1.5 border border-gray-300 rounded w-40 text-sm';
+
+    const type = document.createElement('select');
+    type.className = 'ct-ftype px-2 py-1.5 border border-gray-300 rounded text-sm';
+    for (const [v, label] of FIELD_TYPES) {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = label;
+      if (f.rule?.type === v) o.selected = true;
+      type.appendChild(o);
+    }
+
+    // One extra input, reused by the two field types that need a parameter:
+    // the choices for an enum, the target collection for a link. A second box
+    // that is hidden nine times out of ten would be worse.
+    const options = document.createElement('input');
+    options.className = 'ct-fopts px-2 py-1.5 border border-gray-300 rounded flex-1 min-w-40 text-sm';
+    options.value = f.rule?.type === 'ref'
+      ? (f.rule?.to ?? '')
+      : (Array.isArray(f.rule?.values) ? f.rule.values.join(', ') : '');
+    const syncOpts = () => {
+      const needs = type.value === 'enum' || type.value === 'ref';
+      options.style.display = needs ? '' : 'none';
+      options.placeholder = type.value === 'ref'
+        ? 'which type? e.g. venue'
+        : 'options, comma-separated';
+    };
+    type.addEventListener('change', syncOpts);
+    syncOpts();
+
+    const req = document.createElement('label');
+    req.className = 'flex items-center gap-1 text-sm text-gray-600';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'ct-freq';
+    cb.checked = !f.rule?.optional;
+    req.appendChild(cb);
+    req.appendChild(document.createTextNode('required'));
+
+    // The sub-field editor for a repeating group. Built for every row and shown
+    // only for a repeater, so switching a field's type back and forth does not
+    // lose what was typed into it.
+    const sub = document.createElement('div');
+    sub.className = 'ct-sub w-full mt-2 ml-4 pl-3 border-l-2 border-gray-200 space-y-2';
+    const subList = document.createElement('div');
+    subList.className = 'ct-sublist space-y-2';
+    const subAdd = document.createElement('button');
+    subAdd.type = 'button';
+    subAdd.textContent = '+ Add field to the group';
+    subAdd.className = 'px-2 py-1 text-xs border border-gray-300 rounded text-gray-700 hover:bg-gray-50';
+    subAdd.addEventListener('click', () => subList.appendChild(subFieldRow()));
+    sub.append(subList, subAdd);
+    for (const sf of (f.rule?.fields ?? [])) subList.appendChild(subFieldRow(sf));
+    const syncSub = () => {
+      sub.hidden = type.value !== 'repeater';
+      // A repeater with no fields is refused by the validator, so the editor
+      // offers one the moment the kind is chosen rather than letting somebody
+      // save an empty group and read an error about it.
+      if (!sub.hidden && subList.children.length === 0) subList.appendChild(subFieldRow());
+    };
+    type.addEventListener('change', syncSub);
+    syncSub();
+
+    // Which step this field belongs to. Hidden until there are two steps —
+    // an unnecessary control on every row of a single-page form is noise.
+    const step = document.createElement('select');
+    step.className = 'ct-fstep px-2 py-1.5 border border-gray-300 rounded text-sm';
+    step.dataset.want = String(f.step ?? 1);
+    step.value = String(f.step ?? 1);
+
+    // Show this field only when an earlier one holds a value (C-22/C-125).
+    const cond = document.createElement('select');
+    cond.className = 'ct-fcond px-2 py-1.5 border border-gray-300 rounded text-sm';
+    cond.dataset.want = f.showIf?.field ?? '';
+    const condVal = document.createElement('input');
+    condVal.className = 'ct-fcondval px-2 py-1.5 border border-gray-300 rounded w-32 text-sm';
+    condVal.placeholder = 'equals…';
+    condVal.value = f.showIf ? String(f.showIf.equals) : '';
+    condVal.hidden = !f.showIf;
+    cond.addEventListener('change', () => { condVal.hidden = !cond.value; });
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = '✕';
+    del.className = 'text-gray-400 hover:text-red-600 px-2';
+    del.addEventListener('click', () => { row.remove(); syncAllConditions(); });
+
+    // Renaming a field breaks any condition that named it, so the choices are
+    // rebuilt as soon as a name changes rather than at save time.
+    name.addEventListener('input', syncAllConditions);
+
+    row.append(name, type, options, req, step, cond, condVal, del, sub);
+    return row;
+  }
+
+  $('ct-add-field').addEventListener('click', () => {
+    $('ct-fields').appendChild(fieldRow());
+    syncAllFieldSteps();
+    syncAllConditions();
+  });
+
+  function readForm() {
+    const fields = [...document.querySelectorAll('.ct-field')].map((row) => {
+      const rule = { type: row.querySelector('.ct-ftype').value };
+      if (!row.querySelector('.ct-freq').checked) rule.optional = true;
+      if (rule.type === 'enum') {
+        rule.values = row.querySelector('.ct-fopts').value.split(',').map((s) => s.trim()).filter(Boolean);
+      }
+      if (rule.type === 'ref') rule.to = row.querySelector('.ct-fopts').value.trim();
+      if (rule.type === 'array') rule.of = 'string';
+      if (rule.type === 'repeater') {
+        rule.fields = [...row.querySelectorAll('.ct-subfield')].map(readSubField).filter((f) => f.name);
+      }
+      const field = { name: row.querySelector('.ct-fname').value.trim(), rule };
+      const stepSel = row.querySelector('.ct-fstep');
+      const stepNo = Number(stepSel.value || '1');
+      // Step 1 is the default and is not stored, so a type built before steps
+      // existed and one whose author left every field on step 1 are identical.
+      if (!stepSel.hidden && stepNo > 1) field.step = stepNo;
+      const condField = row.querySelector('.ct-fcond').value;
+      if (condField) {
+        field.showIf = { field: condField, equals: row.querySelector('.ct-fcondval').value };
+      }
+      return field;
+    }).filter((f) => f.name);
+    const titles = stepTitles();
+    return {
+      name: $('ct-name').value.trim(),
+      label: $('ct-label').value.trim(),
+      visibility: $('ct-visibility').value,
+      writable: $('ct-writable').value,
+      notifyOnSubmission: $('ct-notify').checked,
+      moderated: $('ct-moderated').checked,
+      // One step is the same as none — see buildSteps in core/field-rule-build.
+      steps: titles.length > 1 ? titles.map((title) => ({ title })) : undefined,
+      fields,
+    };
+  }
+
+  function fillForm(def) {
+    $('ct-name').value = def.name;
+    $('ct-label').value = def.label;
+    $('ct-visibility').value = def.visibility ?? 'staff';
+    $('ct-writable').value = def.writable ?? 'staff';
+    $('ct-notify').checked = def.notifyOnSubmission === true;
+    $('ct-moderated').checked = def.moderated === true;
+    updateOpenWarning();
+    $('ct-steps').replaceChildren(...(def.steps ?? []).map((s) => stepRow(s.title)));
+    renumberSteps();
+    $('ct-fields').replaceChildren(...def.fields.map(fieldRow));
+    // AFTER both lists exist: the step choices need the step titles and the
+    // condition choices need the field names, and each row was built before
+    // its neighbours were in the document.
+    syncAllFieldSteps();
+    syncAllConditions();
+  }
+
+  function resetForm() {
+    editingIndex = -1;
+    $('ct-form-title').textContent = 'New content type';
+    $('ct-cancel').classList.add('hidden');
+    $('ct-name').disabled = false;
+    fillForm({ name: '', label: '', visibility: 'staff', writable: 'staff', fields: [] });
+    $('ct-fields').appendChild(fieldRow());
+    // The blank row was appended after fillForm's sync, so it has no choices yet.
+    syncAllFieldSteps();
+    syncAllConditions();
+  }
+
+  /**
+   * The combination worth being loud about.
+   *
+   * Public reads and public writes are each reasonable on their own; together
+   * they publish every submission to the open web. Nobody picks that
+   * deliberately for a job application, and the failure is silent — the form
+   * works perfectly, and the applications are readable at a URL.
+   */
+  function updateOpenWarning() {
+    const open = $('ct-visibility').value === 'public' && $('ct-writable').value === 'public';
+    $('ct-open-warning').classList.toggle('hidden', !open);
+  }
+  $('ct-visibility').addEventListener('change', updateOpenWarning);
+  $('ct-writable').addEventListener('change', updateOpenWarning);
+
+  $('ct-cancel').addEventListener('click', resetForm);
+
+  /* ---- list ---- */
+
+  async function load() {
+    const res = await api.get('/api/content-types');
+    const body = $('ct-body');
+    body.replaceChildren();
+    if (!res.ok) {
+      notice(`Could not load types: ${res.error}`, 'error');
+      return;
+    }
+    const types = res.data || [];
+    adminTypes = types.filter((t) => t.source === 'admin')
+      .map(({ source, ...def }) => def);
+
+    if (!types.length) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 6;
+      td.className = 'px-4 py-6 text-center text-gray-400';
+      td.textContent = 'No content types yet — define your first below.';
+      tr.appendChild(td);
+      body.appendChild(tr);
+    }
+
+    for (const t of types) {
+      const tr = document.createElement('tr');
+      const cell = (txt, cls = 'px-4 py-3') => {
+        const td = document.createElement('td');
+        td.className = cls;
+        td.textContent = txt;
+        return td;
+      };
+      const nameTd = document.createElement('td');
+      nameTd.className = 'px-4 py-3';
+      const strong = document.createElement('span');
+      strong.className = 'font-medium text-gray-900';
+      strong.textContent = t.label;
+      const code = document.createElement('code');
+      code.className = 'ml-2 text-xs text-gray-500';
+      code.textContent = t.name;
+      nameTd.append(strong, code);
+      tr.appendChild(nameTd);
+      tr.appendChild(cell(t.fields.map((f) => f.name).join(', ')));
+      tr.appendChild(cell(t.visibility === 'public' ? 'Public' : 'Staff only'));
+      tr.appendChild(cell(t.writable === 'public' ? 'Anyone (form)' : 'Staff only'));
+      tr.appendChild(cell(t.source === 'admin' ? 'Defined here' : 'Plugin'));
+
+      const actions = document.createElement('td');
+      actions.className = 'px-4 py-3 text-right space-x-3';
+      const entries = document.createElement('a');
+      entries.href = `/admin/content/${encodeURIComponent(t.name)}`;
+      entries.className = 'text-sm text-blue-600 hover:text-blue-800';
+      entries.textContent = 'Entries';
+      actions.appendChild(entries);
+
+      if (t.source === 'admin') {
+        const idx = adminTypes.findIndex((d) => d.name === t.name);
+        const edit = document.createElement('button');
+        edit.type = 'button';
+        edit.className = 'text-sm text-gray-600 hover:text-gray-900';
+        edit.textContent = 'Edit';
+        edit.addEventListener('click', () => {
+          editingIndex = idx;
+          $('ct-form-title').textContent = `Edit "${t.label}"`;
+          $('ct-cancel').classList.remove('hidden');
+          // The name is the API path and the storage key; renaming is a
+          // different operation (it strands entries) and is refused simply.
+          $('ct-name').disabled = true;
+          fillForm(adminTypes[idx]);
+          $('ct-name').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'text-sm text-red-600 hover:text-red-800';
+        del.textContent = 'Delete';
+        del.addEventListener('click', async () => {
+          if (!confirm(`Delete the type "${t.label}"? Its entries stay stored but stop being served.`)) return;
+          const next = adminTypes.filter((d) => d.name !== t.name);
+          const r = await api.put('/api/content-types', next);
+          if (r.ok) { notice('Type deleted.'); resetForm(); await load(); }
+          else notice(`Delete failed: ${r.error}`, 'error');
+        });
+        actions.append(edit, del);
+      }
+      tr.appendChild(actions);
+      body.appendChild(tr);
+    }
+  }
+
+  $('ct-save').addEventListener('click', async () => {
+    $('ct-error').textContent = '';
+    const def = readForm();
+    const next = [...adminTypes];
+    if (editingIndex >= 0) next[editingIndex] = { ...def, name: adminTypes[editingIndex].name };
+    else next.push(def);
+
+    const res = await api.put('/api/content-types', next);
+    if (!res.ok) {
+      // The validator names every problem by position; show them all — a
+      // builder that reveals one error per submit is a ten-submit form.
+      const details = res.details ? Object.values(res.details).join('; ') : res.error;
+      $('ct-error').textContent = details || 'Could not save';
+      return;
+    }
+    notice(editingIndex >= 0 ? 'Type updated — live now.' : 'Type created — live now.');
+    resetForm();
+    await load();
+  });
+
+  resetForm();
+  load();
+</script>
+
+<script>
+  /**
+   * The taxonomy manager (C-128).
+   *
+   * The whole SET is sent on every change, because two of the server's rules —
+   * duplicate slugs and the count bound — are properties of the set, and a
+   * patch cannot express a removal. The server is the validator; this screen
+   * shows what it said rather than re-implementing it, so the two cannot
+   * disagree about what is allowed.
+   */
+  (function () {
+    const listEl = document.getElementById('tax-list') as HTMLElement | null;
+    const noticeEl = document.getElementById('tax-notice') as HTMLElement | null;
+    if (!listEl || !noticeEl) return;
+    // Narrowed into consts the closures capture: a `let` widens back to
+    // `| null` inside an async callback, which is what the checker flagged.
+    const list: HTMLElement = listEl;
+    const notice: HTMLElement = noticeEl;
+
+    const slugInput = document.getElementById('tax-slug') as HTMLInputElement;
+    const labelInput = document.getElementById('tax-label') as HTMLInputElement;
+    const appliesInput = document.getElementById('tax-applies') as HTMLInputElement;
+    const publicInput = document.getElementById('tax-public') as HTMLInputElement;
+    const addBtn = document.getElementById('tax-add') as HTMLButtonElement;
+
+    let defs: any[] = [];
+    const csrf = () => decodeURIComponent((document.cookie.match(/(?:^|; )astrobaas_csrf=([^;]*)/) ?? [])[1] ?? '');
+
+    function say(message: string, ok: boolean) {
+      notice.textContent = message;
+      notice.className = ok
+        ? 'mb-4 px-3 py-2 rounded-md border text-sm border-green-200 bg-green-50 text-green-800'
+        : 'mb-4 px-3 py-2 rounded-md border text-sm border-red-200 bg-red-50 text-red-800';
+    }
+
+    function render() {
+      list.replaceChildren();
+      if (!defs.length) {
+        const empty = document.createElement('p');
+        empty.className = 'text-sm text-gray-400';
+        empty.textContent = 'None yet.';
+        list.append(empty);
+        return;
+      }
+      for (const def of defs) {
+        const row = document.createElement('div');
+        row.className = 'flex items-center justify-between gap-4 border border-gray-100 rounded-lg px-3 py-2';
+        const left = document.createElement('div');
+        const name = document.createElement('p');
+        name.className = 'text-sm font-medium text-gray-900';
+        // textContent: a label is operator-authored text.
+        name.textContent = `${def.label} (${def.slug})`;
+        const meta = document.createElement('p');
+        meta.className = 'text-xs text-gray-500';
+        meta.textContent = `${(def.appliesTo ?? []).join(', ')}${def.publicArchive ? ' · public page' : ''}`;
+        left.append(name, meta);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'text-sm text-red-600 hover:text-red-800';
+        remove.textContent = 'Remove';
+        remove.addEventListener('click', async () => {
+          if (!confirm(`Remove "${def.label}"? Records keep their terms — they simply stop being read.`)) return;
+          await save(defs.filter((d) => d.slug !== def.slug));
+        });
+        row.append(left, remove);
+        list.append(row);
+      }
+    }
+
+    async function save(next: any[]) {
+      const res = await fetch('/api/taxonomies', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf() },
+        body: JSON.stringify({ taxonomies: next }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        // The server's message names the taxonomy and the rule.
+        say(json?.message || json?.error?.message || 'That could not be saved.', false);
+        return false;
+      }
+      defs = json?.data?.taxonomies ?? next;
+      render();
+      say('Saved.', true);
+      return true;
+    }
+
+    addBtn?.addEventListener('click', async () => {
+      const next = defs.concat([{
+        slug: slugInput.value.trim(),
+        label: labelInput.value.trim(),
+        appliesTo: appliesInput.value.split(',').map((s) => s.trim()).filter(Boolean),
+        publicArchive: publicInput.checked,
+      }]);
+      if (await save(next)) {
+        slugInput.value = '';
+        labelInput.value = '';
+        appliesInput.value = '';
+        publicInput.checked = false;
+      }
+    });
+
+    (async () => {
+      const res = await fetch('/api/taxonomies');
+      if (!res.ok) return;
+      const json = await res.json().catch(() => null);
+      defs = json?.data?.taxonomies ?? [];
+      render();
+    })();
+  })();
+</script>

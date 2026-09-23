@@ -1,0 +1,16 @@
+[
+  {
+    "title": "About",
+    "slug": "about",
+    "content": "<p>A demo optical shop used to exercise the importer.</p>",
+    "excerpt": "About this demo shop.",
+    "created_at": "2024-01-01T09:00:00Z"
+  },
+  {
+    "title": "Contact",
+    "slug": "contact",
+    "content": "<p>Email: shop@example.com — Phone: +30 000 0000000</p>",
+    "excerpt": "How to reach the demo shop.",
+    "created_at": "2024-01-01T09:00:00Z"
+  }
+]

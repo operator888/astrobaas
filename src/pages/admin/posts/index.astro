@@ -1,0 +1,565 @@
+---
+import AdminLayout from '../../../layouts/AdminLayout.astro';
+import { visibleContent } from '../../../lib/visibility';
+import { LocalDB } from '../../../lib/localdb';
+import { pluginManager } from '../../../lib/plugin-system';
+import { locales, isMultilingual, isKnownLocale, filterByLocale, recordLocale } from '../../../lib/i18n';
+import { articlesOnly, pagesOnly, isPage } from '../../../lib/post-kind';
+import { resolveByline } from '../../../lib/byline';
+import { getSiteSettings } from '../../../lib/site';
+
+await LocalDB.init();
+// Filtered through the same helper as the API: the list used to show every
+// author's unpublished titles, slugs and statuses, and its search read
+// unpublished BODIES.
+const allPosts = visibleContent(await LocalDB.getPosts(), Astro.locals.user);
+const allCategories = await LocalDB.getCategories();
+const allUsers = await LocalDB.getUsers();
+// No `locale` here on purpose (C-136): a byline in the ADMIN should read the
+// same for every member of staff whatever UI language they picked, or two
+// colleagues looking at the same list would describe the same post differently.
+const siteForByline = await getSiteSettings({ astroSite: Astro.site, requestUrl: Astro.url });
+const adminBylineCtx = {
+  siteAuthorName: siteForByline.siteAuthorName,
+  siteAuthorUrl: siteForByline.siteAuthorUrl,
+  siteTitle: siteForByline.siteTitle,
+};
+
+const sp = Astro.url.searchParams;
+const q = (sp.get('q') ?? '').trim().toLowerCase();
+const statusFilter = sp.get('status') ?? '';
+// Only the two known values narrow the list; anything else shows everything,
+// so a hand-edited URL cannot produce an empty screen with no explanation.
+const kindFilterRaw = sp.get('kind') ?? '';
+const kindFilter = kindFilterRaw === 'page' || kindFilterRaw === 'post' ? kindFilterRaw : '';
+const categoryFilter = sp.get('category') ?? '';
+const localeFilter = isKnownLocale(sp.get('locale')) ? String(sp.get('locale')) : '';
+const siteLocales = locales();
+const siteIsMultilingual = isMultilingual();
+const pageSize = 10;
+const page = Math.max(1, parseInt(sp.get('page') || '1', 10) || 1);
+
+let filtered = allPosts.slice().sort(
+  (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+);
+if (statusFilter) filtered = filtered.filter(p => p.status === statusFilter);
+// Posts and pages share one list because they are one record type. Without a
+// filter, an owner with fifty articles has no way to find the three pages they
+// wrote — so the list can be narrowed to either.
+if (kindFilter === 'page') filtered = pagesOnly(filtered);
+else if (kindFilter === 'post') filtered = articlesOnly(filtered);
+if (categoryFilter) filtered = filtered.filter(p => p.category_id === categoryFilter);
+// ?locale= narrows the list on multilingual sites. Posts predating i18n have no
+// locale and count as the default, so nothing disappears after upgrading.
+if (localeFilter) filtered = filterByLocale(filtered, localeFilter);
+if (q) {
+  filtered = filtered.filter(p => {
+    const hay = `${p.title} ${p.slug} ${(p.content || '').replace(/<[^>]+>/g, ' ')}`.toLowerCase();
+    return hay.includes(q);
+  });
+}
+
+const totalCount = filtered.length;
+const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+const safePage = Math.min(page, totalPages);
+const pageStart = (safePage - 1) * pageSize;
+const pagePosts = filtered.slice(pageStart, pageStart + pageSize);
+
+const posts = pagePosts.map(post => {
+  const author = allUsers.find(user => user.id === post.author_id);
+  const category = allCategories.find(cat => cat.id === post.category_id);
+  return {
+    ...post,
+    // Same cascade the public byline uses, so the admin never shows a name the
+    // site does not show.
+    author: resolveByline(post, allUsers, adminBylineCtx).name,
+    category: category?.name || 'Uncategorized',
+    date: new Date(post.created_at).toISOString().split('T')[0],
+    locale: recordLocale(post),
+    title: pluginManager.applyFilters('post_title', post.title, post),
+  };
+});
+
+function pageHref(p: number) {
+  const usp = new URLSearchParams(sp);
+  usp.set('page', String(p));
+  return `?${usp.toString()}`;
+}
+---
+
+<AdminLayout title="Posts">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-8">
+      <div>
+        <h1 class="text-3xl font-bold text-gray-900">Posts</h1>
+        <p class="text-gray-600 mt-2">Manage your blog posts and articles</p>
+      </div>
+      <a href="/admin/posts/new" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors duration-200 flex items-center">
+        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>
+        </svg>
+        New Post
+      </a>
+    </div>
+
+    <!-- Filters and Search -->
+    <form method="GET" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between space-y-4 md:space-y-0">
+        <div class="relative flex-1 max-w-md">
+          <input
+            type="text"
+            name="q"
+            value={q}
+            placeholder="Search title, slug, or content…"
+            class="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <svg class="w-5 h-5 text-gray-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+        </div>
+
+        <div class="flex items-center space-x-2">
+          <select name="status" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+            <option value="" selected={!statusFilter}>All Status</option>
+            <option value="published" selected={statusFilter === 'published'}>Published</option>
+            <option value="draft" selected={statusFilter === 'draft'}>Draft</option>
+            <option value="scheduled" selected={statusFilter === 'scheduled'}>Scheduled</option>
+            <option value="trashed" selected={statusFilter === 'trashed'}>Trashed</option>
+          </select>
+
+          <select name="kind" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+            <option value="" selected={!kindFilter}>All types</option>
+            <option value="post" selected={kindFilter === 'post'}>Posts</option>
+            <option value="page" selected={kindFilter === 'page'}>Pages</option>
+          </select>
+
+          {siteIsMultilingual && (
+            <select name="locale" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+              <option value="" selected={!localeFilter}>All languages</option>
+              {siteLocales.map((l) => (
+                <option value={l} selected={localeFilter === l}>{l}</option>
+              ))}
+            </select>
+          )}
+
+          <select name="category" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+            <option value="" selected={!categoryFilter}>All Categories</option>
+            {allCategories.map((c) => (
+              <option value={c.id} selected={categoryFilter === c.id}>{c.name}</option>
+            ))}
+          </select>
+
+          <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+            Apply
+          </button>
+          {(q || statusFilter || kindFilter || categoryFilter || localeFilter) && (
+            <a href="/admin/posts" class="px-3 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50">
+              Reset
+            </a>
+          )}
+        </div>
+      </div>
+    </form>
+
+    <!-- Posts Table -->
+    <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-gray-200">
+          <thead class="bg-gray-50">
+            <tr>
+              <th class="px-6 py-3 text-left">
+                <input type="checkbox" id="select-all" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+              </th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Post</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Author</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Category</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+              {siteIsMultilingual && <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lang</th>}
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Views</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="posts-tbody" class="bg-white divide-y divide-gray-200">
+            {posts.map((post) => (
+              <tr class="hover:bg-gray-50 post-row" data-post-id={post.id}>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <input type="checkbox" class="post-checkbox rounded border-gray-300 text-blue-600 focus:ring-blue-500" value={post.id} />
+                </td>
+                <td class="px-6 py-4">
+                  <div class="flex items-center">
+                    {post.featured_image ? (
+                      <img class="h-12 w-12 rounded object-cover mr-4" src={post.featured_image} alt={post.title} />
+                    ) : (
+                      <div class="h-12 w-12 rounded bg-gray-100 mr-4 flex items-center justify-center text-gray-400 text-xs">—</div>
+                    )}
+                    <div>
+                      <div class="text-sm font-medium text-gray-900">
+                        {post.title}
+                        {isPage(post) && (
+                          <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-purple-100 text-purple-800">Page</span>
+                        )}
+                      </div>
+                      {/* The path a visitor actually uses. This showed /{slug}
+                          for everything, which named a URL that 404s for every
+                          blog post on the site. */}
+                      <div class="text-sm text-gray-500">{isPage(post) ? `/${post.slug}` : `/blog/${post.slug}`}</div>
+                    </div>
+                  </div>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{post.author}</td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                    {post.category}
+                  </span>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <span class={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                    post.status === 'published' ? 'bg-green-100 text-green-800' :
+                    post.status === 'draft' ? 'bg-yellow-100 text-yellow-800' :
+                    post.status === 'scheduled' ? 'bg-blue-100 text-blue-800' :
+                    'bg-gray-100 text-gray-800'
+                  }`}>
+                    {post.status.charAt(0).toUpperCase() + post.status.slice(1)}
+                  </span>
+                </td>
+                {siteIsMultilingual && (
+                  <td class="px-6 py-4 whitespace-nowrap">
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-slate-100 text-slate-700">
+                      {post.locale}
+                    </span>
+                  </td>
+                )}
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{post.date}</td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{post.views.toLocaleString()}</td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                  <div class="flex items-center space-x-2">
+                    <a href={`/admin/posts/${post.id}/edit`} class="text-blue-600 hover:text-blue-900">Edit</a>
+                    <a href={isPage(post) ? `/${post.slug}` : `/blog/${post.slug}`} target="_blank" class="text-green-600 hover:text-green-900">View</a>
+                    <button class="text-gray-600 hover:text-gray-900 duplicate-post" data-post-id={post.id}>Duplicate</button>
+                    <button class="text-red-600 hover:text-red-900 delete-post" data-post-id={post.id}>Delete</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Pagination -->
+      <div class="bg-white px-4 py-3 border-t border-gray-200 sm:px-6">
+        <div class="flex items-center justify-between">
+          <p class="text-sm text-gray-700">
+            {totalCount === 0
+              ? 'No posts match your filters.'
+              : (
+                <>
+                  Showing
+                  <span class="font-medium"> {pageStart + 1} </span>–
+                  <span class="font-medium"> {Math.min(pageStart + pageSize, totalCount)} </span>
+                  of <span class="font-medium">{totalCount}</span>
+                </>
+              )}
+          </p>
+          {totalPages > 1 && (
+            <nav class="inline-flex space-x-1">
+              {safePage > 1 && (
+                <a href={pageHref(safePage - 1)} class="px-3 py-1.5 border border-gray-300 text-sm rounded-md text-gray-700 bg-white hover:bg-gray-50">
+                  Previous
+                </a>
+              )}
+              <span class="px-3 py-1.5 text-sm text-gray-500">Page {safePage} / {totalPages}</span>
+              {safePage < totalPages && (
+                <a href={pageHref(safePage + 1)} class="px-3 py-1.5 border border-gray-300 text-sm rounded-md text-gray-700 bg-white hover:bg-gray-50">
+                  Next
+                </a>
+              )}
+            </nav>
+          )}
+        </div>
+      </div>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../../lib/apiClient';
+  class PostsManager {
+    constructor() {
+      this.selectedPosts = new Set();
+      this.init();
+    }
+    
+    init() {
+      // Search functionality
+      const searchInput = document.getElementById('search-posts');
+      if (searchInput) {
+        searchInput.addEventListener('input', this.handleSearch.bind(this));
+      }
+      
+      // Filter functionality
+      const statusFilter = document.getElementById('status-filter');
+      const categoryFilter = document.getElementById('category-filter');
+      
+      if (statusFilter) {
+        statusFilter.addEventListener('change', this.handleFilter.bind(this));
+      }
+      
+      if (categoryFilter) {
+        categoryFilter.addEventListener('change', this.handleFilter.bind(this));
+      }
+      
+      // Select all functionality
+      const selectAllCheckbox = document.getElementById('select-all');
+      if (selectAllCheckbox) {
+        selectAllCheckbox.addEventListener('change', this.handleSelectAll.bind(this));
+      }
+      
+      // Individual checkboxes
+      const postCheckboxes = document.querySelectorAll('.post-checkbox');
+      postCheckboxes.forEach(checkbox => {
+        checkbox.addEventListener('change', this.handlePostSelect.bind(this));
+      });
+      
+      // Duplicate buttons
+      document.querySelectorAll('.duplicate-post').forEach(button => {
+        button.addEventListener('click', this.handleDuplicate.bind(this));
+      });
+
+      // Delete buttons
+      const deleteButtons = document.querySelectorAll('.delete-post');
+      deleteButtons.forEach(button => {
+        button.addEventListener('click', this.handleDelete.bind(this));
+      });
+      
+      // Bulk actions
+      const bulkActionsBtn = document.getElementById('bulk-actions-btn');
+      if (bulkActionsBtn) {
+        bulkActionsBtn.addEventListener('click', this.handleBulkActions.bind(this));
+      }
+    }
+    
+    handleSearch(e) {
+      const query = e.target.value.toLowerCase();
+      const rows = document.querySelectorAll('.post-row');
+      
+      rows.forEach(row => {
+        const title = row.querySelector('.text-gray-900').textContent.toLowerCase();
+        const slug = row.querySelector('.text-gray-500').textContent.toLowerCase();
+        
+        if (title.includes(query) || slug.includes(query)) {
+          row.style.display = '';
+        } else {
+          row.style.display = 'none';
+        }
+      });
+    }
+    
+    handleFilter() {
+      const statusFilter = document.getElementById('status-filter').value.toLowerCase();
+      const categoryFilter = document.getElementById('category-filter').value.toLowerCase();
+      const rows = document.querySelectorAll('.post-row');
+      
+      rows.forEach(row => {
+        const status = row.querySelector('.inline-flex').textContent.toLowerCase().trim();
+        const category = row.querySelector('.bg-gray-100').textContent.toLowerCase().trim();
+        
+        const statusMatch = !statusFilter || status === statusFilter;
+        const categoryMatch = !categoryFilter || category === categoryFilter;
+        
+        if (statusMatch && categoryMatch) {
+          row.style.display = '';
+        } else {
+          row.style.display = 'none';
+        }
+      });
+    }
+    
+    handleSelectAll(e) {
+      const checkboxes = document.querySelectorAll('.post-checkbox');
+      const isChecked = e.target.checked;
+      
+      checkboxes.forEach(checkbox => {
+        checkbox.checked = isChecked;
+        const postId = checkbox.value;
+        
+        if (isChecked) {
+          this.selectedPosts.add(postId);
+        } else {
+          this.selectedPosts.delete(postId);
+        }
+      });
+      
+      this.updateBulkActionsButton();
+    }
+    
+    handlePostSelect(e) {
+      const postId = e.target.value;
+      
+      if (e.target.checked) {
+        this.selectedPosts.add(postId);
+      } else {
+        this.selectedPosts.delete(postId);
+      }
+      
+      // Update select all checkbox
+      const selectAllCheckbox = document.getElementById('select-all');
+      const allCheckboxes = document.querySelectorAll('.post-checkbox');
+      const checkedCheckboxes = document.querySelectorAll('.post-checkbox:checked');
+      
+      if (selectAllCheckbox) {
+        selectAllCheckbox.checked = checkedCheckboxes.length === allCheckboxes.length;
+        selectAllCheckbox.indeterminate = checkedCheckboxes.length > 0 && checkedCheckboxes.length < allCheckboxes.length;
+      }
+      
+      this.updateBulkActionsButton();
+    }
+    
+    updateBulkActionsButton() {
+      const bulkActionsBtn = document.getElementById('bulk-actions-btn');
+      if (bulkActionsBtn) {
+        bulkActionsBtn.disabled = this.selectedPosts.size === 0;
+        bulkActionsBtn.textContent = this.selectedPosts.size > 0 
+          ? `Bulk Actions (${this.selectedPosts.size})` 
+          : 'Bulk Actions';
+      }
+    }
+    
+    async handleDuplicate(e) {
+      const button = e.target;
+      const postId = button.dataset.postId;
+      // The copy's TITLE is built server-side from the stored value — reading
+      // it from this row would capture whatever the post_title plugin filter
+      // rendered, and save a derived view as the source.
+      button.disabled = true;
+      const res = await api.post(`/api/posts/${encodeURIComponent(postId)}/duplicate`);
+      if (!res.ok) {
+        button.disabled = false;
+        this.showNotification(`Could not duplicate: ${res.error}`, 'error');
+        return;
+      }
+      // Land the author in the copy rather than in a list where it is one more
+      // row: duplicating is always the first step of editing.
+      window.location.href = `/admin/posts/${res.data.id}/edit`;
+    }
+
+    async handleDelete(e) {
+      const postId = e.target.dataset.postId;
+      const row = e.target.closest('.post-row');
+      const title = row.querySelector('.text-gray-900').textContent;
+      
+      if (confirm(`Are you sure you want to delete "${title}"?`)) {
+        const res = await api.delete('/api/posts/delete', { id: postId });
+        if (!res.ok) {
+          this.showNotification(`Failed to delete post: ${res.error}`, 'error');
+          return;
+        }
+        row.remove();
+        this.showNotification(`Post "${title}" deleted successfully!`, 'success');
+      }
+    }
+    
+    async handleBulkActions() {
+      if (this.selectedPosts.size === 0) return;
+      
+      // Show bulk actions menu
+      // The value and the label are separate. They used to be the same English
+      // string: the prompt showed 'Publish' and then validated the typed answer
+      // with actions.includes(answer), so translating the label would have made
+      // every bulk action reject its own instructions.
+      const actions = [
+        { value: 'delete', label: t('admin.posts.bulk.delete') },
+        { value: 'publish', label: t('admin.posts.bulk.publish') },
+        { value: 'draft', label: t('admin.posts.bulk.draft') },
+        { value: 'trash', label: t('admin.posts.bulk.trash') },
+      ];
+      const answer = prompt(
+        t('admin.posts.bulk.prompt', { count: this.selectedPosts.size })
+        + '\n' + actions.map((a) => a.label).join(', '),
+      );
+      const typed = String(answer ?? '').trim().toLowerCase();
+      const chosen = actions.find(
+        (a) => a.value === typed || a.label.toLowerCase() === typed,
+      );
+      const action = chosen?.value;
+
+      if (!action) return;
+
+      /*
+       * Real calls, real counts, and only then a toast.
+       *
+       * This block used to console.log the action, show "applied to N posts!",
+       * clear the checkboxes and do NOTHING — an operator who "published"
+       * twelve drafts saw success and the drafts stayed drafts. A success
+       * message that reports intent instead of outcome is worse than an error,
+       * because nobody investigates it.
+       *
+       * Sequential on purpose, same as uploads: a burst of parallel writes from
+       * one click is exactly the shape the rate limiter exists to stop.
+       */
+      const ids = Array.from(this.selectedPosts);
+      if (action === 'delete' && !confirm(t('admin.posts.bulk.confirmDelete', { count: ids.length }))) {
+        return;
+      }
+
+      const btn = document.getElementById('bulk-actions-btn');
+      if (btn) btn.disabled = true;
+      let done = 0;
+      const failures = [];
+      for (const id of ids) {
+        const res = action === 'delete'
+          ? await api.delete('/api/posts/delete', { id })
+          : await api.put('/api/posts/update', {
+              id,
+              status: action === 'publish' ? 'published' : action === 'trash' ? 'trashed' : 'draft',
+            });
+        if (res.ok) done += 1;
+        else failures.push(res.error || 'unknown error');
+      }
+
+      if (failures.length === 0) {
+        this.showNotification(t('admin.posts.bulk.done', { count: done }), 'success');
+      } else {
+        // Partial truth beats a clean lie: say how many worked AND how many
+        // did not, with the first real reason.
+        this.showNotification(
+          t('admin.posts.bulk.partial', { done, failed: failures.length }) + ` — ${failures[0]}`,
+          'error',
+        );
+      }
+
+      // Reload rather than hand-editing rows: status chips, filters and counts
+      // all live server-side, and a stale row lies about what just happened.
+      setTimeout(() => window.location.reload(), 900);
+    }
+
+    showNotification(message, type = 'info') {
+      const notification = document.createElement('div');
+      notification.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 ${
+        type === 'success' ? 'bg-green-500 text-white' : 
+        type === 'error' ? 'bg-red-500 text-white' : 
+        'bg-blue-500 text-white'
+      }`;
+      notification.textContent = message;
+      
+      document.body.appendChild(notification);
+      
+      setTimeout(() => {
+        notification.remove();
+      }, 3000);
+    }
+  }
+  
+  // Initialize posts manager
+  document.addEventListener('DOMContentLoaded', () => {
+    new PostsManager();
+    
+    // Set page title in header
+    const pageTitle = document.getElementById('page-title');
+    if (pageTitle) {
+      pageTitle.textContent = 'Posts';
+    }
+  });
+</script>

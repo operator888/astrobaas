@@ -1,0 +1,211 @@
+---
+/**
+ * Comments under an article (C-142).
+ *
+ * ## What this renders, and what it does not
+ *
+ * The APPROVED comments on one post, and a form to add one. Nothing here
+ * decides anything: the collection is a moderated content type, the server
+ * stamps a public submission `pending`, and the list endpoint returns only
+ * approved rows to an anonymous reader. So this component cannot leak a
+ * pending comment even if it asked for one.
+ *
+ * ## Why it fetches rather than being handed the rows
+ *
+ * The article page is cached by the theme layer and a comment arriving does not
+ * invalidate it. Fetching on the client means a new comment appears on the next
+ * load rather than the next deploy — and it keeps this component usable from a
+ * headless storefront, which reads the same endpoint.
+ */
+import type { Post } from '../../core/models';
+
+interface Props {
+  post: Pick<Post, 'id'>;
+  /** Heading above the list. */
+  title?: string;
+}
+const { post, title = 'Comments' } = Astro.props;
+---
+
+<section
+  class="ab-comments no-print max-w-3xl mx-auto px-4 pb-16"
+  data-post-id={post.id}
+  aria-labelledby="ab-comments-heading"
+>
+  <h2 id="ab-comments-heading" class="text-xl font-semibold ab-ink mb-4">{title}</h2>
+
+  <p class="ab-comments-empty text-sm ab-muted" hidden>Nobody has commented yet.</p>
+  <ol class="ab-comments-list space-y-5 list-none p-0 m-0"></ol>
+
+  <form class="ab-comment-form mt-8 space-y-4" data-captcha="forms">
+    {/*
+      The honeypot, same field name as every other public form on this site so a
+      theme author who has seen one has seen them all.
+    */}
+    <div class="ab-hidden" aria-hidden="true">
+      <label>Leave this empty
+        <input type="text" name="hp_url" tabindex="-1" autocomplete="off" />
+      </label>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm font-medium ab-ink mb-1" for="ab-c-name">Your name</label>
+        <input id="ab-c-name" name="author_name" type="text" required maxlength="80"
+          class="ab-field w-full px-3 py-2 rounded-lg" />
+      </div>
+      <div>
+        <label class="block text-sm font-medium ab-ink mb-1" for="ab-c-email">
+          Email <span class="ab-muted font-normal">(optional, never shown)</span>
+        </label>
+        <input id="ab-c-email" name="author_email" type="email" maxlength="200"
+          class="ab-field w-full px-3 py-2 rounded-lg" />
+      </div>
+    </div>
+    <div>
+      <label class="block text-sm font-medium ab-ink mb-1" for="ab-c-body">Comment</label>
+      <textarea id="ab-c-body" name="body" rows="4" required minlength="2" maxlength="4000"
+        class="ab-field w-full px-3 py-2 rounded-lg"></textarea>
+    </div>
+    <div class="flex items-center gap-3">
+      <button type="submit" class="ab-button px-5 py-2.5 rounded-lg font-medium">Post comment</button>
+      <span class="ab-comment-status text-sm ab-muted" role="status" aria-live="polite"></span>
+    </div>
+    <p class="ab-comment-error text-sm m-0" role="alert"></p>
+    <p class="text-xs ab-muted m-0">
+      Comments are read by a person before they appear.
+    </p>
+  </form>
+</section>
+
+<style>
+  /* Scoped, so it is hashed into the CSP rather than dropped as a style
+     attribute would be. See THEME_DEVELOPMENT.md. */
+  .ab-hidden { display: none; }
+  .ab-field {
+    border: 1px solid var(--ab-border, #d1d5db);
+    background: var(--ab-surface, #fff);
+    color: var(--ab-ink, #111827);
+  }
+  .ab-field:focus-visible { outline: 2px solid var(--ab-accent, #2563eb); outline-offset: 1px; }
+  .ab-button { background: var(--ab-accent, #2563eb); color: var(--ab-on-accent, #fff); }
+  .ab-button[disabled] { opacity: .55; }
+  .ab-comment-error:not(:empty) { color: var(--ab-danger, #b91c1c); }
+  .ab-comment-item { border-top: 1px solid var(--ab-border, #e5e7eb); padding-top: 1rem; }
+  .ab-comment-item:first-child { border-top: 0; padding-top: 0; }
+  .ab-comment-who { font-weight: 600; }
+  .ab-comment-when { color: var(--ab-muted, #6b7280); font-size: .85em; }
+  .ab-comment-body { white-space: pre-wrap; margin: .35rem 0 0; }
+</style>
+
+<script>
+  (() => {
+    for (const node of document.querySelectorAll('.ab-comments[data-post-id]')) {
+      const root = node as HTMLElement;
+      const postId = root.dataset.postId!;
+      const list = root.querySelector('.ab-comments-list') as HTMLElement;
+      const empty = root.querySelector('.ab-comments-empty') as HTMLElement;
+      const form = root.querySelector('.ab-comment-form') as HTMLFormElement;
+      const status = root.querySelector('.ab-comment-status') as HTMLElement;
+      const error = root.querySelector('.ab-comment-error') as HTMLElement;
+      const button = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+
+      const csrf = () =>
+        document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+        || (document.cookie.match(/(?:^|;\s*)astrobaas_csrf=([^;]*)/)?.[1] ?? '');
+
+      // textContent throughout, never innerHTML: a comment body is a stranger's
+      // text and the one place it is rendered must not be able to introduce
+      // markup. The sanitizer never sees this — it is not stored as HTML.
+      const render = (rows: any[]) => {
+        list.replaceChildren();
+        empty.hidden = rows.length > 0;
+        for (const row of rows) {
+          const li = document.createElement('li');
+          li.className = 'ab-comment-item';
+          const head = document.createElement('p');
+          head.className = 'm-0';
+          const who = document.createElement('span');
+          who.className = 'ab-comment-who';
+          who.textContent = String(row.data?.author_name ?? 'Someone');
+          const when = document.createElement('span');
+          when.className = 'ab-comment-when';
+          const at = row.created_at ? new Date(row.created_at) : null;
+          when.textContent = at && !Number.isNaN(at.valueOf())
+            ? ` · ${at.toLocaleDateString()}`
+            : '';
+          head.append(who, when);
+          const body = document.createElement('p');
+          body.className = 'ab-comment-body';
+          body.textContent = String(row.data?.body ?? '');
+          li.append(head, body);
+          list.appendChild(li);
+        }
+      };
+
+      const load = async () => {
+        try {
+          const res = await fetch(
+            `/api/content/comment?where.post_id=${encodeURIComponent(postId)}&limit=100`,
+            { headers: { Accept: 'application/json' } },
+          );
+          if (!res.ok) {
+            // Comments switched off, or the collection is not registered. Say
+            // nothing rather than showing a broken section.
+            root.hidden = true;
+            return;
+          }
+          const json = await res.json().catch(() => null);
+          render(json?.data ?? []);
+        } catch {
+          root.hidden = true;
+        }
+      };
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        error.textContent = '';
+        status.textContent = 'Sending…';
+        button.disabled = true;
+        const fd = new FormData(form);
+        const payload: Record<string, unknown> = { post_id: postId };
+        for (const [k, v] of fd.entries()) {
+          if (v instanceof File) continue;
+          if (typeof v === 'string' && v.trim() === '' && k !== 'hp_url') continue;
+          payload[k] = v;
+        }
+        try {
+          const res = await fetch('/api/content/comment', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              'X-CSRF-Token': decodeURIComponent(csrf()),
+            },
+            body: JSON.stringify(payload),
+          });
+          const json = await res.json().catch(() => null);
+          if (!res.ok) {
+            const details = json?.error?.details;
+            error.textContent = details && typeof details === 'object'
+              ? Object.values(details).join(' ')
+              : (json?.error?.message || 'That did not go through.');
+            status.textContent = '';
+            return;
+          }
+          form.reset();
+          // Deliberately NOT prepended to the list: it is pending, and showing
+          // it would tell the author it is live when nobody else can see it.
+          status.textContent = 'Thank you — your comment will appear once it has been read.';
+        } catch {
+          error.textContent = 'Could not reach the server. Please try again.';
+          status.textContent = '';
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      load();
+    }
+  })();
+</script>

@@ -1,0 +1,21 @@
+---
+/**
+ * The default CMS-Page view — the built-in implementation of the `PageArticle`
+ * theme slot.
+ *
+ * Extracted verbatim from `[...slug].astro` so that page could route through
+ * the slot resolver: the markup a site showed yesterday is exactly what it
+ * shows today unless a theme overrides it. A Page deliberately renders with no
+ * byline, date or category — that is what distinguishes it from a post, and
+ * why it is a separate slot rather than PostArticle with fields hidden.
+ */
+import type { PageArticleProps } from '../../core/theme-slots';
+
+interface Props extends PageArticleProps {}
+const { post, contentHtml } = Astro.props;
+---
+
+<article class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+  <h1 class="text-4xl font-bold mb-6">{post.title}</h1>
+  <div class="prose" set:html={contentHtml} />
+</article>

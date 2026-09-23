@@ -1,0 +1,83 @@
+version: 2
+
+# Why this exists
+#
+# `npm audit` reported 2 high and 2 low advisories, all four traced to one
+# out-of-date framework dependency. Nobody was watching; they were found by
+# running the audit during a review. For a self-hostable CMS that handles
+# sessions, uploads and payment webhooks, "someone remembers to check" is not a
+# patching strategy.
+#
+# Grouped deliberately: an ecosystem like Astro must move as a unit (the adapter
+# peer-depends on an exact major), and twelve separate PRs for one framework
+# bump is how dependency automation gets muted.
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Europe/Athens
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: deps
+      prefix-development: deps(dev)
+    ignore:
+      # TypeScript 7 removed the programmatic compiler API that `astro check`
+      # depends on, and @astrojs/check peer-conflicts with it outright — `npm ci`
+      # fails with ERESOLVE before anything is built.
+      #
+      # This is not caution: it was merged, and it took `npm run build` (which is
+      # `astro check && astro build`) down on main for four consecutive CI runs.
+      # A green-looking dependency PR that removes type checking entirely is
+      # exactly the shape worth blocking automatically.
+      #
+      # Lift this when Astro's tooling supports the native compiler:
+      # https://github.com/withastro/roadmap/discussions/1321
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+    groups:
+      # astro + its adapters + @astrojs/check move together or not at all —
+      # @astrojs/node peer-depends on an exact astro major, so a solo bump of
+      # either is unmergeable.
+      astro:
+        patterns:
+          - astro
+          - '@astrojs/*'
+      # Tailwind v4 ships as a Vite plugin, so the plugin and the framework are
+      # one upgrade.
+      tailwind:
+        patterns:
+          - tailwindcss
+          - '@tailwindcss/*'
+      react:
+        patterns:
+          - react
+          - react-dom
+          - '@types/react'
+          - '@types/react-dom'
+          - '@react-three/*'
+          - three
+          - '@types/three'
+      # Everything else, batched by risk rather than by name: patch and minor
+      # updates are reviewed together, majors always arrive alone.
+      minor-and-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Europe/Athens
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ['*']

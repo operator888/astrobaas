@@ -1,0 +1,207 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { ROLES } from '../../core/models';
+
+const t = Astro.locals.t;
+
+/**
+ * Role LABELS, keyed by the role VALUE.
+ *
+ * The value is what the <option> submits and what the API stores, so it stays
+ * the untranslated `ROLES` entry; only the text shown to a human is looked up.
+ * A role added to `ROLES` without a catalogue entry falls back to its own name
+ * rather than rendering a raw message key.
+ */
+const ROLE_LABEL_KEYS: Record<string, string> = {
+  admin: 'admin.apikeys.roleAdmin',
+  editor: 'admin.apikeys.roleEditor',
+  author: 'admin.apikeys.roleAuthor',
+  manager: 'admin.apikeys.roleManager',
+  viewer: 'admin.apikeys.roleViewer',
+};
+function roleLabel(role: string): string {
+  const key = ROLE_LABEL_KEYS[role];
+  return key ? t(key) : role;
+}
+---
+
+<AdminLayout title={t('admin.apikeys.title')}>
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="flex items-center justify-between mb-2">
+      <h1 class="text-2xl font-semibold text-gray-900">{t('admin.apikeys.title')}</h1>
+    </div>
+    <p class="text-sm text-gray-500 mb-6">{t('admin.apikeys.intro')}</p>
+
+    <!-- Secret reveal (shown once after mint/rotate) -->
+    <div id="secret-box" class="hidden mb-6 p-4 rounded-lg bg-amber-50 border border-amber-200">
+      <p class="text-sm font-medium text-amber-800 mb-2">{t('admin.apikeys.secretWarning')}</p>
+      <div class="flex items-center gap-2">
+        <code id="secret-value" class="flex-1 px-3 py-2 bg-white border border-amber-200 rounded text-sm break-all"></code>
+        <button id="secret-copy" type="button" class="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm rounded">{t('admin.apikeys.copySecret')}</button>
+      </div>
+    </div>
+
+    <!-- Mint form -->
+    <form id="mint-form" class="bg-white border border-gray-200 rounded-xl p-6 mb-8 grid gap-4 sm:grid-cols-2">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="k-name">{t('admin.apikeys.nameLabel')}</label>
+        <input id="k-name" name="name" required maxlength="100" placeholder={t('admin.apikeys.namePlaceholder')}
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" />
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="k-role">{t('admin.apikeys.roleLabel')}</label>
+        <select id="k-role" name="role" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+          {/* From ROLES, so a key can be minted for any role the app defines.
+              `value` stays the role itself — only its label is translated. */}
+          {ROLES.map((r) => <option value={r} selected={r === 'editor'}>{roleLabel(r)}</option>)}
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="k-scopes">{t('admin.apikeys.scopesLabel')}</label>
+        <input id="k-scopes" name="scopes" placeholder="posts:write, content:read"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" />
+        <p class="text-xs text-gray-400 mt-1">{t('admin.apikeys.scopesHelp')}</p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="k-expiry">{t('admin.apikeys.expiresLabel')}</label>
+        <input id="k-expiry" name="expires_in_days" type="number" min="1" max="3650"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" />
+      </div>
+      <div class="sm:col-span-2">
+        <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">{t('admin.apikeys.createButton')}</button>
+        <span id="mint-error" class="ml-3 text-sm text-red-600"></span>
+      </div>
+    </form>
+
+    <div class="bg-white border border-gray-200 rounded-xl overflow-hidden">
+      <table class="min-w-full text-sm">
+        <thead class="bg-gray-50 text-gray-500">
+          <tr>
+            <th class="px-4 py-3 text-left font-medium">{t('admin.apikeys.colName')}</th>
+            <th class="px-4 py-3 text-left font-medium">{t('admin.apikeys.colPrefix')}</th>
+            <th class="px-4 py-3 text-left font-medium">{t('admin.apikeys.colRole')}</th>
+            <th class="px-4 py-3 text-left font-medium">{t('admin.apikeys.colScopes')}</th>
+            <th class="px-4 py-3 text-left font-medium">{t('admin.apikeys.colExpires')}</th>
+            <th class="px-4 py-3 text-left font-medium">{t('admin.apikeys.colLastUsed')}</th>
+            <th class="px-4 py-3 text-right font-medium">{t('admin.apikeys.colActions')}</th>
+          </tr>
+        </thead>
+        <tbody id="keys-body" class="divide-y divide-gray-100">
+          <tr><td colspan="7" class="px-4 py-6 text-center text-gray-400">{t('admin.apikeys.loading')}</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    // @ts-nocheck — vanilla browser glue (DOM + fetch); not part of the typed API surface.
+    const csrf = () => (window.__ASTROBAAS__?.csrf) || document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    const $ = (id) => document.getElementById(id);
+    // Loaded by AdminLayout from /admin-i18n.js, ahead of this module. No
+    // plural support here, so every key below is a single fixed form.
+    const t = window.t;
+
+    // Role LABELS by role VALUE — same split as the frontmatter: `k.role` is
+    // what the API returned and what identifies the row; only its rendering is
+    // translated. An unknown role shows its own name rather than a message key.
+    const ROLE_LABELS = {
+      admin: t('admin.apikeys.roleAdmin'),
+      editor: t('admin.apikeys.roleEditor'),
+      author: t('admin.apikeys.roleAuthor'),
+      manager: t('admin.apikeys.roleManager'),
+      viewer: t('admin.apikeys.roleViewer'),
+    };
+    const roleLabel = (r) => ROLE_LABELS[r] || r;
+
+    async function api(method, path, body) {
+      const headers = { Accept: 'application/json' };
+      if (body) headers['Content-Type'] = 'application/json';
+      if (method !== 'GET') headers['X-CSRF-Token'] = csrf();
+      const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || json?.success === false) throw new Error(json?.error?.message || `HTTP ${res.status}`);
+      return json?.data;
+    }
+
+    function showSecret(key) {
+      $('secret-value').textContent = key;
+      $('secret-box').classList.remove('hidden');
+      $('secret-box').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    $('secret-copy').addEventListener('click', () => navigator.clipboard?.writeText($('secret-value').textContent || ''));
+
+    function fmtDate(s) { return s ? new Date(s).toLocaleDateString() : '—'; }
+
+    function row(k) {
+      const tr = document.createElement('tr');
+      const cells = [k.name, k.prefix, roleLabel(k.role), (k.scopes || []).join(', ') || '—', fmtDate(k.expires_at), fmtDate(k.last_used)];
+      for (const c of cells) {
+        const td = document.createElement('td');
+        td.className = 'px-4 py-3 text-gray-700';
+        td.textContent = c;
+        tr.appendChild(td);
+      }
+      const actions = document.createElement('td');
+      actions.className = 'px-4 py-3 text-right whitespace-nowrap';
+      const rotate = document.createElement('button');
+      rotate.textContent = t('admin.apikeys.rotate');
+      rotate.className = 'text-blue-600 hover:underline mr-3';
+      rotate.addEventListener('click', () => doRotate(k.id));
+      const revoke = document.createElement('button');
+      revoke.textContent = t('admin.apikeys.revoke');
+      revoke.className = 'text-red-600 hover:underline';
+      revoke.addEventListener('click', () => doRevoke(k.id, k.name));
+      actions.append(rotate, revoke);
+      tr.appendChild(actions);
+      return tr;
+    }
+
+    async function load() {
+      const body = $('keys-body');
+      try {
+        const keys = await api('GET', '/api/keys');
+        body.innerHTML = '';
+        if (!keys.length) {
+          body.innerHTML = '<tr><td colspan="7" class="px-4 py-6 text-center text-gray-400"></td></tr>';
+          body.querySelector('td').textContent = t('admin.apikeys.empty');
+          return;
+        }
+        for (const k of keys) body.appendChild(row(k));
+      } catch (e) {
+        body.innerHTML = `<tr><td colspan="7" class="px-4 py-6 text-center text-red-600"></td></tr>`;
+        body.querySelector('td').textContent = e.message;
+      }
+    }
+
+    async function doRotate(id) {
+      if (!confirm(t('admin.apikeys.rotateConfirm'))) return;
+      try { const k = await api('POST', `/api/keys/${encodeURIComponent(id)}/rotate`); showSecret(k.key); load(); }
+      catch (e) { alert(e.message); }
+    }
+    async function doRevoke(id, name) {
+      if (!confirm(t('admin.apikeys.revokeConfirm', { name }))) return;
+      try { await api('DELETE', `/api/keys/${encodeURIComponent(id)}`); load(); }
+      catch (e) { alert(e.message); }
+    }
+
+    $('mint-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      $('mint-error').textContent = '';
+      const f = e.target;
+      const scopes = (f.scopes.value || '').split(',').map((s) => s.trim()).filter(Boolean);
+      const payload = { name: f.name.value, role: f.role.value };
+      if (scopes.length) payload.scopes = scopes;
+      if (f.expires_in_days.value) payload.expires_in_days = Number(f.expires_in_days.value);
+      try {
+        const k = await api('POST', '/api/keys', payload);
+        showSecret(k.key);
+        f.reset();
+        load();
+      } catch (err) {
+        $('mint-error').textContent = err.message;
+      }
+    });
+
+    load();
+  </script>
+</AdminLayout>

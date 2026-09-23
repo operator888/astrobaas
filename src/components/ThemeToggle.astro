@@ -1,0 +1,58 @@
+---
+/**
+ * Light/dark toggle.
+ *
+ * Persists to a cookie rather than localStorage, because the SERVER needs to
+ * read the preference to render `data-theme` on <html> — that is what makes the
+ * switch flash-free under a CSP with no inline scripts (see BaseLayout).
+ *
+ * Only rendered when the active theme opts into `colorScheme: 'auto'`; a site
+ * pinned to light or dark has nothing to toggle.
+ */
+---
+<button
+  type="button"
+  id="ab-theme-toggle"
+  class="ab-theme-toggle"
+  aria-label="Switch between light and dark"
+  title="Switch between light and dark"
+>
+  <span aria-hidden="true" class="ab-theme-toggle__icon">◐</span>
+</button>
+
+<style>
+  .ab-theme-toggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 2rem; height: 2rem;
+    border: 1px solid var(--border-color); border-radius: var(--radius-pill);
+    background: transparent; color: var(--muted-color);
+    cursor: pointer; line-height: 1;
+    transition: color .15s ease, border-color .15s ease;
+  }
+  .ab-theme-toggle:hover { color: var(--text-color); border-color: var(--text-color); }
+  .ab-theme-toggle__icon { font-size: 1rem; }
+</style>
+
+<script>
+  // Bundled by Vite and hashed into script-src by Astro's CSP, exactly like the
+  // rest of the site's JS. Nothing here is inline.
+  const btn = document.getElementById('ab-theme-toggle');
+  if (btn) {
+    const root = document.documentElement;
+    const systemDark = () => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
+
+    btn.addEventListener('click', () => {
+      // Current effective scheme: an explicit choice if one exists, else the OS.
+      const current = root.getAttribute('data-theme') ?? (systemDark() ? 'dark' : 'light');
+      const next = current === 'dark' ? 'light' : 'dark';
+
+      // Apply immediately so the click feels instant...
+      root.setAttribute('data-theme', next);
+      // ...and persist so the SERVER renders it on the next navigation, which is
+      // what prevents a flash. Lax is enough: this is a display preference, it
+      // carries no authority, and it must survive a same-site link click.
+      const oneYear = 60 * 60 * 24 * 365;
+      document.cookie = `astrobaas_theme=${next}; path=/; max-age=${oneYear}; samesite=lax`;
+    });
+  }
+</script>

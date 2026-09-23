@@ -1,0 +1,594 @@
+---
+import AdminLayout from '../../../layouts/AdminLayout.astro';
+import { ensurePluginsBootstrapped } from '../../../plugins';
+import { getContentType } from '../../../core/content-types';
+import { jsonForScript } from '../../../lib/json-in-html';
+
+/**
+ * The generic entries manager — one screen for EVERY custom collection.
+ *
+ * The form is generated from the type's field schema, which is the point of
+ * the whole feature: define a type in the builder, and managing its entries
+ * costs nothing further. Plugin-defined types get the same screen for free.
+ *
+ * Server-side 404 for an unknown type, before any markup: the type name comes
+ * from the URL, and a screen that renders first and apologises later leaks
+ * whether a collection exists.
+ */
+await ensurePluginsBootstrapped();
+const typeName = String(Astro.params.type ?? '');
+const def = getContentType(typeName);
+if (!def) return new Response(null, { status: 404 });
+
+const clientDef = {
+  name: def.name,
+  label: def.label,
+  labelPlural: def.labelPlural || `${def.label}s`,
+  fields: def.fields,
+  // Whether this collection holds things a stranger wrote that wait for
+  // approval (C-142, C-35). One queue serves every moderated type; a bespoke
+  // screen per collection is how two roadmap rows each grew their own.
+  moderated: def.moderated === true,
+};
+---
+
+<AdminLayout title={clientDef.labelPlural}>
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="flex items-baseline justify-between mb-2">
+      <h1 class="text-2xl font-semibold text-gray-900">{clientDef.labelPlural}</h1>
+      <a href="/admin/content-types" class="text-sm text-gray-500 hover:text-gray-900">← Content types</a>
+    </div>
+    <p class="text-sm text-gray-500 mb-2">
+      Served at <code>/api/content/{def.name}</code>
+      {def.visibility === 'public' ? ' — publicly readable.' : ' — staff-only.'}
+    </p>
+    {def.moderated && (
+      <div class="flex flex-wrap items-center gap-3 mb-6">
+        <span id="ce-pending" class="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-500"></span>
+        <label class="text-sm text-gray-600">
+          Show
+          <select id="ce-filter" class="ml-1 px-2 py-1 border border-gray-300 rounded text-sm">
+            <option value="all">everything</option>
+            <option value="pending">waiting for approval</option>
+            <option value="approved">published</option>
+            <option value="rejected">hidden</option>
+          </select>
+        </label>
+        <span class="text-xs text-gray-400">
+          A submission from a stranger is invisible to the public until it is approved.
+        </span>
+      </div>
+    )}
+
+    <div id="ce-notice" class="hidden mb-4 px-3 py-2 rounded-md border text-sm"></div>
+
+    <div class="bg-white border border-gray-200 rounded-xl overflow-x-auto mb-8">
+      <table class="min-w-full text-sm">
+        <thead class="bg-gray-50 text-gray-500">
+          <tr id="ce-head"></tr>
+        </thead>
+        <tbody id="ce-body" class="divide-y divide-gray-100">
+          <tr><td class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="bg-white border border-gray-200 rounded-xl p-6">
+      <h2 id="ce-form-title" class="text-lg font-semibold text-gray-900 mb-4">New {clientDef.label}</h2>
+      <div id="ce-form" class="grid gap-4 md:grid-cols-2 mb-4"></div>
+      <div class="flex items-center gap-3">
+        <button id="ce-save" type="button"
+          class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">Save</button>
+        <button id="ce-cancel" type="button"
+          class="hidden px-4 py-2 border border-gray-300 rounded-lg text-gray-700">Cancel edit</button>
+        <span id="ce-error" class="text-sm text-red-600"></span>
+      </div>
+    </div>
+  </div>
+</AdminLayout>
+
+<script is:inline set:html={`window.__CT_DEF__ = ${jsonForScript(clientDef)};`}></script>
+<script>
+  // @ts-nocheck
+  import { api } from '../../../lib/apiClient';
+  import { flash as sharedFlash } from '../../../lib/admin-ui';
+
+  const DEF = window.__CT_DEF__;
+  const API = `/api/content/${encodeURIComponent(DEF.name)}`;
+  let editingId = null;
+
+  const $ = (id) => document.getElementById(id);
+  const notice = (msg, kind = 'success') => {
+    // lib/admin-ui — was one of six identical class-string builders.
+    const n = $('ce-notice');
+    sharedFlash(n, msg, kind === 'success' ? 'success' : 'error');
+    setTimeout(() => n.classList.add('hidden'), 4000);
+  };
+
+  /* ---- form generated from the schema ---- */
+
+  /**
+   * The editor for a repeating group (C-123) or a flexible-content list (C-126).
+   *
+   * The value is a list of small records, so the control is a list of small
+   * forms. Each item carries its own `_layout` when the definition offers a
+   * choice of layouts — the same discriminator the validator reads, so what the
+   * screen writes and what the server checks are the same shape.
+   *
+   * Items are re-numbered on every add and remove rather than tracked by index,
+   * because a removed middle item would otherwise leave the numbering saying
+   * something the list does not.
+   */
+  /**
+   * A file a stranger attached (C-23), on the STAFF screen.
+   *
+   * Read-only on purpose. The bytes live outside public/uploads and arrive
+   * through an anonymous, rate-limited upload route; a staff member replacing
+   * an applicant's attachment from here would be editing evidence, and there
+   * is no case for it. What they need is to read it and to know it is there.
+   */
+  function fileFor(field) {
+    const wrap = document.createElement('div');
+    wrap.className = 'ce-input ce-file text-sm';
+    wrap.dataset.field = field.name;
+    let current = '';
+    const render = () => {
+      wrap.replaceChildren();
+      if (!current) {
+        const none = document.createElement('span');
+        none.className = 'text-gray-400';
+        none.textContent = 'No file was attached.';
+        wrap.appendChild(none);
+        return;
+      }
+      const link = document.createElement('a');
+      // The staff-only route, never a /uploads path — see lib/media/private-files.
+      link.href = `/api/forms/file/${encodeURIComponent(current)}`;
+      link.textContent = 'Download the attachment';
+      link.className = 'text-blue-600 hover:underline';
+      link.rel = 'noopener';
+      const note = document.createElement('span');
+      note.className = 'text-gray-400 ml-2';
+      note.textContent = '(staff only — not a public link)';
+      wrap.append(link, note);
+    };
+    wrap.__setValue = (v) => { current = typeof v === 'string' ? v : ''; render(); };
+    wrap.__getValue = () => current;
+    render();
+    return wrap;
+  }
+
+  function repeaterFor(field) {
+    const rule = field.rule;
+    const wrap = document.createElement('div');
+    wrap.className = 'ce-input ce-repeater space-y-3 border border-gray-200 rounded-lg p-3';
+    wrap.dataset.field = field.name;
+
+    const list = document.createElement('div');
+    list.className = 'ce-rep-items space-y-3';
+
+    const renumber = () => {
+      [...list.children].forEach((item, i) => {
+        const n = item.querySelector('.ce-rep-n');
+        if (n) n.textContent = `#${i + 1}`;
+      });
+    };
+
+    const itemRow = (values = {}, layoutName) => {
+      const layout = rule.layouts?.find((l) => l.name === (layoutName ?? values._layout));
+      const fields = rule.layouts ? (layout?.fields ?? []) : (rule.fields ?? []);
+      const item = document.createElement('div');
+      item.className = 'ce-rep-item border border-gray-100 rounded-lg p-3 bg-gray-50';
+      if (layout) item.dataset.layout = layout.name;
+
+      const head = document.createElement('div');
+      head.className = 'flex items-center justify-between mb-2';
+      const title = document.createElement('span');
+      title.className = 'text-xs font-medium text-gray-500';
+      const n = document.createElement('span');
+      n.className = 'ce-rep-n';
+      title.append(n, document.createTextNode(layout ? ` — ${layout.label}` : ''));
+      const drop = document.createElement('button');
+      drop.type = 'button';
+      drop.textContent = '✕';
+      drop.className = 'text-gray-400 hover:text-red-600 px-2';
+      drop.addEventListener('click', () => { item.remove(); renumber(); });
+      head.append(title, drop);
+      item.appendChild(head);
+
+      for (const sf of fields) {
+        const cell = document.createElement('div');
+        cell.className = 'mb-2';
+        const label = document.createElement('label');
+        label.className = 'block text-xs font-medium text-gray-600 mb-1';
+        label.textContent = sf.name + (sf.rule.optional ? '' : ' *');
+        const input = inputFor(sf);
+        // Namespaced so the top-level readForm's `.ce-input` sweep does not
+        // pick a sub-field up as if it were a field of the record.
+        input.classList.remove('ce-input');
+        input.classList.add('ce-sub-input');
+        const v = values[sf.name];
+        if (sf.rule.type === 'boolean') input.checked = !!v;
+        else if (sf.rule.type === 'array') input.value = Array.isArray(v) ? v.join(', ') : '';
+        else input.value = v ?? '';
+        cell.append(label, input);
+        item.appendChild(cell);
+      }
+      return item;
+    };
+
+    const controls = document.createElement('div');
+    controls.className = 'flex flex-wrap items-center gap-2';
+    if (rule.layouts?.length) {
+      // One button per layout: a select plus an Add is two actions for a
+      // choice that is one.
+      for (const l of rule.layouts) {
+        const add = document.createElement('button');
+        add.type = 'button';
+        add.textContent = `+ ${l.label}`;
+        add.className = 'px-2 py-1 text-xs border border-gray-300 rounded text-gray-700 hover:bg-white';
+        add.addEventListener('click', () => { list.appendChild(itemRow({}, l.name)); renumber(); });
+        controls.appendChild(add);
+      }
+    } else {
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.textContent = '+ Add';
+      add.className = 'px-2 py-1 text-xs border border-gray-300 rounded text-gray-700 hover:bg-white';
+      add.addEventListener('click', () => { list.appendChild(itemRow()); renumber(); });
+      controls.appendChild(add);
+    }
+
+    wrap.append(list, controls);
+    // Handed to fillForm through a property rather than re-derived: rebuilding
+    // the rows needs the definition, and the caller only has the element.
+    wrap.__setItems = (items) => {
+      list.replaceChildren(...(Array.isArray(items) ? items : []).map((v) => itemRow(v)));
+      renumber();
+    };
+    wrap.__getItems = () => [...list.querySelectorAll('.ce-rep-item')].map((item) => {
+      const layoutName = item.dataset.layout;
+      const fields = rule.layouts
+        ? (rule.layouts.find((l) => l.name === layoutName)?.fields ?? [])
+        : (rule.fields ?? []);
+      const out = layoutName ? { _layout: layoutName } : {};
+      const inputs = [...item.querySelectorAll('.ce-sub-input')];
+      fields.forEach((sf, i) => {
+        const el = inputs[i];
+        if (!el) return;
+        let v;
+        if (sf.rule.type === 'boolean') v = el.checked;
+        else if (sf.rule.type === 'number') v = el.value === '' ? undefined : Number(el.value);
+        else if (sf.rule.type === 'array') {
+          v = el.value.split(',').map((s) => s.trim()).filter(Boolean);
+          if (sf.rule.of === 'number') v = v.map(Number);
+          if (v.length === 0) v = undefined;
+        } else v = el.value === '' ? undefined : el.value;
+        if (v !== undefined) out[sf.name] = v;
+      });
+      return out;
+    });
+    return wrap;
+  }
+
+  function inputFor(field) {
+    const r = field.rule;
+    if (r.type === 'repeater') return repeaterFor(field);
+    if (r.type === 'file') return fileFor(field);
+    let el;
+    if (r.type === 'boolean') {
+      el = document.createElement('input');
+      el.type = 'checkbox';
+      el.className = 'ce-input h-4 w-4';
+    } else if (r.type === 'enum') {
+      el = document.createElement('select');
+      el.className = 'ce-input w-full px-3 py-2 border border-gray-300 rounded-lg';
+      if (r.optional) el.appendChild(document.createElement('option'));
+      for (const v of r.values || []) {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = v;
+        el.appendChild(o);
+      }
+    } else if (r.type === 'string' && (r.max ?? 0) > 300) {
+      el = document.createElement('textarea');
+      el.rows = 4;
+      el.className = 'ce-input w-full px-3 py-2 border border-gray-300 rounded-lg';
+    } else {
+      el = document.createElement('input');
+      el.type = r.type === 'number' ? 'number' : r.type === 'date' ? 'date'
+        : r.type === 'email' ? 'email' : r.type === 'url' ? 'url' : 'text';
+      el.className = 'ce-input w-full px-3 py-2 border border-gray-300 rounded-lg';
+      if (r.type === 'array') el.placeholder = 'comma-separated';
+    }
+    el.dataset.field = field.name;
+    return el;
+  }
+
+  function buildForm() {
+    const wrap = $('ce-form');
+    wrap.replaceChildren();
+    for (const f of DEF.fields) {
+      const cell = document.createElement('div');
+      // The condition rides on the WRAPPER, exactly as it does on the public
+      // form, so `hidden` also removes the field from the accessibility tree.
+      cell.dataset.field = f.name;
+      if (f.showIf) {
+        cell.dataset.showField = f.showIf.field;
+        cell.dataset.showEquals = String(f.showIf.equals);
+        cell.hidden = true;
+      }
+      const label = document.createElement('label');
+      label.className = 'block text-sm font-medium text-gray-700 mb-1';
+      label.textContent = f.name + (f.rule.optional ? '' : ' *');
+      cell.appendChild(label);
+      cell.appendChild(inputFor(f));
+      wrap.appendChild(cell);
+    }
+    if (DEF.fields.some((f) => f.showIf)) {
+      wrap.addEventListener('input', applyConditions);
+      wrap.addEventListener('change', applyConditions);
+      applyConditions();
+    }
+  }
+
+  /**
+   * The same conditions the public form applies (C-125), on the staff screen.
+   *
+   * The rule is `showIf: {field, equals}` and it is compared as a STRING on
+   * both sides, exactly as `conditionHolds` in core/content-types.ts does — the
+   * server re-evaluates it in `schemaForSubmission`, so a field this hides is
+   * optional there and its value is dropped. Two implementations of one rule is
+   * how the two ends come to disagree about whether a field was required.
+   *
+   * Presentation, never authorization: the whole definition is in the page.
+   */
+  function applyConditions() {
+    const cells = [...document.querySelectorAll('#ce-form [data-show-field]')];
+    const valueOf = (name) => {
+      const el = document.querySelector(`.ce-input[data-field="${CSS.escape(name)}"]`);
+      if (!el) return '';
+      return el.type === 'checkbox' ? String(el.checked) : el.value;
+    };
+    // Settle chains in one pass rather than one keystroke per link.
+    for (let pass = 0; pass < cells.length + 1; pass += 1) {
+      let changed = false;
+      for (const cell of cells) {
+        const on = valueOf(cell.dataset.showField) === (cell.dataset.showEquals ?? '');
+        if (cell.hidden !== !on) { cell.hidden = !on; changed = true; }
+      }
+      if (!changed) break;
+    }
+  }
+
+  function readForm() {
+    const data = {};
+    for (const el of document.querySelectorAll('.ce-input')) {
+      const name = el.dataset.field;
+      // A field whose condition is not met is not an answer. The server drops
+      // it too; sending it would put a value in the record for a question the
+      // form never asked.
+      if (el.closest('[data-show-field]')?.hidden) continue;
+      const rule = DEF.fields.find((f) => f.name === name)?.rule ?? { type: 'string' };
+      let v;
+      if (rule.type === 'file') v = el.__getValue() || undefined;
+      else if (rule.type === 'repeater') {
+        v = el.__getItems();
+        // An empty list is "no items", which for an OPTIONAL repeater means the
+        // field is absent rather than an empty array — the same rule every
+        // other kind follows two lines below.
+        if (v.length === 0 && rule.optional) v = undefined;
+      }
+      else if (rule.type === 'boolean') v = el.checked;
+      else if (rule.type === 'number') v = el.value === '' ? undefined : Number(el.value);
+      else if (rule.type === 'array') {
+        v = el.value.split(',').map((s) => s.trim()).filter(Boolean);
+        if (rule.of === 'number') v = v.map(Number);
+        if (v.length === 0) v = undefined;
+      } else v = el.value === '' ? undefined : el.value;
+      if (v !== undefined) data[name] = v;
+    }
+    return data;
+  }
+
+  function fillForm(data) {
+    for (const el of document.querySelectorAll('.ce-input')) {
+      const name = el.dataset.field;
+      const rule = DEF.fields.find((f) => f.name === name)?.rule ?? { type: 'string' };
+      const v = data?.[name];
+      if (rule.type === 'file') el.__setValue(v);
+      else if (rule.type === 'repeater') el.__setItems(v);
+      else if (rule.type === 'boolean') el.checked = !!v;
+      else if (rule.type === 'array') el.value = Array.isArray(v) ? v.join(', ') : '';
+      else el.value = v ?? '';
+    }
+    // The loaded values decide which conditional fields belong on screen.
+    if (DEF.fields.some((f) => f.showIf)) applyConditions();
+  }
+
+  function resetForm() {
+    editingId = null;
+    $('ce-form-title').textContent = `New ${DEF.label}`;
+    $('ce-cancel').classList.add('hidden');
+    fillForm({});
+  }
+  $('ce-cancel').addEventListener('click', resetForm);
+  $('ce-filter')?.addEventListener('change', (e) => {
+    statusFilter = e.target.value;
+    load();
+  });
+
+  /* ---- list ---- */
+
+  // A repeater's value is a list of records; printing it in a table cell gives
+  // "[object Object]" per item, so those columns are skipped.
+  const COLS = DEF.fields.filter((f) => f.rule.type !== 'repeater').slice(0, 4).map((f) => f.name);
+
+  function buildHead() {
+    const tr = $('ce-head');
+    tr.replaceChildren();
+    for (const c of COLS) {
+      const th = document.createElement('th');
+      th.className = 'px-4 py-3 text-left font-medium';
+      th.textContent = c;
+      tr.appendChild(th);
+    }
+    if (DEF.moderated) {
+      const st = document.createElement('th');
+      st.className = 'px-4 py-3 text-left font-medium';
+      st.textContent = 'Status';
+      tr.appendChild(st);
+    }
+    const th = document.createElement('th');
+    th.className = 'px-4 py-3 text-right font-medium';
+    th.textContent = 'Actions';
+    tr.appendChild(th);
+  }
+
+  /**
+   * A record's approval state (C-142, C-35).
+   *
+   * A row written before its type became moderated has no `_status` at all and
+   * counts as APPROVED — it was already public under the old rule, and
+   * retroactively hiding a shop's existing entries because somebody ticked a
+   * box is a data-loss-shaped surprise. Same rule as core/moderation.ts.
+   */
+  const statusOf = (row) => {
+    const s = row?.data?._status;
+    return s === 'pending' || s === 'approved' || s === 'rejected' ? s : 'approved';
+  };
+
+  const STATUS_CLASS = {
+    // Full literals — Tailwind scans source TEXT, so a composed class name is
+    // absent from the production stylesheet.
+    pending: 'bg-amber-100 text-amber-800',
+    approved: 'bg-green-100 text-green-800',
+    rejected: 'bg-gray-100 text-gray-600',
+  };
+
+  async function setStatus(id, status) {
+    const r = await api.put(`${API}/${encodeURIComponent(id)}`, { _status: status });
+    if (r.ok) { notice(status === 'approved' ? 'Published.' : 'Hidden.'); await load(); }
+    else notice(`Could not update: ${r.error}`, 'error');
+  }
+
+  let statusFilter = 'all';
+
+  async function load() {
+    const res = await api.get(API);
+    const body = $('ce-body');
+    body.replaceChildren();
+    if (!res.ok) { notice(`Could not load entries: ${res.error}`, 'error'); return; }
+    let rows = res.data || [];
+    if (DEF.moderated) {
+      const waiting = rows.filter((r) => statusOf(r) === 'pending').length;
+      const badge = $('ce-pending');
+      if (badge) {
+        badge.textContent = waiting
+          ? `${waiting} waiting for approval`
+          : 'Nothing waiting for approval';
+        badge.className = waiting
+          ? 'px-2 py-0.5 text-xs rounded-full bg-amber-100 text-amber-800'
+          : 'px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-500';
+      }
+      if (statusFilter !== 'all') rows = rows.filter((r) => statusOf(r) === statusFilter);
+    }
+    if (!rows.length) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = COLS.length + (DEF.moderated ? 2 : 1);
+      td.className = 'px-4 py-6 text-center text-gray-400';
+      td.textContent = `No ${DEF.labelPlural.toLowerCase()} yet.`;
+      tr.appendChild(td);
+      body.appendChild(tr);
+      return;
+    }
+    for (const row of rows) {
+      const tr = document.createElement('tr');
+      for (const c of COLS) {
+        const td = document.createElement('td');
+        td.className = 'px-4 py-3 text-gray-700 max-w-60 truncate';
+        const v = row.data?.[c];
+        td.textContent = Array.isArray(v) ? v.join(', ') : typeof v === 'boolean' ? (v ? 'yes' : 'no') : (v ?? '');
+        tr.appendChild(td);
+      }
+      if (DEF.moderated) {
+        const st = document.createElement('td');
+        st.className = 'px-4 py-3';
+        const pill = document.createElement('span');
+        const s = statusOf(row);
+        pill.className = `px-2 py-0.5 text-xs rounded-full ${STATUS_CLASS[s]}`;
+        pill.textContent = s;
+        st.appendChild(pill);
+        tr.appendChild(st);
+      }
+      const actions = document.createElement('td');
+      actions.className = 'px-4 py-3 text-right space-x-3';
+      if (DEF.moderated) {
+        const s = statusOf(row);
+        // Both buttons, always — a queue where the only action is the one the
+        // row is not already in makes "undo" impossible, and the commonest
+        // moderation mistake is approving the wrong thing.
+        if (s !== 'approved') {
+          const ok = document.createElement('button');
+          ok.type = 'button';
+          ok.className = 'text-sm text-green-700 hover:text-green-900';
+          ok.textContent = 'Approve';
+          ok.addEventListener('click', () => setStatus(row.id, 'approved'));
+          actions.appendChild(ok);
+        }
+        if (s !== 'rejected') {
+          const no = document.createElement('button');
+          no.type = 'button';
+          no.className = 'text-sm text-amber-700 hover:text-amber-900';
+          no.textContent = 'Hide';
+          no.addEventListener('click', () => setStatus(row.id, 'rejected'));
+          actions.appendChild(no);
+        }
+      }
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'text-sm text-gray-600 hover:text-gray-900';
+      edit.textContent = 'Edit';
+      edit.addEventListener('click', () => {
+        editingId = row.id;
+        $('ce-form-title').textContent = `Edit ${DEF.label}`;
+        $('ce-cancel').classList.remove('hidden');
+        fillForm(row.data);
+        $('ce-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'text-sm text-red-600 hover:text-red-800';
+      del.textContent = 'Delete';
+      del.addEventListener('click', async () => {
+        if (!confirm(`Delete this ${DEF.label.toLowerCase()}?`)) return;
+        const r = await api.delete(`${API}/${encodeURIComponent(row.id)}`);
+        if (r.ok) { notice('Deleted.'); await load(); }
+        else notice(`Delete failed: ${r.error}`, 'error');
+      });
+      actions.append(edit, del);
+      tr.appendChild(actions);
+      body.appendChild(tr);
+    }
+  }
+
+  $('ce-save').addEventListener('click', async () => {
+    $('ce-error').textContent = '';
+    const data = readForm();
+    const res = editingId
+      ? await api.put(`${API}/${encodeURIComponent(editingId)}`, data)
+      : await api.post(API, data);
+    if (!res.ok) {
+      const details = res.details ? Object.values(res.details).join('; ') : res.error;
+      $('ce-error').textContent = details || 'Could not save';
+      return;
+    }
+    notice(editingId ? 'Updated.' : 'Created.');
+    resetForm();
+    await load();
+  });
+
+  buildHead();
+  buildForm();
+  load();
+</script>

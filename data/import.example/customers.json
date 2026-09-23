@@ -1,0 +1,26 @@
+[
+  {
+    "wp_id": "1",
+    "email": "ada@example.com",
+    "name": "Ada Example",
+    "role": "customer",
+    "phone": "+30 210 0000001",
+    "city": "Athens",
+    "address": "1 Demo Street",
+    "postcode": "10431",
+    "country": "GR",
+    "registered_at": "2024-01-05T08:00:00Z"
+  },
+  {
+    "wp_id": "2",
+    "email": "grace@example.org",
+    "name": "Grace Sample",
+    "role": "customer",
+    "phone": "",
+    "city": "Thessaloniki",
+    "address": "",
+    "postcode": "",
+    "country": "GR",
+    "registered_at": "2024-02-11T08:00:00Z"
+  }
+]

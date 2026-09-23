@@ -1,0 +1,55 @@
+---
+/**
+ * Marquee theme — `Header` override.
+ *
+ * A poster masthead: the site name as a full-width block of display type over a
+ * thick rule, nav as stamped tabs. Nothing here apologises for taking space —
+ * that is the theme's whole voice.
+ */
+import type { HeaderProps } from '../../core/theme-slots';
+import LocaleSwitcher from '../../components/public/LocaleSwitcher.astro';
+import { routeHref } from '../../lib/locale-links';
+
+const { siteTitle = 'AstroBaaS', localeOptions } = Astro.props as HeaderProps;
+
+// routeHref, not a literal: see the note in the default PublicHeader. A theme
+// is the easiest place for this to regress, because its nav is written once and
+// looks correct on the single-language site it was designed against.
+const loc = Astro.locals.locale;
+const nav = [
+  { href: routeHref('/', loc), label: 'Home' },
+  { href: routeHref('/blog', loc), label: 'Blog' },
+  { href: routeHref('/about', loc), label: 'About' },
+  { href: routeHref('/contact', loc), label: 'Contact' },
+];
+---
+
+<header class="mq-header mq-header-shell">
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 pt-10 pb-0">
+    <a href={routeHref('/', loc)} class="block">
+      <span
+        class="mq-wordmark block font-bold uppercase leading-none tracking-tight ab-heading-font ab-ink"
+      >{siteTitle}</span>
+    </a>
+    <nav class="no-print mt-6 flex flex-wrap gap-0 -mb-px">
+      {nav.map((item) => (
+        <a
+          href={item.href}
+          class="mq-tab px-5 py-2 text-xs font-bold uppercase tracking-widest border-4 border-b-0 -ml-1 first:ml-0 ab-border-ink ab-ink ab-surface"
+        >{item.label}</a>
+      ))}
+    </nav>
+    <LocaleSwitcher options={localeOptions} class="mt-4" />
+  </div>
+</header>
+
+<style>
+  .mq-header-shell {
+    background: var(--background-color);
+    border-bottom: 4px solid var(--text-color);
+  }
+
+  .mq-wordmark {
+    font-size: clamp(2.5rem, 9vw, 6rem);
+  }
+</style>

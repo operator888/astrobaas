@@ -1,0 +1,214 @@
+---
+import { htmlLang } from '../lib/i18n/resolve';
+import { defaultLocale } from '../lib/i18n';
+import { LocalDB } from '../lib/localdb';
+import { pluginManager, PLUGIN_HOOKS } from '../lib/plugin-system';
+import { sanitizeHeadHtml } from '../lib/sanitize';
+import { assistantIsLive } from '../lib/assistant-runtime';
+import '../styles/global.css';
+import { discourageIndexing as readDiscourageIndexing } from '../lib/indexing';
+import { directionFor } from '../lib/i18n/direction';
+import { popupsAreLive } from '../lib/popups-runtime';
+
+export interface Props {
+  title?: string;
+  description?: string;
+  image?: string;
+  siteName?: string;
+  siteUrl?: string;
+  /**
+   * Keep THIS page out of search results, independently of the site-wide
+   * discourage-indexing setting. OR-ed with it below: a site-wide hide can
+   * never be overridden by a page, and a page can always hide itself.
+   */
+  noindex?: boolean;
+  /**
+   * The page's own canonical URL, when it knows better than the request path.
+   *
+   * A designated home Page is served at `/` AND `/{slug}`; only the route can
+   * say which one is canonical. Pages used to inject a SECOND
+   * `<link rel="canonical">` through the head slot, and on the front door the
+   * two disagreed — Google's documented answer to conflicting canonicals is to
+   * ignore all of them, so the page shipped no usable signal at all.
+   */
+  canonical?: string;
+}
+
+const { title, description = "A modern CMS built with Astro", image = "/favicon.svg", siteName, siteUrl, noindex, canonical } = Astro.props;
+
+// CSRF token (set by middleware) — exposed via meta so public forms can submit.
+const csrf = Astro.locals.csrf ?? '';
+
+// Compose <title>: "Section · Site" when a site name is provided (public pages
+// pass one); otherwise the page title verbatim (admin passes its own title).
+const fullTitle = siteName
+  ? (title && title.trim() ? `${title} · ${siteName}` : siteName)
+  : (title ?? '');
+
+// Canonical / og:url — the configured site URL, else this request's ORIGIN.
+//
+// `Astro.url.href` was the old fallback and carries the query string, so
+// /blog?utm_source=x declared itself canonical — which is precisely the
+// duplicate-content problem a canonical tag exists to solve. Only the pathname
+// is ever canonical here.
+// `locals.requestPath`, not `Astro.url.pathname`. A locale-prefixed request is
+// rewritten internally, so the pathname here has already lost its /de/ — and a
+// canonical built from it told search engines that the German page's real
+// address was the English one, contradicting the hreflang the same page emits.
+const canonicalURL = canonical
+  || `${siteUrl || Astro.url.origin}${Astro.locals.requestPath || Astro.url.pathname}`;
+
+// The active theme's design tokens are served as an external stylesheet
+// (/theme.css, linked in <head> below) rather than an inline <html> style, so
+// the hash-based CSP (no 'unsafe-inline') doesn't block them — while a
+// render-blocking <link> still avoids any flash.
+// Resolved by lib/indexing.ts, which REMEMBERS the last value it managed to
+// read: neither fail-open (a staging site briefly indexed) nor fail-closed (a
+// live shop briefly delisted) is acceptable on a read that happens per render
+// and can blip. The memory has to live in a .ts module — a `let` in .astro
+// frontmatter compiles inside the per-render function and resets every
+// request, which is exactly the bug this replaced.
+const discourageIndexing = await readDiscourageIndexing();
+
+// The visitor's explicit light/dark choice, if they made one.
+const themePref = Astro.cookies.get('astrobaas_theme')?.value;
+const forcedScheme = themePref === 'dark' || themePref === 'light' ? themePref : null;
+
+let themeFonts: string[] = ['Inter'];
+let colorScheme = 'light';
+try {
+  await LocalDB.init();
+  const theme = await LocalDB.getActiveTheme();
+  const cs = theme?.settings?.colorScheme;
+  if (cs === 'dark' || cs === 'auto') colorScheme = cs;
+  const picked = [theme?.settings?.typography?.headingFont, theme?.settings?.typography?.bodyFont]
+    .filter((f): f is string => typeof f === 'string')
+    .map((f) => f.trim().replace(/^['"]|['"]$/g, ''))
+    // Font family names are letters, digits and spaces. Anything else is not a
+    // family name, and this string is about to be interpolated into a URL.
+    .filter((f) => /^[A-Za-z0-9 ]{1,48}$/.test(f));
+  if (picked.length) themeFonts = [...new Set([...picked, 'Inter'])];
+} catch {
+  // Boot may be racing the DB seed; fall back to Tailwind defaults.
+}
+
+const fontHref = `https://fonts.googleapis.com/css2?${
+  themeFonts.map((f) => `family=${encodeURIComponent(f).replace(/%20/g, '+')}:wght@300;400;500;600;700`).join('&')
+}&display=swap`;
+
+// Plugin-contributed <head> markup (analytics meta, preconnect, scoped CSS).
+// Filter output is sanitized to a head-safe subset (no <script>).
+const headTags = sanitizeHeadHtml(
+  pluginManager.applyFilters('head_tags', '', { pathname: Astro.url.pathname }),
+);
+
+// Plugin CSS is served as an external stylesheet (/plugins.css) because the
+// hash-based CSP blocks per-request inline <style>. Only link it when a plugin
+// actually contributes CSS, so the common case costs no extra request.
+const hasPluginStyles = pluginManager.hasFilter(PLUGIN_HOOKS.PLUGIN_STYLES);
+
+// Only link /assistant.js when the assistant is ACTIVE and CONFIGURED. The
+// homepage promises the assistant ships "if you enable it"; emitting the tag
+// unconditionally made that sentence false for every install that never turned
+// it on. `assistantIsLive()` is the shared rule — /assistant.js itself asks the
+// same function, so the tag and the payload cannot disagree.
+const assistantLive = await assistantIsLive();
+
+// The opt-in overlay (C-114), linked only when the `popups` plugin is active
+// AND something is configured — /popup.js answers 404 in every other case, so
+// the tag and the payload ask the same question.
+//
+// Never on an admin page. `locals.requestPath` rather than `Astro.url.pathname`
+// for the same reason the canonical above uses it: a locale-prefixed request
+// has already had its prefix stripped there, and reading the raw URL would miss
+// `/de/admin/...`.
+const onAdmin = (Astro.locals.requestPath || Astro.url.pathname).startsWith('/admin');
+const popupsLive = !onAdmin && await popupsAreLive();
+---
+
+<!DOCTYPE html>
+<!-- `data-theme` is only stamped when the visitor made an explicit choice.
+     Leaving it off lets `@media (prefers-color-scheme: dark)` decide, which is
+     what "auto" should mean. /theme.css handles both directions. -->
+<html lang={htmlLang(Astro.locals.locale ?? defaultLocale())} dir={directionFor(Astro.locals.locale ?? defaultLocale())} data-theme={forcedScheme ?? undefined} data-color-scheme={colorScheme}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="description" content={description} />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="csrf-token" content={csrf} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="generator" content={Astro.generator} />
+    
+    <!-- SEO Meta Tags -->
+    {/* Site-wide hide is "noindex, nofollow" — the operator is hiding the whole
+        site, so its links carry no endorsement either. A single hidden page is
+        only "noindex": its outbound links still point at pages that ARE
+        published, and stripping their value is not what the author asked for. */}
+    {discourageIndexing
+      ? <meta name="robots" content="noindex, nofollow" />
+      : noindex && <meta name="robots" content="noindex" />}
+    <title>{fullTitle}</title>
+    <link rel="canonical" href={canonicalURL} />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:image" content={image} />
+    <meta property="og:url" content={canonicalURL} />
+    <meta property="og:type" content="website" />
+    {siteName && <meta property="og:site_name" content={siteName} />}
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={fullTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={image} />
+
+    {/*
+      THE FEED, ANNOUNCED.
+
+      /rss.xml has existed all along and nothing in <head> said so, which meant a
+      reader, an aggregator or a crawler had to guess the URL. `rel="alternate"`
+      is the one mechanism every feed reader actually looks for — a feed nothing
+      links to is a feed with no subscribers.
+
+      Suppressed when the whole site is hidden from search: a site asking not to
+      be indexed should not be advertising a machine-readable copy of itself
+      either, and the two settings disagreeing is exactly the contradiction the
+      robots kill-switch exists to avoid.
+    */}
+    {!discourageIndexing && (
+      <link rel="alternate" type="application/rss+xml" title={siteName ? `${siteName} feed` : 'Feed'} href="/rss.xml" />
+    )}
+    
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href={fontHref} rel="stylesheet">
+
+    <!-- Active theme's design tokens as a same-origin, render-blocking stylesheet.
+         Replaces the old inline style on <html>, which the hash-based CSP blocks.
+         `:root:root` in /theme.css wins over the global.css defaults, so the theme
+         still applies on first paint with no flash. -->
+    <link rel="stylesheet" href="/theme.css" />
+    {hasPluginStyles && <link rel="stylesheet" href="/plugins.css" />}
+    <slot name="head" />
+    {headTags && <Fragment set:html={headTags} />}
+    {/*
+      Consent + analytics, as ONE served same-origin script. It is always
+      included: with no connectors configured and the banner plugin inactive it
+      is inert, and keeping it unconditional means there is no code path where a
+      tracker loads without the consent gate having run first.
+    */}
+    <script src="/consent.js" is:inline defer></script>
+    {/* Chat widget. Linked ONLY when the AI Assistant plugin is active AND
+        configured (see lib/assistant-runtime.ts) — an install that never
+        enabled it pays no request, which is what the homepage's "if you enable
+        it" has to mean to be true. It still waits for consent before it
+        renders, so this is the outer of two gates, not the only one. */}
+    {assistantLive && <script src="/assistant.js" is:inline defer></script>}
+    {/* The opt-in overlay. Same shape as the assistant: no tag at all unless
+        the plugin is active and the operator has written the copy, so an
+        install that never asked for a popup pays nothing. */}
+    {popupsLive && <script src="/popup.js" is:inline defer></script>}
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>

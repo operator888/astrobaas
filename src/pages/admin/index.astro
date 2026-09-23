@@ -1,0 +1,501 @@
+---
+import { runAttention } from '../../lib/admin/attention';
+import { settingsMap } from '../../lib/settings-map';
+import { enabledProviders } from '../../lib/payments/registry';
+import { returnUrlVerdict } from '../../lib/payments/return-url-check';
+import { LATEST_SCHEMA_VERSION } from '../../lib/migrations';
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { LocalDB } from '../../lib/localdb';
+import { canReadCommerce } from '../../lib/auth';
+import { isCommerceEnabled } from '../../lib/commerce-service';
+import { formatMoney } from '../../lib/money-format';
+import { seedAdminEmail } from '../../lib/seed-data';
+
+await LocalDB.init();
+const posts = await LocalDB.getPosts();
+// Every staff role can open the dashboard, so the user list — names, emails,
+// roles — must not be fetched for all of them just to render a count.
+const isAdmin = Astro.locals.user?.role === 'admin';
+const users = isAdmin ? await LocalDB.getUsers() : [];
+const media = await LocalDB.getMedia();
+// The six newest, metadata only — the Recent Activity card renders six rows and
+// reads nothing but the type, the verb and the time. It used to load the whole
+// feed to do that, snapshots included: on the relational driver, whose feed was
+// never pruned, every dashboard view read every product save ever made.
+const { items: changes } = await LocalDB.getContentChangesPage({ limit: 6, snapshots: false });
+
+const t = Astro.locals.t;
+const uiLocale = Astro.locals.uiLocale || 'en';
+
+/**
+ * Commerce first, for the people who run a shop.
+ *
+ * A `manager` on an optician's install opened the dashboard and was shown blog
+ * statistics — total posts, published, views — as the headline. Those are the
+ * right numbers for a publisher and the wrong ones for someone whose job is
+ * orders and stock, and on a live shop they were reading demo seed content.
+ *
+ * Fetched only when the role may READ commerce: an `author` has no business
+ * pulling the order book to render a card they will not be shown, and the cost
+ * of the query should follow the permission.
+ */
+const showCommerce = canReadCommerce(Astro.locals.user?.role) && await isCommerceEnabled();
+const orders = showCommerce ? await LocalDB.getOrders() : [];
+const productList = showCommerce ? await LocalDB.getProducts() : [];
+const openOrders = orders.filter((o) => o.status === 'pending' || o.status === 'processing').length;
+// Paid only. Counting unpaid orders as revenue overstates the takings, and a
+// dashboard that flatters is one nobody can plan from.
+const paidRevenueCents = orders
+  .filter((o) => (o.payment_status ?? 'unpaid') === 'paid')
+  .reduce((sum, o) => sum + (o.total_cents ?? 0), 0);
+const outOfStock = productList.filter((p) => !p.in_stock).length;
+// The hardcoded el-GR here was one of five, and disagreed with the sale
+// email's formatMoney — the screen and the receipt stated the same total two
+// ways. The locale now follows the staff member reading it.
+const adminLocale = Astro.locals.uiLocale ?? undefined;
+const money = (cents: number) => formatMoney(cents, { locale: adminLocale });
+
+const totalPosts = posts.length;
+const publishedPosts = posts.filter(p => p.status === 'published').length;
+const draftPosts = posts.filter(p => p.status === 'draft').length;
+const totalViews = posts.reduce((acc, p) => acc + (p.views || 0), 0);
+
+function fmtViews(n: number) {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return String(n);
+}
+
+const recentPosts = [...posts]
+  .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+  .slice(0, 5);
+
+function timeAgo(iso: string) {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const min = Math.floor(diffMs / 60_000);
+  if (min < 1) return t('admin.dashboard.time.justNow');
+  if (min < 60) return t('admin.dashboard.time.minutes', undefined, { count: min });
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return t('admin.dashboard.time.hours', undefined, { count: hr });
+  const day = Math.floor(hr / 24);
+  if (day < 30) return t('admin.dashboard.time.days', undefined, { count: day });
+  // The admin's language, not the server's: a date rendered as 8/26/2026 for a
+  // reader whose every other label is Greek is a bug they cannot report.
+  return new Date(iso).toLocaleDateString(uiLocale);
+}
+
+/**
+ * The display name of an entity type.
+ *
+ * `EntityType` is an open union — a plugin can record a change against a type
+ * this catalogue has never heard of — so a missing key falls back to the type's
+ * own name rather than rendering the key. `t()` returns the key when nothing is
+ * translated, which is what makes that check possible.
+ */
+function entityLabel(type: string) {
+  const camel = String(type).replace(/-([a-z])/g, (_m, c: string) => c.toUpperCase());
+  const key = `admin.dashboard.entity.${camel}`;
+  const label = t(key);
+  return label === key ? type.charAt(0).toUpperCase() + type.slice(1) : label;
+}
+
+const recentActivity = changes
+  .slice(0, 6)
+  .map(c => {
+    // One sentence per verb with the entity interpolated into it. Composing
+    // `${noun} ${verb}` in English order cannot be translated into a language
+    // that puts the verb first — Greek reads "Δημιουργήθηκε άρθρο".
+    const actionKey = c.action === 'create' ? 'created' : c.action === 'update' ? 'updated' : 'deleted';
+    const color =
+      c.action === 'create' ? 'bg-green-500' :
+      c.action === 'update' ? 'bg-blue-500' :
+      'bg-red-500';
+    return {
+      color,
+      text: t(`admin.dashboard.activity.${actionKey}`, { entity: entityLabel(c.entity_type) }),
+      when: timeAgo(c.timestamp),
+    };
+  });
+
+/**
+ * The status badge's LABEL.
+ *
+ * The badge colour and this label are both derived from `post.status`; nothing
+ * ever matches on the label, so translating it cannot change which badge a post
+ * gets. A status with no key — one a plugin added — keeps its own name.
+ */
+const POST_STATUS_KEYS: Record<string, string> = {
+  published: 'admin.dashboard.status.published',
+  draft: 'admin.dashboard.status.draft',
+  scheduled: 'admin.dashboard.status.scheduled',
+  trashed: 'admin.dashboard.status.trashed',
+};
+function statusLabel(status: string) {
+  const key = POST_STATUS_KEYS[status];
+  if (!key) return status.charAt(0).toUpperCase() + status.slice(1);
+  return t(key);
+}
+
+/*
+ * What needs attention.
+ *
+ * Computed from rows THIS PAGE HAS ALREADY LOADED — posts, orders, products —
+ * plus one settings read and the schema version. No check issues a query of
+ * its own: this is the screen an operator opens most, and it already reads six
+ * tables to produce four numbers.
+ *
+ * Wrapped, because an advisory panel must never be the reason a dashboard
+ * 500s. `runAttention` already swallows a throwing CHECK; this guards the two
+ * reads feeding it.
+ */
+const attention = await (async () => {
+  try {
+    const [settingRows, schemaVersion] = await Promise.all([
+      LocalDB.getSettings().catch(() => []),
+      LocalDB.getSchemaVersion().catch(() => null),
+    ]);
+    const settings = settingsMap(settingRows as never);
+    return runAttention({
+      settings,
+      schema: typeof schemaVersion === 'number'
+        ? { current: schemaVersion, latest: LATEST_SCHEMA_VERSION }
+        : undefined,
+      products: productList,
+      orders,
+      posts,
+      commerceEnabled: showCommerce,
+      role: Astro.locals.user?.role,
+      // Astro's build-time SITE_URL, the second step of site-url.ts's precedence.
+      buildSiteUrl: Astro.site ? String(Astro.site) : null,
+      // The verdict /api/health/deep reports, from the same pure function:
+      // would a paying buyer be sent back to a page this CMS does not have?
+      paymentReturnUrls: returnUrlVerdict({
+        onlineProviders: enabledProviders(process.env as Record<string, string | undefined>).map((p) => p.id),
+        siteUrlSetting: settings.site_url,
+        siteUrlEnv: Astro.site ?? process.env.SITE_URL,
+        publicSiteUrl: settings.public_site_url,
+        requestOrigin: Astro.url.origin,
+      }),
+    });
+  } catch {
+    return [];
+  }
+})();
+
+/**
+ * How a severity looks.
+ *
+ * Derived from the card, never chosen at the call site — the badge, the border
+ * and the label all come from one place, so a card cannot be red with a
+ * reassuring label.
+ */
+const SEVERITY_STYLE = {
+  broken: { wrap: 'border-red-200 bg-red-50', dot: 'bg-red-500', label: 'admin.attention.broken' },
+  unfinished: { wrap: 'border-amber-200 bg-amber-50', dot: 'bg-amber-500', label: 'admin.attention.unfinished' },
+  'worth-knowing': { wrap: 'border-gray-200 bg-white', dot: 'bg-gray-400', label: 'admin.attention.worthKnowing' },
+} as const;
+
+const me = Astro.locals.user;
+let myName = t('admin.dashboard.defaultUserName');
+if (me) {
+  const u = await LocalDB.getUser(me.id);
+  if (u?.name) myName = u.name;
+}
+
+const adminUser = me ? await LocalDB.getUser(me.id) : null;
+let defaultPwd = false;
+if (adminUser?.email === seedAdminEmail() && adminUser.password_hash && adminUser.password_salt) {
+  const { verifyPassword } = await import('../../lib/auth');
+  defaultPwd = await verifyPassword('admin', adminUser.password_hash, adminUser.password_salt);
+}
+---
+
+<AdminLayout title={t('admin.dashboard.title')}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    {defaultPwd && (
+      <div class="mb-6 px-4 py-3 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 text-sm">
+        {/* The account name and the path are values, not labels: they stay in
+            English, and the sentence is split so that every language ends AT
+            the link instead of having to wrap around it. */}
+        <strong>{t('admin.dashboard.defaultPasswordTitle')}</strong> {t('admin.dashboard.defaultPasswordBefore')} <code>{seedAdminEmail()}</code> {t('admin.dashboard.defaultPasswordAfter')}
+        <a href="/admin/profile" class="underline font-medium ml-1">/admin/profile</a>
+      </div>
+    )}
+    <!-- Welcome Section -->
+    <div class="mb-8">
+      <h1 class="text-3xl font-bold text-gray-900">{t('admin.dashboard.welcome', { name: myName })}</h1>
+      <p class="text-gray-600 mt-2">{t('admin.dashboard.subtitle')}</p>
+    </div>
+
+    {/*
+      What needs attention — above the numbers, because a number nobody has to
+      act on is less urgent than a scheduled post that never published.
+
+      A shop with nothing wrong says so, rather than rendering an empty gap or
+      inventing a task to fill it.
+    */}
+    <section class="mb-8" aria-labelledby="ab-attention-heading">
+      <h2 id="ab-attention-heading" class="sr-only">{t('admin.attention.heading')}</h2>
+      {attention.length === 0 ? (
+        <p class="text-sm text-gray-500 border border-gray-200 rounded-lg px-4 py-3 bg-white">
+          {t('admin.attention.allClear')}
+        </p>
+      ) : (
+        <ul class="space-y-3">
+          {attention.map((card) => (
+            <li class={`border rounded-lg px-4 py-3 flex items-start gap-3 ${SEVERITY_STYLE[card.severity].wrap}`}>
+              <span class={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${SEVERITY_STYLE[card.severity].dot}`} aria-hidden="true"></span>
+              <div class="min-w-0 flex-1">
+                <p class="font-medium text-gray-900">
+                  {/* The severity is stated in WORDS as well as colour — a red
+                      dot alone is not information for a reader who cannot see it. */}
+                  <span class="sr-only">{t(SEVERITY_STYLE[card.severity].label)}: </span>
+                  {t(`admin.attention.${card.id}.title`, card.params)}
+                </p>
+                <p class="text-sm text-gray-600 mt-0.5">{t(`admin.attention.${card.id}.body`, card.params)}</p>
+              </div>
+              <a
+                href={card.action.href}
+                class="shrink-0 text-sm font-medium text-blue-700 hover:text-blue-900 underline decoration-blue-300 underline-offset-2"
+              >{t(`admin.attention.${card.id}.action`, card.params)}</a>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+
+    {showCommerce && (
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        <a href="/admin/orders" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 hover:border-blue-300 transition-colors">
+          <p class="text-sm font-medium text-gray-500">{t('admin.dashboard.openOrders')}</p>
+          <p class="text-2xl font-bold text-gray-900">{openOrders}</p>
+          <p class="mt-1 text-sm text-gray-500">{t('admin.dashboard.ordersTotal', { count: orders.length })}</p>
+        </a>
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <p class="text-sm font-medium text-gray-500">{t('admin.dashboard.revenuePaid')}</p>
+          <p class="text-2xl font-bold text-gray-900">{money(paidRevenueCents)}</p>
+          <p class="mt-1 text-sm text-gray-500">{t('admin.dashboard.revenuePaidHint')}</p>
+        </div>
+        <a href="/admin/products" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 hover:border-blue-300 transition-colors">
+          <p class="text-sm font-medium text-gray-500">{t('admin.dashboard.products')}</p>
+          <p class="text-2xl font-bold text-gray-900">{productList.length}</p>
+          <p class="mt-1 text-sm text-gray-500">{t('admin.dashboard.productsHint')}</p>
+        </a>
+        <a href="/admin/products" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 hover:border-blue-300 transition-colors">
+          <p class="text-sm font-medium text-gray-500">{t('admin.dashboard.outOfStock')}</p>
+          <p class={`text-2xl font-bold ${outOfStock > 0 ? 'text-amber-600' : 'text-gray-900'}`}>{outOfStock}</p>
+          <p class="mt-1 text-sm text-gray-500">{outOfStock > 0 ? t('admin.dashboard.needsRestocking') : t('admin.dashboard.allInStock')}</p>
+        </a>
+      </div>
+    )}
+
+    <!-- Stats Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+      <!-- Total Posts -->
+      <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div class="flex items-center">
+          <div class="flex-shrink-0">
+            <div class="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
+              <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+              </svg>
+            </div>
+          </div>
+          <div class="ml-4">
+            <p class="text-sm font-medium text-gray-500">{t('admin.dashboard.totalPosts')}</p>
+            <p class="text-2xl font-bold text-gray-900">{totalPosts}</p>
+          </div>
+        </div>
+        {isAdmin && (
+          <div class="mt-4">
+            <div class="flex items-center text-sm">
+              {/* Hidden rather than zeroed for non-admins: "0 authors" is a
+                  false statement, and a wrong number is worse than none. */}
+              <span class="text-gray-500">{t('admin.dashboard.authors', undefined, { count: users.length })}</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <!-- Published Posts -->
+      <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div class="flex items-center">
+          <div class="flex-shrink-0">
+            <div class="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center">
+              <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+            </div>
+          </div>
+          <div class="ml-4">
+            <p class="text-sm font-medium text-gray-500">{t('admin.dashboard.published')}</p>
+            <p class="text-2xl font-bold text-gray-900">{publishedPosts}</p>
+          </div>
+        </div>
+        <div class="mt-4">
+          <div class="flex items-center text-sm">
+            <span class="text-gray-500">{t('admin.dashboard.publishedShare', { percent: totalPosts ? Math.round((publishedPosts / totalPosts) * 100) : 0 })}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Draft Posts -->
+      <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div class="flex items-center">
+          <div class="flex-shrink-0">
+            <div class="w-8 h-8 bg-yellow-100 rounded-lg flex items-center justify-center">
+              <svg class="w-5 h-5 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z"/>
+              </svg>
+            </div>
+          </div>
+          <div class="ml-4">
+            <p class="text-sm font-medium text-gray-500">{t('admin.dashboard.drafts')}</p>
+            <p class="text-2xl font-bold text-gray-900">{draftPosts}</p>
+          </div>
+        </div>
+        <div class="mt-4">
+          <div class="flex items-center text-sm">
+            <span class="text-gray-500">{t('admin.dashboard.mediaFiles', undefined, { count: media.length })}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Total Views -->
+      <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div class="flex items-center">
+          <div class="flex-shrink-0">
+            <div class="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center">
+              <svg class="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+              </svg>
+            </div>
+          </div>
+          <div class="ml-4">
+            <p class="text-sm font-medium text-gray-500">{t('admin.dashboard.totalViews')}</p>
+            <p class="text-2xl font-bold text-gray-900">{fmtViews(totalViews)}</p>
+          </div>
+        </div>
+        <div class="mt-4">
+          <div class="flex items-center text-sm">
+            <span class="text-gray-500">{t('admin.dashboard.viewsHint')}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Content Grid -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <!-- Recent Posts -->
+      <div class="lg:col-span-2">
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200">
+          <div class="px-6 py-4 border-b border-gray-200">
+            <div class="flex items-center justify-between">
+              <h2 class="text-lg font-semibold text-gray-900">{t('admin.dashboard.recentPosts')}</h2>
+              <a href="/admin/posts" class="text-blue-600 hover:text-blue-700 text-sm font-medium">
+                {t('admin.dashboard.viewAll')}
+              </a>
+            </div>
+          </div>
+          <div class="divide-y divide-gray-200">
+            {recentPosts.length === 0 && (
+              <div class="px-6 py-8 text-center text-sm text-gray-500">
+                {t('admin.dashboard.noPosts')} <a href="/admin/posts/new" class="text-blue-600 hover:underline">{t('admin.dashboard.createFirstPost')}</a>
+              </div>
+            )}
+            {recentPosts.map((post) => {
+              const statusBadge =
+                post.status === 'published' ? 'bg-green-100 text-green-800'
+                : post.status === 'scheduled' ? 'bg-blue-100 text-blue-800'
+                : post.status === 'trashed' ? 'bg-red-100 text-red-800'
+                : 'bg-yellow-100 text-yellow-800';
+              return (
+                <a href={`/admin/posts/${post.id}/edit`} class="block px-6 py-4 hover:bg-gray-50 transition-colors">
+                  <div class="flex items-center justify-between">
+                    <div class="flex-1 min-w-0">
+                      <h3 class="text-sm font-medium text-gray-900 mb-1 truncate">{post.title}</h3>
+                      <div class="flex items-center text-xs text-gray-500 space-x-2">
+                        <span>{timeAgo(post.created_at)}</span>
+                        <span>•</span>
+                        <span>{t('admin.dashboard.postViews', undefined, { count: post.views || 0 })}</span>
+                      </div>
+                    </div>
+                    <span class={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${statusBadge}`}>
+                      {statusLabel(post.status)}
+                    </span>
+                  </div>
+                </a>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <!-- Sidebar -->
+      <div class="space-y-6">
+        <!-- Quick Actions -->
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <h3 class="text-lg font-semibold text-gray-900 mb-4">{t('admin.dashboard.quickActions')}</h3>
+          <div class="space-y-3">
+            <a href="/admin/posts/new" class="flex items-center p-3 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors duration-150 group">
+              <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center mr-3">
+                <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>
+                </svg>
+              </div>
+              <span class="text-sm font-medium text-gray-900 group-hover:text-blue-700">{t('admin.dashboard.newPost')}</span>
+            </a>
+            
+            <a href="/admin/media" class="flex items-center p-3 bg-green-50 hover:bg-green-100 rounded-lg transition-colors duration-150 group">
+              <div class="w-8 h-8 bg-green-600 rounded-lg flex items-center justify-center mr-3">
+                <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                </svg>
+              </div>
+              <span class="text-sm font-medium text-gray-900 group-hover:text-green-700">{t('admin.dashboard.uploadMedia')}</span>
+            </a>
+            
+            <a href="/admin/categories" class="flex items-center p-3 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors duration-150 group">
+              <div class="w-8 h-8 bg-purple-600 rounded-lg flex items-center justify-center mr-3">
+                <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/>
+                </svg>
+              </div>
+              <span class="text-sm font-medium text-gray-900 group-hover:text-purple-700">{t('admin.dashboard.manageCategories')}</span>
+            </a>
+          </div>
+        </div>
+
+        <!-- Recent Activity -->
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <h3 class="text-lg font-semibold text-gray-900 mb-4">{t('admin.dashboard.recentActivity')}</h3>
+          <div class="space-y-4">
+            {recentActivity.length === 0 && (
+              <p class="text-sm text-gray-500">{t('admin.dashboard.noActivity')}</p>
+            )}
+            {recentActivity.map((a) => (
+              <div class="flex items-start space-x-3">
+                <div class={`w-2 h-2 ${a.color} rounded-full mt-2`}></div>
+                <div class="flex-1">
+                  <p class="text-sm text-gray-900">{a.text}</p>
+                  <p class="text-xs text-gray-500">{a.when}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  // Set page title in header
+  document.addEventListener('DOMContentLoaded', () => {
+    const pageTitle = document.getElementById('page-title');
+    if (pageTitle) {
+      pageTitle.textContent = window.t('admin.dashboard.title');
+    }
+  });
+</script>

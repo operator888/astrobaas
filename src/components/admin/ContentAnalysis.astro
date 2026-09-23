@@ -1,0 +1,184 @@
+---
+/**
+ * The content-analysis panel — the green dot (C-13).
+ *
+ * ## One component, both editors
+ *
+ * `posts/new.astro` and `posts/[id]/edit.astro` are separate files that already
+ * duplicate their SEO block and their character counters. A panel written into
+ * each would be the third and fourth copies, and the first fix after that would
+ * land in one of them — the "fixed one of several" shape this codebase keeps
+ * finding.
+ *
+ * ## The analysis runs in the BROWSER
+ *
+ * `lib/content-analysis.ts` is pure, so the script below imports it and re-runs
+ * it on every keystroke: no endpoint, nothing to rate-limit, no round trip, and
+ * it works while the post is still a draft that has never been saved.
+ *
+ * ## Tailwind utilities, complete literals
+ *
+ * The verdict colours are written out per branch rather than composed, because
+ * Tailwind scans source TEXT — a computed `bg-${v}-500` is not in the stylesheet
+ * and the dot renders invisible in production while looking right in dev.
+ */
+interface Props {
+  /** Element ids the panel reads, so the two editors can differ. */
+  contentSelector: string;
+  titleId?: string;
+  metaTitleId?: string;
+  metaDescriptionId?: string;
+  excerptId?: string;
+  slugId?: string;
+  keyphraseId?: string;
+  noindexId?: string;
+  /** Content language of the record, for the readability half. */
+  locale?: string;
+  /** Site-wide discourage_indexing, so the panel can say why it is grey. */
+  siteNoindex?: boolean;
+}
+
+const {
+  contentSelector,
+  titleId = 'post-title',
+  metaTitleId = 'post-meta-title',
+  metaDescriptionId = 'post-meta-description',
+  excerptId = 'post-excerpt',
+  slugId = 'post-slug',
+  keyphraseId = 'post-keyphrase',
+  noindexId = 'post-noindex',
+  locale = 'en',
+  siteNoindex = false,
+} = Astro.props as Props;
+
+const config = {
+  contentSelector, titleId, metaTitleId, metaDescriptionId,
+  excerptId, slugId, keyphraseId, noindexId, locale, siteNoindex,
+};
+---
+
+<section
+  class="bg-white border border-gray-200 rounded-lg p-4"
+  data-content-analysis
+  data-config={JSON.stringify(config)}
+>
+  <div class="flex items-center justify-between gap-3 mb-3">
+    <h3 class="text-sm font-semibold text-gray-900">Content analysis</h3>
+    <div class="flex items-center gap-2">
+      <span data-ca-score class="text-sm tabular-nums text-gray-500"></span>
+      <span data-ca-dot class="inline-block w-3 h-3 rounded-full bg-gray-300" aria-hidden="true"></span>
+    </div>
+  </div>
+
+  <p data-ca-stats class="text-xs text-gray-500 mb-3"></p>
+
+  <ul data-ca-checks class="space-y-1.5 text-xs"></ul>
+</section>
+
+<script>
+  import { analyzeContent } from '../../lib/content-analysis';
+
+  // `any` accessors on purpose. Astro type-checks this block, and every read
+  // below is of a form control whose concrete element type varies by field
+  // (input, textarea, contenteditable div) — narrowing each one would be a dozen
+  // casts to say what `.value` already says.
+  const el = (id: string): any => (id ? document.getElementById(id) : null);
+  const q1 = (root: Element, sel: string): any => root.querySelector(sel);
+
+  document.querySelectorAll('[data-content-analysis]').forEach((root: any) => {
+    const cfg = JSON.parse(root.dataset.config || '{}');
+    const dot = q1(root, '[data-ca-dot]');
+    const scoreEl = q1(root, '[data-ca-score]');
+    const statsEl = q1(root, '[data-ca-stats]');
+    const list = q1(root, '[data-ca-checks]');
+    if (!dot || !scoreEl || !statsEl || !list) return;
+
+    // Complete literal strings per branch — Tailwind scans source text, so a
+    // composed `bg-${v}-500` is absent from the stylesheet and the dot renders
+    // invisible in a production build while looking correct in dev.
+    const DOT: Record<string, string> = {
+      green: 'inline-block w-3 h-3 rounded-full bg-green-500',
+      amber: 'inline-block w-3 h-3 rounded-full bg-amber-500',
+      red: 'inline-block w-3 h-3 rounded-full bg-red-500',
+      grey: 'inline-block w-3 h-3 rounded-full bg-gray-300',
+    };
+    const MARK: Record<string, string> = {
+      good: 'text-green-600',
+      improve: 'text-amber-600',
+      bad: 'text-red-600',
+      unknown: 'text-gray-400',
+    };
+    const GLYPH: Record<string, string> = { good: '\u25CF', improve: '\u25CF', bad: '\u25CF', unknown: '\u25CB' };
+
+    function facts() {
+      const content: any = document.querySelector(cfg.contentSelector);
+      return {
+        title: el(cfg.titleId)?.value || '',
+        meta_title: el(cfg.metaTitleId)?.value || '',
+        meta_description: el(cfg.metaDescriptionId)?.value || '',
+        excerpt: el(cfg.excerptId)?.value || '',
+        slug: el(cfg.slugId)?.value || '',
+        focus_keyphrase: el(cfg.keyphraseId)?.value || '',
+        // innerHTML, not textContent: the checks are ABOUT markup — headings,
+        // links, images — and textContent would report every article as having
+        // none of them.
+        content: content ? (content.innerHTML ?? content.value ?? '') : '',
+        locale: cfg.locale,
+        noindex: !!el(cfg.noindexId)?.checked,
+        siteNoindex: !!cfg.siteNoindex,
+      };
+    }
+
+    function render() {
+      const r = analyzeContent(facts());
+      dot.className = DOT[r.dot] || DOT.grey;
+      scoreEl.textContent = r.dot === 'grey' ? '' : `${r.score}%`;
+      statsEl.textContent =
+        `${r.stats.words} words \u00B7 ${r.stats.headings} headings \u00B7 ${r.stats.links} links \u00B7 ${r.stats.images} images`;
+
+      list.replaceChildren(...r.checks.map((c) => {
+        const li = document.createElement('li');
+        li.className = 'flex items-start gap-2';
+        const mark = document.createElement('span');
+        mark.className = MARK[c.verdict] || MARK.unknown;
+        mark.setAttribute('aria-hidden', 'true');
+        mark.textContent = GLYPH[c.verdict] || GLYPH.unknown;
+        const span = document.createElement('span');
+        span.className = 'text-gray-600';
+        // textContent: a check's text quotes the author's own title back.
+        span.textContent = c.text;
+        li.append(mark, span);
+        return li;
+      }));
+    }
+
+    // Debounced, because this runs on every keystroke in a contenteditable and
+    // the analysis walks the whole document. 250ms is under the threshold where
+    // a panel feels stale and well over the cost of the walk.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      clearTimeout(timer);
+      timer = setTimeout(render, 250);
+    };
+    // `input` on the form catches the fields AND bubbles from the contenteditable
+    // body — the same event the autosave already listens to.
+    (root.closest('form') || document).addEventListener('input', schedule);
+    document.querySelector(cfg.contentSelector)?.addEventListener('input', schedule);
+
+    // Render on DOMContentLoaded as well as now.
+    //
+    // Both this and RichTextEditor's own script are modules, so their execution
+    // order is not guaranteed — and if this one wins, the contenteditable is
+    // still empty and the panel describes a 400-word article as having no
+    // content, no headings and no links until the author touches a key. An
+    // author who opens a finished post to check it sees a red dot and a list of
+    // complaints about a page that is fine.
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', render, { once: true });
+    }
+    // ...and once more after paint, because the editor populates its surface in
+    // its own module body, which can still be after DOMContentLoaded.
+    requestAnimationFrame(render);
+    render();
+  });
+</script>

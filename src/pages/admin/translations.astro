@@ -1,0 +1,173 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { canOpenAdminPage } from '../../lib/admin-access';
+import { isMultilingual, locales } from '../../lib/i18n';
+
+/**
+ * The translation backlog, in one place.
+ *
+ * A multilingual site keeps its translations in two different shapes for good
+ * reasons — one record per language for articles, one record with a sidecar
+ * for products — and the consequence is that "what is missing in German?"
+ * cannot be answered by looking at either one. So it does not get asked, and
+ * shops ship with half-translated catalogues.
+ *
+ * The row that matters most is the one nothing else reports: a product with a
+ * translated NAME and an untranslated DESCRIPTION. It has a German entry, so
+ * every check that looks for the locale key calls it done, and the page ships
+ * with English body text under a German heading.
+ */
+const user = Astro.locals.user;
+if (!canOpenAdminPage('/admin/translations', user?.role)) {
+  return Astro.redirect('/admin');
+}
+const multilingual = isMultilingual();
+const configured = locales();
+---
+
+<AdminLayout title="Translations">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">Translations</h1>
+
+    {!multilingual ? (
+      <p class="text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-xl p-4">
+        This site runs in one language ({configured[0]}). Set <span class="font-mono text-xs">SITE_LOCALES</span>
+        to something like <span class="font-mono text-xs">el,en,de</span> and restart to add more.
+      </p>
+    ) : (
+      <>
+        <p class="text-sm text-gray-500 mb-6">
+          What is still to translate, across both the articles and the catalogue. Articles are a
+          separate record per language; products are one record with the translations attached,
+          so the two are counted differently and shown together.
+        </p>
+
+        <section class="bg-white border border-gray-200 rounded-xl p-6 mb-6">
+          <h2 class="text-lg font-semibold text-gray-900 mb-4">Articles and pages</h2>
+          <div id="post-gaps" class="space-y-4 text-sm text-gray-500">Loading…</div>
+        </section>
+
+        <section class="bg-white border border-gray-200 rounded-xl p-6 mb-6">
+          <h2 class="text-lg font-semibold text-gray-900 mb-4">Products</h2>
+          <div id="product-gaps" class="space-y-4 text-sm text-gray-500">Loading…</div>
+        </section>
+
+        <section id="partial-box" class="hidden bg-amber-50 border border-amber-200 rounded-xl p-6">
+          <h2 class="text-lg font-semibold text-amber-900 mb-1">Half translated</h2>
+          <p class="text-sm text-amber-900 mb-4">
+            These products have a translation for the language but not for every field — so the
+            page shows a translated heading over untranslated text, and nothing else reports it.
+          </p>
+          <ul id="partial-list" class="text-sm text-amber-900 list-disc pl-5 space-y-1"></ul>
+        </section>
+
+        <p id="status-error" class="text-sm text-red-600 mt-4 m-0"></p>
+      </>
+    )}
+  </div>
+</AdminLayout>
+
+
+
+<script>
+  (() => {
+    const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+    if (!$('post-gaps')) return;
+
+    /** One locale's row: a bar, the numbers, and a few titles to start on. */
+    function row(gap: any, noun: string): HTMLElement {
+      const wrap = document.createElement('div');
+
+      const head = document.createElement('div');
+      head.className = 'flex items-baseline justify-between gap-3 mb-1';
+      const name = document.createElement('span');
+      name.className = 'font-medium text-gray-900';
+      name.textContent = gap.locale;
+      const count = document.createElement('span');
+      count.className = 'text-sm text-gray-500';
+      count.textContent = gap.missing === 0
+        ? `all ${gap.present} ${noun} translated`
+        : `${gap.missing} of ${gap.missing + gap.present} ${noun} still to do (${gap.percent}%)`;
+      head.append(name, count);
+
+      // Tailwind utilities, NOT a scoped <style>. Astro compiles a scoped rule
+      // to `.bar[data-astro-cid-…]`, and an element from createElement carries
+      // no such attribute — so the rules never matched and this bar rendered
+      // with no track, no height and no colour. Utilities have no cid, and
+      // Tailwind does scan class names inside script string literals.
+      const bar = document.createElement('div');
+      bar.className = 'bg-gray-200 rounded-full h-2 overflow-hidden';
+      const fill = document.createElement('span');
+      fill.className = gap.percent === 100
+        ? 'block h-full bg-green-600'
+        : 'block h-full bg-blue-600';
+      // Width set from script rather than a style attribute: the production
+      // CSP has no 'unsafe-inline' for styles, so a `style="width:…"` in the
+      // markup is dropped and every bar renders empty.
+      fill.style.width = `${gap.percent}%`;
+      bar.appendChild(fill);
+
+      wrap.append(head, bar);
+
+      if (gap.examples?.length) {
+        const list = document.createElement('ul');
+        list.className = 'mt-2 text-sm text-gray-600 list-disc pl-5 space-y-0.5';
+        for (const e of gap.examples) {
+          const li = document.createElement('li');
+          li.textContent = e.title;
+          list.appendChild(li);
+        }
+        if (gap.missing > gap.examples.length) {
+          const more = document.createElement('li');
+          more.className = 'text-gray-400';
+          more.textContent = `…and ${gap.missing - gap.examples.length} more`;
+          list.appendChild(more);
+        }
+        wrap.appendChild(list);
+      }
+      return wrap;
+    }
+
+    function fill(container: HTMLElement, gaps: any[], noun: string) {
+      container.replaceChildren();
+      if (!gaps.length) {
+        container.textContent = 'Nothing to compare — only one language is configured.';
+        return;
+      }
+      for (const g of gaps) container.appendChild(row(g, noun));
+    }
+
+    (async () => {
+      try {
+        const res = await fetch('/api/i18n/status', { headers: { Accept: 'application/json' } });
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          $('status-error').textContent = json?.error?.message || `Could not load (${res.status})`;
+          return;
+        }
+        const d = json.data;
+        fill($('post-gaps'), d.posts, 'articles');
+        fill($('product-gaps'), d.products, 'products');
+
+        const partial = d.partial ?? [];
+        if (partial.length) {
+          $('partial-box').classList.remove('hidden');
+          const list = $('partial-list');
+          list.replaceChildren();
+          for (const p of partial.slice(0, 50)) {
+            const li = document.createElement('li');
+            li.textContent = `${p.title} — ${p.locale} is missing: ${p.missingFields.join(', ')}`;
+            list.appendChild(li);
+          }
+          if (partial.length > 50) {
+            const li = document.createElement('li');
+            li.textContent = `…and ${partial.length - 50} more`;
+            list.appendChild(li);
+          }
+        }
+      } catch (err) {
+        $('status-error').textContent = (err as Error).message || 'Could not reach the server';
+      }
+    })();
+  })();
+</script>

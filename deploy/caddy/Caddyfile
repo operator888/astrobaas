@@ -1,0 +1,249 @@
+# AstroBaaS behind Caddy.
+#
+# The nginx vhost (deploy/nginx/astrobaas.conf) is the reference deployment and
+# carries the fuller commentary; this is the same shape in Caddy's idiom.
+#
+# ## The body-limit difference, which cuts the other way
+#
+# nginx defaults to a 1 MB request body and refuses everything larger, so the
+# nginx risk is a 413 on a route you forgot. **Caddy sets no request-body limit
+# at all by default**, so the Caddy risk is the opposite one: an unbounded
+# upload occupying memory and disk. Nothing here is needed to make video work —
+# it is needed to stop an authenticated user, or a bug, from sending 4 GB.
+#
+# So every `request_body max_size` below is a CEILING chosen to match the app's
+# own, never a permission the app needs. Each is the app's ceiling rounded UP to
+# the next megabyte; rounding down would refuse a request the app accepts, at
+# the layer least able to explain why.
+#
+# tests/body-limits.test.mjs reads this file and fails the build if any of these
+# sits below the app's own limit, so raising a cap in the app tells you to come
+# back here.
+#
+# Replace cms.example.com and the /var/www path. Caddy obtains and renews TLS
+# certificates on its own; there is no certbot step.
+#
+# Validate before reloading:  caddy validate --config /etc/caddy/Caddyfile
+#
+# ## Rate limiting: core Caddy has none
+#
+# The nginx vhost limits requests per address at the edge (a flood control,
+# plus a tighter zone for /api/auth/login). Stock Caddy CANNOT do that — there
+# is no rate-limit directive in the standard build — so behind this file the
+# app's own limiter is the only one. That limiter answers 429 with RateLimit-*
+# headers and is enough for a single shop against ordinary abuse, but every
+# rejected request still costs a Node round-trip.
+#
+# For an edge limit, build Caddy with the third-party module
+# github.com/mholt/caddy-ratelimit:
+#
+#   xcaddy build --with github.com/mholt/caddy-ratelimit
+#
+# and uncomment the `order` line in the global block at the top and the
+# `rate_limit` block inside the site. The numbers mirror the nginx zones
+# (deploy/nginx/astrobaas-zones.conf), where the reasoning is written down —
+# in particular why the general limit has to allow ~1000 requests in a burst.
+#
+# ## Behind Cloudflare (or any CDN / load balancer)
+#
+# Every request then arrives from the CDN's address. Caddy must be told which
+# peers to trust, and — this is the part that is easy to miss — the app reads
+# the RIGHT-most X-Forwarded-For entry. Caddy appends the CDN edge's address
+# there, so without the `header_up` line in the proxy blocks the app sees
+# Cloudflare as every client: one shared rate-limit bucket for the whole
+# region, and a login throttle that locks everybody out together. See the
+# global block below. The ranges change; take them from
+# https://www.cloudflare.com/ips-v4 and /ips-v6.
+
+# {
+# 	# Only with the caddy-ratelimit module built in (see above).
+# 	order rate_limit before basic_auth
+#
+# 	servers {
+# 		# Behind Cloudflare: believe CF-Connecting-IP only from its ranges.
+# 		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 2400:cb00::/32
+# 		client_ip_headers CF-Connecting-IP
+# 	}
+# }
+#
+# ...and, behind a CDN, in EVERY `reverse_proxy` block below:
+#
+# 	reverse_proxy 127.0.0.1:3002 {
+# 		header_up X-Forwarded-For {client_ip}
+# 	}
+
+cms.example.com {
+	encode zstd gzip
+
+	# --- Edge rate limits (caddy-ratelimit module only; see the header) -----
+	#
+	# rate_limit {
+	# 	zone login {
+	# 		match {
+	# 			path /api/auth/login
+	# 		}
+	# 		key {client_ip}
+	# 		events 30
+	# 		window 1m
+	# 	}
+	# 	zone rare {
+	# 		match {
+	# 			path /api/backup/import /api/import/wordpress /healthz
+	# 		}
+	# 		key {client_ip}
+	# 		events 10
+	# 		window 1m
+	# 	}
+	# 	zone general {
+	# 		key {client_ip}
+	# 		events 3000
+	# 		window 1m
+	# 	}
+	# }
+
+	# --- Large bodies ------------------------------------------------------
+	#
+	# Order matters: Caddy evaluates matchers in the order written, and the
+	# first `handle` that matches wins. The default cap must come LAST.
+
+	@media_upload path /api/media/upload /api/media/replace
+	handle @media_upload {
+		# <- MAX_VIDEO_SIZE * 1.1 (src/lib/media/ingest.ts, MEDIA_MAX_VIDEO_MB)
+		request_body {
+			max_size 111MB
+		}
+		reverse_proxy 127.0.0.1:3002
+	}
+
+	@backup_import path /api/backup/import
+	handle @backup_import {
+		# <- MAX_ARCHIVE_BYTES * 1.1 (src/lib/backup/offsite.ts)
+		request_body {
+			max_size 282MB
+		}
+		reverse_proxy 127.0.0.1:3002
+	}
+
+	@wp_import path /api/import/wordpress
+	handle @wp_import {
+		# <- IMPORT_BODY_LIMIT (src/lib/import/limits.ts)
+		request_body {
+			max_size 26MB
+		}
+		reverse_proxy 127.0.0.1:3002
+	}
+
+	# The only large-body route that is not authenticated.
+	@form_upload path_regexp form_upload ^/api/forms/[^/]+/upload/?$
+	handle @form_upload {
+		# <- MAX_SUBMISSION_FILE_SIZE * 1.2 (src/lib/media/private-files.ts)
+		request_body {
+			max_size 6MB
+		}
+		reverse_proxy 127.0.0.1:3002
+	}
+
+	# --- Serving uploads ---------------------------------------------------
+	#
+	# IMAGES ONLY, and by extension, for the same reason as the nginx config:
+	# the app's own /uploads route decides Content-Type from a fixed allow-list
+	# and serves anything else as an attachment. Handing the whole directory to
+	# a static file server would serve an uploaded .html or .svg inline from
+	# this origin.
+	#
+	# The root MUST be the runtime uploads directory in shared/, never a
+	# release's dist/client/uploads — that is a build-time snapshot, and every
+	# file uploaded since the build would 404.
+	@upload_images path_regexp upload_images ^/uploads/.+\.(webp|avif|jpe?g|png|gif)$
+	handle @upload_images {
+		root * /var/www/cms-example-com/shared/data
+		# Uploaded filenames are content-addressed, so a URL can never mean
+		# different bytes — which is what makes `immutable` correct here.
+		header Cache-Control "public, max-age=31536000, immutable"
+		header X-Content-Type-Options "nosniff"
+		file_server {
+			# A file not yet on disk goes to the app rather than 404ing here.
+			pass_thru
+		}
+		reverse_proxy 127.0.0.1:3002
+	}
+
+	# --- Ops ---------------------------------------------------------------
+	#
+	# /metrics is unauthenticated by design (a scraper cannot hold a session).
+	# With METRICS_ENABLED=1 it must not be reachable from the internet: only
+	# a scraper on this host gets through. `remote_ip` is the TCP peer, which
+	# is what this needs — `client_ip` would believe a trusted proxy's header,
+	# and behind a CDN that is the visitor's claim, not this machine.
+	#
+	# /readyz is an orchestration signal nobody outside needs, and it reads
+	# storage on every call; deploy.sh asks the app directly on loopback. Add
+	# a load balancer's address to the matcher if one needs it.
+	@ops_local_only path /metrics /readyz
+	handle @ops_local_only {
+		@ops_remote not remote_ip 127.0.0.1 ::1
+		respond @ops_remote 403
+		request_body {
+			max_size 2MB
+		}
+		reverse_proxy 127.0.0.1:3002
+	}
+
+	# --- When the app is down ----------------------------------------------
+	#
+	# The page a visitor sees while the app is stopped or being deployed,
+	# served with 503 — never 200, which tells a crawler the holding page is
+	# the content now.
+	#
+	# Only for errors CADDY produced: 502 when the app refuses the connection,
+	# 504 when it times out. A 503 the APP sends (its own maintenance window,
+	# a failing deep health check, /readyz while it drains for a restart) is a
+	# response, not an error, and passes through untouched — which is what a
+	# deploy script reading the health check's JSON needs.
+	#
+	# deploy.sh ships the page to shared/maintenance/ with every release
+	# (npm run build:maintenance-page).
+	handle_errors {
+		@app_down expression `{err.status_code} in [502, 504]`
+		handle @app_down {
+			root * /var/www/cms-example-com/shared/maintenance
+			rewrite * /maintenance.html
+			header Cache-Control "no-store"
+			header Retry-After "120"
+			file_server {
+				status 503
+			}
+		}
+	}
+
+	# --- Everything else ---------------------------------------------------
+	handle {
+		# <- BODY_LIMIT_DEFAULT (src/lib/body-limits.ts). Ordinary JSON.
+		request_body {
+			max_size 2MB
+		}
+		reverse_proxy 127.0.0.1:3002
+	}
+
+	# The app sets HSTS, X-Frame-Options, Referrer-Policy, Permissions-Policy
+	# and a hash-based CSP on every response. Do NOT repeat them here: two
+	# conflicting CSP headers are intersected by the browser, which is how a
+	# working site stops loading its own scripts.
+
+	log {
+		output file /var/log/caddy/cms.example.com.log
+	}
+}
+
+# A 100 MB upload over a domestic connection takes minutes. Caddy's default
+# read timeout is generous, but if you have tightened it globally, this is the
+# knob that cuts an upload off part-way and leaves the editor with a failed
+# upload and no reason given.
+#
+# {
+# 	servers {
+# 		timeouts {
+# 			read_body 5m
+# 		}
+# 	}
+# }

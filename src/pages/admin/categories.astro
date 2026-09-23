@@ -1,0 +1,12 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import CategoryManager from '../../components/admin/CategoryManager.astro';
+
+const t = Astro.locals.t;
+---
+
+<AdminLayout title={t('admin.categories.pageTitle')}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <CategoryManager />
+  </div>
+</AdminLayout>

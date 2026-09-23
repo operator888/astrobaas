@@ -1,0 +1,138 @@
+---
+/**
+ * The cookie declaration, rendered.
+ *
+ * One component for the public page and the admin screen, because a declaration
+ * the operator reviews and a declaration the visitor reads must be the same
+ * document. Two renderers of one dataset is how a site ends up publishing a
+ * table its owner has never seen.
+ *
+ * Tailwind utilities only — no inline `style` and no scoped rule that a script
+ * would have to match. The production CSP has no `'unsafe-inline'` for styles,
+ * so a `style="…"` attribute here is dropped silently: correct under `astro dev`,
+ * wrong in production, and with nothing in the console either way.
+ */
+import type { CookieDeclaration, CookieDeclarationEntry } from '../../lib/cookie-declaration';
+
+interface Props {
+  declaration: CookieDeclaration;
+  /** Heading level to start at, so the admin can nest this under its own h1. */
+  headingClass?: string;
+}
+
+const { declaration, headingClass = 'text-lg font-semibold text-gray-900' } = Astro.props as Props;
+
+const CATEGORY_LABEL: Record<string, string> = {
+  necessary: 'Necessary',
+  preferences: 'Preferences',
+  analytics: 'Analytics',
+  marketing: 'Marketing',
+};
+
+// Tailwind scans source text for class names, so the mapping has to be written
+// out as literals. A computed `bg-${x}-100` is not in the stylesheet and the
+// badge silently renders unstyled.
+const CATEGORY_CLASS: Record<string, string> = {
+  necessary: 'bg-gray-100 text-gray-700',
+  preferences: 'bg-blue-50 text-blue-700',
+  analytics: 'bg-amber-50 text-amber-700',
+  marketing: 'bg-purple-50 text-purple-700',
+};
+
+function rows(list: CookieDeclarationEntry[]) {
+  return list;
+}
+---
+
+<section class="space-y-6">
+  <div>
+    <h2 class={headingClass}>Cookies this site sets</h2>
+    <p class="mt-1 text-sm text-gray-600 max-w-2xl">
+      Generated from this site's own configuration, not from a scan. A tool that is switched
+      off stops appearing here immediately, and one that is switched on appears without
+      anyone having to remember to update this page.
+    </p>
+  </div>
+
+  <div class="overflow-x-auto">
+    <table class="min-w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="text-left font-medium text-gray-700 px-3 py-2">Cookie</th>
+          <th class="text-left font-medium text-gray-700 px-3 py-2">Set by</th>
+          <th class="text-left font-medium text-gray-700 px-3 py-2">Category</th>
+          <th class="text-left font-medium text-gray-700 px-3 py-2">What it does</th>
+          <th class="text-left font-medium text-gray-700 px-3 py-2 whitespace-nowrap">Lasts</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-200 bg-white">
+        {rows(declaration.all).map((c) => (
+          <tr class="align-top">
+            <td class="px-3 py-2 font-mono text-xs text-gray-900 whitespace-nowrap">{c.name}</td>
+            <td class="px-3 py-2 text-gray-700 whitespace-nowrap">
+              {c.provider}
+              {!c.firstParty && <span class="block text-xs text-gray-500">third party</span>}
+            </td>
+            <td class="px-3 py-2">
+              <span class={`inline-block rounded px-2 py-0.5 text-xs font-medium ${CATEGORY_CLASS[c.category] ?? 'bg-gray-100 text-gray-700'}`}>
+                {CATEGORY_LABEL[c.category] ?? c.category}
+              </span>
+            </td>
+            <td class="px-3 py-2 text-gray-700 max-w-md">
+              {c.purpose}
+              {c.setWhen && <span class="block mt-1 text-xs text-gray-500">{c.setWhen}</span>}
+            </td>
+            <td class="px-3 py-2 text-gray-700 whitespace-nowrap">{c.lifetime}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+
+  {declaration.providers.length === 0 && (
+    <p class="text-sm text-gray-600">
+      No analytics or marketing tool is configured on this site, so the list above is
+      everything — all of it set by this site itself, none of it shared with anyone.
+    </p>
+  )}
+
+  {declaration.providers.some((p) => p.facts.cookieless) && (
+    <p class="text-sm text-gray-700">
+      <strong>Set no cookies at all:</strong>{' '}
+      {declaration.providers.filter((p) => p.facts.cookieless).map((p) => p.provider.label).join(', ')}.
+      These measure visits without storing anything in your browser, which is why they are
+      not in the table.
+    </p>
+  )}
+
+  {declaration.opaqueContainers.length > 0 && (
+    <p class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+      <strong>{declaration.opaqueContainers.join(', ')}</strong> is a container: it sets nothing by
+      itself, and everything it loads is configured inside it rather than here. This site cannot
+      see what that is, so any cookies it introduces have to be added to this page by hand.
+    </p>
+  )}
+
+  {declaration.incomplete && (
+    <p class="text-xs text-gray-500 max-w-2xl">
+      Where a third-party tool is listed, the cookies shown are the ones it is documented to set.
+      A vendor can add to its own list without telling us, so the vendor's own documentation is
+      linked below and is the authority on what it stores.
+    </p>
+  )}
+
+  {declaration.providers.filter((p) => p.facts.cookieDocsUrl || p.provider.helpUrl).length > 0 && (
+    <ul class="text-sm text-gray-600 space-y-1">
+      {declaration.providers.map((p) => (
+        <li>
+          <a
+            href={p.facts.cookieDocsUrl ?? p.provider.helpUrl}
+            rel="noopener noreferrer nofollow"
+            target="_blank"
+            class="text-blue-600 hover:underline"
+          >{p.provider.label} — what it stores</a>
+        </li>
+      ))}
+    </ul>
+  )}
+</section>

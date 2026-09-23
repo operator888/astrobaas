@@ -1,0 +1,315 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+
+/**
+ * Redirects and the dead-URL report on ONE screen.
+ *
+ * Deliberately together: the report is where an operator learns a URL is dead,
+ * and the redirect is the fix. Splitting them across two nav entries would put
+ * a page load between noticing the problem and fixing it, and the whole point
+ * of this feature is that the person who notices can fix it themselves.
+ */
+---
+
+<AdminLayout title="Redirects">
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">Redirects &amp; dead URLs</h1>
+    <p class="text-sm text-gray-500 mb-6">
+      Send old or mistyped addresses to the right page. Rules take effect immediately — no deploy.
+    </p>
+
+    <!-- Add a rule -->
+    <form id="rule-form" class="bg-white border border-gray-200 rounded-xl p-6 mb-8 grid gap-4 md:grid-cols-2">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="r-match">Old address</label>
+        <input id="r-match" name="match" required placeholder="/product-category/gyalia-iliou"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" />
+        <p class="text-xs text-gray-400 mt-1">
+          Exact <code>/old/page</code>, everything beneath <code>/old/*</code>,
+          or one wildcard segment <code>/shop/*/reviews</code>.
+        </p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="r-target">New address</label>
+        <input id="r-target" name="target" placeholder="/shop?category=sunglasses"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" />
+        <p class="text-xs text-gray-400 mt-1">
+          Use <code>$1</code> to carry the wildcard through. Leave empty for “Gone”.
+        </p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="r-status">Kind</label>
+        <select id="r-status" name="status"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+          <option value="301">Moved permanently (301)</option>
+          <option value="302">Temporary (302)</option>
+          <option value="410">Gone — never existed / spam (410)</option>
+        </select>
+        <p class="text-xs text-gray-400 mt-1">
+          “Gone” tells Google to drop the address. Use it for addresses invented by a hijacked feed.
+        </p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="r-notes">Note (optional)</label>
+        <input id="r-notes" name="notes" maxlength="500" placeholder="From the old WordPress shop"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" />
+      </div>
+      <div class="md:col-span-2 flex items-center gap-3">
+        <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          Add redirect
+        </button>
+        <span id="rule-error" class="text-sm text-red-600"></span>
+        <span id="rule-ok" class="text-sm text-green-600"></span>
+      </div>
+    </form>
+
+    <!-- The map -->
+    <div class="flex items-baseline justify-between mb-3">
+      <h2 class="text-lg font-semibold text-gray-900">Rules <span id="rule-count" class="text-sm font-normal text-gray-400"></span></h2>
+    </div>
+    <div class="bg-white border border-gray-200 rounded-xl overflow-x-auto mb-10">
+      <table class="min-w-full text-sm">
+        <thead class="bg-gray-50 text-gray-500">
+          <tr>
+            <th class="px-4 py-3 text-left font-medium">Old address</th>
+            <th class="px-4 py-3 text-left font-medium">Goes to</th>
+            <th class="px-4 py-3 text-left font-medium">Kind</th>
+            <th class="px-4 py-3 text-right font-medium">Used</th>
+            <th class="px-4 py-3 text-right font-medium">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="rules-body" class="divide-y divide-gray-100">
+          <tr><td colspan="5" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- The report -->
+    <div class="flex items-baseline justify-between mb-3">
+      <h2 class="text-lg font-semibold text-gray-900">Addresses that led nowhere</h2>
+      <div class="flex items-center gap-3">
+        <label class="text-sm text-gray-500" for="nf-sort">Sort</label>
+        <select id="nf-sort" class="px-2 py-1 border border-gray-300 rounded text-sm">
+          <option value="paid">Paid clicks lost</option>
+          <option value="hits">Times requested</option>
+          <option value="recent">Most recent</option>
+        </select>
+        <button id="nf-clear" type="button" class="text-sm text-gray-500 hover:text-red-600">Clear log</button>
+      </div>
+    </div>
+    <p id="nf-summary" class="text-sm text-gray-500 mb-3"></p>
+    <div class="bg-white border border-gray-200 rounded-xl overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead class="bg-gray-50 text-gray-500">
+          <tr>
+            <th class="px-4 py-3 text-left font-medium">Address</th>
+            <th class="px-4 py-3 text-right font-medium">Times</th>
+            <th class="px-4 py-3 text-right font-medium">Paid clicks</th>
+            <th class="px-4 py-3 text-left font-medium">Last seen</th>
+            <th class="px-4 py-3 text-right font-medium">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="nf-body" class="divide-y divide-gray-100">
+          <tr><td colspan="5" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  (() => {
+    const csrf = () =>
+      (window as any).__ASTROBAAS__?.csrf
+      || document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+      || '';
+
+    async function api(path: string, method = 'GET', body?: unknown) {
+      const headers: Record<string, string> = { Accept: 'application/json' };
+      if (method !== 'GET') {
+        headers['Content-Type'] = 'application/json';
+        headers['X-CSRF-Token'] = csrf();
+      }
+      const res = await fetch(path, {
+        method,
+        headers,
+        credentials: 'same-origin',
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const json = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, json };
+    }
+
+    // Everything from the server is rendered as TEXT, never as HTML. These
+    // strings are paths a stranger chose — a 404 log is attacker-supplied by
+    // definition, and this table is read by an admin with a live session.
+    const cell = (text: string, cls = '') => {
+      const td = document.createElement('td');
+      td.className = `px-4 py-3 ${cls}`;
+      td.textContent = text;
+      return td;
+    };
+
+    const button = (label: string, cls: string, onClick: () => void) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = cls;
+      b.textContent = label;
+      b.addEventListener('click', onClick);
+      return b;
+    };
+
+    const KIND: Record<number, string> = {
+      301: 'Permanent',
+      302: 'Temporary',
+      410: 'Gone',
+    };
+
+    /* ---------------- rules ---------------- */
+
+    async function loadRules() {
+      const body = document.getElementById('rules-body')!;
+      const { ok, json } = await api('/api/redirects');
+      body.replaceChildren();
+      const rules = ok && Array.isArray(json.data) ? json.data : [];
+      document.getElementById('rule-count')!.textContent = rules.length ? `(${rules.length})` : '';
+      if (!rules.length) {
+        const tr = document.createElement('tr');
+        const td = cell('No redirects yet.', 'text-center text-gray-400 py-6');
+        td.setAttribute('colspan', '5');
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
+      }
+      for (const r of rules) {
+        const tr = document.createElement('tr');
+        if (!r.enabled) tr.className = 'opacity-50';
+        tr.appendChild(cell(r.match, 'font-mono text-xs'));
+        tr.appendChild(cell(r.status === 410 ? '—' : r.target, 'font-mono text-xs'));
+        tr.appendChild(cell(KIND[r.status] ?? String(r.status)));
+        tr.appendChild(cell(String(r.hits ?? 0), 'text-right tabular-nums'));
+
+        const actions = document.createElement('td');
+        actions.className = 'px-4 py-3 text-right space-x-3';
+        actions.appendChild(button(
+          r.enabled ? 'Disable' : 'Enable',
+          'text-sm text-gray-500 hover:text-gray-900',
+          async () => {
+            await api(`/api/redirects/${encodeURIComponent(r.id)}`, 'PUT', { enabled: !r.enabled });
+            await loadRules();
+          },
+        ));
+        actions.appendChild(button('Delete', 'text-sm text-red-600 hover:text-red-800', async () => {
+          if (!confirm(`Delete the redirect for ${r.match}?`)) return;
+          await api(`/api/redirects/${encodeURIComponent(r.id)}`, 'DELETE');
+          await loadRules();
+        }));
+        tr.appendChild(actions);
+        body.appendChild(tr);
+      }
+    }
+
+    document.getElementById('rule-form')!.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = document.getElementById('rule-error')!;
+      const ok = document.getElementById('rule-ok')!;
+      err.textContent = '';
+      ok.textContent = '';
+
+      const status = Number((document.getElementById('r-status') as HTMLSelectElement).value);
+      const payload = {
+        match: (document.getElementById('r-match') as HTMLInputElement).value,
+        target: (document.getElementById('r-target') as HTMLInputElement).value,
+        status,
+        notes: (document.getElementById('r-notes') as HTMLInputElement).value,
+        enabled: true,
+      };
+      const res = await api('/api/redirects', 'POST', payload);
+      if (!res.ok) {
+        // The API explains WHY a rule was refused, field by field. Showing that
+        // beats "invalid" for someone who typed a target that loops.
+        const fields = res.json?.errors && typeof res.json.errors === 'object'
+          ? Object.values(res.json.errors as Record<string, string>).join(' ')
+          : '';
+        err.textContent = fields || res.json?.message || 'Could not save that redirect';
+        return;
+      }
+      (document.getElementById('rule-form') as HTMLFormElement).reset();
+      ok.textContent = 'Saved. It is live now.';
+      setTimeout(() => { ok.textContent = ''; }, 4000);
+      await loadRules();
+    });
+
+    /* ---------------- the report ---------------- */
+
+    async function loadNotFound() {
+      const body = document.getElementById('nf-body')!;
+      const sort = (document.getElementById('nf-sort') as HTMLSelectElement).value;
+      const { ok, json } = await api(`/api/not-found?sort=${encodeURIComponent(sort)}`);
+      body.replaceChildren();
+
+      const rows = ok && Array.isArray(json.data) ? json.data : [];
+      const meta = json.meta ?? {};
+      const summary = document.getElementById('nf-summary')!;
+      summary.textContent = rows.length
+        ? `${meta.total ?? rows.length} addresses, ${meta.total_hits ?? 0} requests, `
+          + `${meta.total_paid_hits ?? 0} of them from paid or Shopping clicks.`
+        : '';
+
+      if (!rows.length) {
+        const tr = document.createElement('tr');
+        const td = cell('Nothing recorded yet.', 'text-center text-gray-400 py-6');
+        td.setAttribute('colspan', '5');
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
+      }
+
+      for (const r of rows) {
+        const tr = document.createElement('tr');
+        tr.appendChild(cell(r.path, 'font-mono text-xs break-all'));
+        tr.appendChild(cell(String(r.hits), 'text-right tabular-nums'));
+        const paid = cell(String(r.paid_hits), 'text-right tabular-nums');
+        // Money already spent. Worth the eye it draws.
+        if (r.paid_hits > 0) paid.className += ' text-amber-700 font-semibold';
+        tr.appendChild(paid);
+        tr.appendChild(cell(new Date(r.last_seen).toLocaleString(), 'text-gray-500 whitespace-nowrap'));
+
+        const actions = document.createElement('td');
+        actions.className = 'px-4 py-3 text-right space-x-3';
+        // One click from "this address is dead" to "here is the rule that fixes
+        // it", with the suggestion already filled in.
+        actions.appendChild(button('Fix this', 'text-sm text-blue-600 hover:text-blue-800', async () => {
+          (document.getElementById('r-match') as HTMLInputElement).value = r.path;
+          const target = document.getElementById('r-target') as HTMLInputElement;
+          target.value = '';
+          const res = await api(`/api/recovery/match?path=${encodeURIComponent(r.path)}&limit=1`);
+          if (res.ok && Array.isArray(res.json.data) && res.json.data[0]) {
+            target.value = res.json.data[0].url;
+          }
+          document.getElementById('rule-form')!.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          (document.getElementById('r-match') as HTMLInputElement).focus();
+        }));
+        actions.appendChild(button('Mark gone', 'text-sm text-gray-500 hover:text-gray-900', async () => {
+          if (!confirm(`Tell search engines ${r.path} is gone for good?`)) return;
+          await api('/api/redirects', 'POST', {
+            match: r.path, target: '', status: 410, enabled: true, notes: 'From the dead-URL report',
+          });
+          await loadRules();
+        }));
+        tr.appendChild(actions);
+        body.appendChild(tr);
+      }
+    }
+
+    document.getElementById('nf-sort')!.addEventListener('change', () => { void loadNotFound(); });
+    document.getElementById('nf-clear')!.addEventListener('click', async () => {
+      if (!confirm('Clear the record of dead addresses? Redirect rules are not affected.')) return;
+      await api('/api/not-found', 'DELETE');
+      await loadNotFound();
+    });
+
+    void loadRules();
+    void loadNotFound();
+  })();
+</script>

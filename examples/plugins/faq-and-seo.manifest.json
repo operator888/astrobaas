@@ -1,0 +1,30 @@
+{
+  "id": "faq-and-seo",
+  "name": "FAQ + SEO Meta",
+  "version": "1.0.0",
+  "description": "Reference declarative plugin: adds an FAQ content type, SEO meta tags, and a little styling — with no code and no rebuild.",
+  "author": "AstroBaaS",
+  "homepage": "https://github.com/operator888/astrobaas",
+  "astrobaasApi": "^1.0.0",
+  "capabilities": {
+    "headTags": [
+      { "tag": "meta", "attrs": { "name": "robots", "content": "index, follow" } },
+      { "tag": "meta", "attrs": { "property": "og:site_name", "content": "AstroBaaS" } },
+      { "tag": "link", "attrs": { "rel": "preconnect", "href": "https://fonts.gstatic.com" } }
+    ],
+    "css": ".faq-question { font-weight: 600; } .faq-answer { color: var(--text-color); opacity: 0.85; }",
+    "contentTypes": [
+      {
+        "name": "faq",
+        "label": "FAQ",
+        "labelPlural": "FAQs",
+        "visibility": "public",
+        "fields": [
+          { "name": "question", "rule": { "type": "string", "min": 3, "max": 300 } },
+          { "name": "answer", "rule": { "type": "string", "min": 1, "max": 5000 } },
+          { "name": "position", "rule": { "type": "number", "min": 0, "optional": true } }
+        ]
+      }
+    ]
+  }
+}

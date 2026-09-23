@@ -1,0 +1,175 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+
+const t = Astro.locals.t;
+---
+
+<AdminLayout title={t('admin.audit.title')}>
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">{t('admin.audit.title')}</h1>
+    <p class="text-sm text-gray-500 mb-6">{t('admin.audit.intro')}</p>
+
+    {/*
+      Filtering happens on the SERVER (see /api/audit). Doing it here would
+      search only the 500 rows already fetched, so "everything this user did"
+      would silently mean "…of the most recent 500" — an answer shaped like the
+      truth. The inputs below are just what gets sent.
+    */}
+    <div class="mb-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-white border border-gray-200 rounded-xl p-4">
+      <label class="text-sm text-gray-600">{t('admin.audit.filterAction')}
+        {/* A PREFIX: "auth." is every authentication event. The datalist is a
+            hint, not a constraint — typing a partial prefix is the point.
+
+            NOT translated, and it must stay that way: these are the literal
+            action names stored in the log and matched against by the server.
+            A Greek reader typing a Greek word here would match nothing. */}
+        <input id="f-action" list="action-list" placeholder="auth. · payment. · user."
+          class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" />
+        <datalist id="action-list"></datalist>
+      </label>
+      <label class="text-sm text-gray-600">{t('admin.audit.filterActor')}
+        {/* Filters on the stored actor id; the list shows names so nobody has
+            to memorise ids to answer "what did Maria change?". */}
+        <input id="f-actor" list="actor-list" placeholder={t('admin.audit.actorPlaceholder')}
+          class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" />
+        <datalist id="actor-list"></datalist>
+      </label>
+      <label class="text-sm text-gray-600">{t('admin.audit.filterFrom')}
+        <input id="f-from" type="date"
+          class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" />
+      </label>
+      <label class="text-sm text-gray-600">{t('admin.audit.filterTo')}
+        {/* Inclusive — the server pushes a date-only bound to the end of that
+            day, so "to today" includes today rather than stopping at midnight. */}
+        <input id="f-to" type="date"
+          class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" />
+      </label>
+      <div class="sm:col-span-2 lg:col-span-4 flex items-center gap-2">
+        <button id="apply" type="button" class="px-3 py-2 bg-gray-800 hover:bg-gray-900 text-white text-sm rounded-lg">{t('admin.audit.apply')}</button>
+        <button id="clear" type="button" class="px-3 py-2 text-gray-600 hover:text-gray-900 text-sm">{t('admin.audit.clear')}</button>
+        <span id="count" class="text-sm text-gray-500"></span>
+      </div>
+    </div>
+
+    <div class="bg-white border border-gray-200 rounded-xl overflow-hidden">
+      <table class="min-w-full text-sm">
+        <thead class="bg-gray-50 text-gray-500">
+          <tr>
+            <th class="px-4 py-3 text-left font-medium">{t('admin.audit.colWhen')}</th>
+            <th class="px-4 py-3 text-left font-medium">{t('admin.audit.colAction')}</th>
+            <th class="px-4 py-3 text-left font-medium">{t('admin.audit.colActor')}</th>
+            <th class="px-4 py-3 text-left font-medium">{t('admin.audit.colTarget')}</th>
+            <th class="px-4 py-3 text-left font-medium">{t('admin.audit.colIp')}</th>
+          </tr>
+        </thead>
+        <tbody id="audit-body" class="divide-y divide-gray-100">
+          <tr><td colspan="5" class="px-4 py-6 text-center text-gray-400">{t('admin.audit.loading')}</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    // @ts-nocheck — vanilla browser glue (DOM + fetch); not part of the typed API surface.
+    const $ = (id) => document.getElementById(id);
+
+    function row(e) {
+      const tr = document.createElement('tr');
+      const cells = [
+        ['px-4 py-3 text-gray-500 whitespace-nowrap', new Date(e.created_at).toLocaleString()],
+        ['px-4 py-3 font-medium text-gray-800', e.action],
+        ['px-4 py-3 text-gray-700 break-all', e.actor_label || e.actor],
+        ['px-4 py-3 text-gray-700 break-all', e.target || '—'],
+        ['px-4 py-3 text-gray-500', e.ip || '—'],
+      ];
+      for (const [cls, val] of cells) {
+        const td = document.createElement('td');
+        td.className = cls;
+        td.textContent = val;
+        tr.appendChild(td);
+      }
+      // The raw actor stays reachable: a display name is for reading, an id is
+      // what you quote when following something up.
+      tr.children[2].title = e.actor || '';
+      return tr;
+    }
+
+    const FIELDS = ['action', 'actor', 'from', 'to'];
+
+    function fillList(id, items) {
+      const dl = $(id);
+      dl.replaceChildren();
+      for (const it of items) {
+        const o = document.createElement('option');
+        o.value = it.value;
+        if (it.label && it.label !== it.value) o.label = it.label;
+        dl.appendChild(o);
+      }
+    }
+
+    // window.t has no plural support, so the form is chosen here. Safe for the
+    // three bundled locales — en, el and de all have exactly one/other. A
+    // language with more forms needs this counter rendered on the server.
+    function countLabel(n) {
+      if (!n) return '';
+      if (n === 500) return window.t('admin.audit.countCapped', { count: n });
+      return window.t(n === 1 ? 'admin.audit.count_one' : 'admin.audit.count_other', { count: n });
+    }
+
+    async function load() {
+      const body = $('audit-body');
+      try {
+        const q = new URLSearchParams({ limit: '500' });
+        for (const f of FIELDS) {
+          const v = $(`f-${f}`).value.trim();
+          if (v) q.set(f, v);
+        }
+        const res = await fetch(`/api/audit?${q.toString()}`, { headers: { Accept: 'application/json' } });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || json?.success === false) throw new Error(json?.error?.message || `HTTP ${res.status}`);
+        const events = json.data || [];
+
+        // Who appears in the log, by name. Populated from the response so it
+        // reflects what is actually there rather than every user who exists.
+        fillList('actor-list', (json.meta?.actors || []).map((a) => ({ value: a.id, label: a.label })));
+        // Action PREFIXES, one level deep, so the hint is "auth." rather than
+        // twenty full event names. Values, not labels — never translated.
+        const prefixes = [...new Set(events.map((e) => String(e.action || '').split('.')[0]).filter(Boolean))]
+          .sort().map((p) => ({ value: `${p}.` }));
+        fillList('action-list', prefixes);
+
+        $('count').textContent = countLabel(events.length);
+
+        body.replaceChildren();
+        if (!events.length) {
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 5;
+          td.className = 'px-4 py-6 text-center text-gray-400';
+          td.textContent = window.t('admin.audit.empty');
+          tr.appendChild(td); body.appendChild(tr);
+          return;
+        }
+        for (const e of events) body.appendChild(row(e));
+      } catch (e) {
+        body.replaceChildren();
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
+        td.className = 'px-4 py-6 text-center text-red-600';
+        td.textContent = e.message;
+        tr.appendChild(td); body.appendChild(tr);
+      }
+    }
+
+    $('apply').addEventListener('click', load);
+    $('clear').addEventListener('click', () => {
+      for (const f of FIELDS) $(`f-${f}`).value = '';
+      load();
+    });
+    for (const f of FIELDS) {
+      $(`f-${f}`).addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
+    }
+    load();
+  </script>
+</AdminLayout>

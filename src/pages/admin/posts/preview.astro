@@ -1,0 +1,81 @@
+---
+/**
+ * Truthful preview.
+ *
+ * Both editor pages previously did `window.open('', 'post-preview')` followed
+ * by `preview.document.write(`…${content}…`)`. That was two problems at once:
+ *
+ *  1. **A self-XSS surface.** `about:blank` inherits no CSP, and the content was
+ *     interpolated into a template string unsanitised. Whatever was in the
+ *     editor executed with the admin's origin.
+ *  2. **A lie.** It rendered raw editor HTML in a blank document — no theme
+ *     tokens, no section styles, no plugin filters, no sanitizer. So it showed
+ *     something the published page would never look like, which is the one job
+ *     a preview has.
+ *
+ * This is an Astro PAGE rather than an API route returning HTML, and that
+ * distinction is load-bearing: Astro attaches the CSP to pages it renders, so
+ * an API route handing back `text/html` would carry no policy at all.
+ *
+ * It runs the identical pipeline the front end runs —
+ * `applyFilters('post_content')` then `sanitizeHtml` — inside the same layout,
+ * so what you see is what the sanitizer will actually store and the theme will
+ * actually paint. Nothing is persisted.
+ */
+import PublicLayout from '../../../layouts/PublicLayout.astro';
+import { sanitizeHtml, lazyLoadContentImages } from '../../../lib/sanitize';
+import { renderEmbedFacades } from '../../../lib/embeds';
+import { pluginManager } from '../../../lib/plugin-system';
+import { LocalDB } from '../../../lib/localdb';
+import { canAuthorPosts } from '../../../lib/auth';
+
+// Staff only. This renders arbitrary submitted HTML through the public layout;
+// it must never be reachable by an anonymous caller, who could otherwise use it
+// as a same-origin HTML host.
+// Anyone who may author a post may preview one — including a manager. Spelled
+// with the shared predicate so adding a content role does not silently lose
+// preview access.
+if (!canAuthorPosts(Astro.locals.user?.role)) {
+  return Astro.redirect('/login');
+}
+
+await LocalDB.init();
+
+let title = 'Preview';
+let bodyHtml = '<p><em>Nothing to preview.</em></p>';
+
+// POST so the body is not length-capped by a URL and does not end up in logs,
+// browser history or a Referer header — a draft is not public.
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  title = String(form.get('title') ?? 'Untitled').slice(0, 200);
+  const raw = String(form.get('content') ?? '').slice(0, 400_000);
+  // The real pipeline, in the real order.
+  // The real pipeline means EVERY step of it. This ran filters and the
+  // sanitizer only, so an author who inserted a video saw a blank gap in the
+  // preview and a facade on the live page — while the screen told them "this is
+  // exactly what the sanitizer stores and the active theme paints".
+  //
+  // `lazyLoadContentImages` matters here too: it is what the reader's browser
+  // actually receives, and a preview that omits it is a preview of something
+  // else.
+  bodyHtml = renderEmbedFacades(lazyLoadContentImages(sanitizeHtml(
+    pluginManager.applyFilters('post_content', raw, { title, preview: true }) as string,
+  )));
+}
+---
+
+<PublicLayout title={`Preview — ${title}`} description="Unsaved preview" sidebarContext="post">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+    <div class="ab-note ab-note-warn mb-6">
+      <p>
+        <strong>Preview.</strong> This is exactly what the sanitizer stores and
+        the active theme paints — nothing here has been saved.
+      </p>
+    </div>
+    <article>
+      <h1 class="text-4xl font-bold mb-6">{title}</h1>
+      <div class="prose" set:html={bodyHtml} />
+    </article>
+  </div>
+</PublicLayout>

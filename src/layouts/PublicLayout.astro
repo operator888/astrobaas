@@ -1,0 +1,100 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import EmbedRuntime from '../components/public/EmbedRuntime.astro';
+import { getSiteSettings } from '../lib/site';
+import { resolveActiveTheme } from '../lib/theme-runtime';
+import type { BreadcrumbItem } from '../core/theme-slots';
+import type { LocaleOption } from '../lib/locale-links';
+
+export interface Props {
+  title?: string;
+  description?: string;
+  image?: string;
+  /** Which context the Sidebar slot is rendering in. */
+  sidebarContext?: 'archive' | 'post' | 'page' | 'home';
+  /**
+   * The trail for this page, computed by the route (routes have the data; a
+   * slot must never fetch). Rendered through the `Breadcrumbs` slot at the top
+   * of `<main>` so every page places it identically instead of each route
+   * inventing its own spot. Omit — or pass `[]` — for pages with no ancestry.
+   */
+  breadcrumbs?: BreadcrumbItem[];
+  /**
+   * Per-page `noindex`, OR-ed with the site-wide discourage-indexing setting
+   * in BaseLayout. Forwarding it explicitly matters: this layout once dropped
+   * the head slot the same way, and every page lost its canonical tag.
+   */
+  noindex?: boolean;
+  /** The route's own canonical URL, when it knows better than the request path. */
+  canonical?: string;
+  /**
+   * Language-switcher entries, from routes that render a record. Forwarded to
+   * the Header slot; see `HeaderProps.localeOptions` for why only a record
+   * route can supply them.
+   */
+  localeOptions?: LocaleOption[];
+}
+
+const {
+  title, description, image, sidebarContext = 'home', breadcrumbs, noindex, canonical,
+  localeOptions,
+} = Astro.props;
+// Pass the request context so the canonical URL can fall back the same way the
+// sitemap and feed do. Without it, `site_url` being unset left the canonical
+// tag naming a different origin from every other absolute URL on the site.
+const site = await getSiteSettings({ astroSite: Astro.site, requestUrl: Astro.url, locale: Astro.locals.locale });
+
+import SiteSearch from '../components/public/SiteSearch.astro';
+
+// Site chrome comes from the active theme's slots, falling back to the built-in
+// components for anything it doesn't override.
+const { slots } = await resolveActiveTheme();
+const Header = slots.Header as any;
+const Footer = slots.Footer as any;
+const Sidebar = slots.Sidebar as any;
+const Breadcrumbs = slots.Breadcrumbs as any;
+const locale = Astro.locals.locale;
+---
+
+<BaseLayout
+  title={title}
+  description={description ?? site.siteTagline}
+  image={image}
+  siteName={site.siteTitle}
+  siteUrl={site.siteUrl}
+  noindex={noindex}
+  canonical={canonical}
+>
+  {/* Forward the head slot. BaseLayout renders `<slot name="head" />`, but
+      PublicLayout did not pass one through — so anything a page tried to put in
+      <head> (canonical tags, JSON-LD, preloads) was silently dropped. Pages
+      using this layout are every public page on the site. */}
+  <slot name="head" slot="head" />
+  <div class="min-h-screen flex flex-col bg-gray-50">
+    <Header siteTitle={site.siteTitle} locale={locale} localeOptions={localeOptions} />
+    {/*
+      Beside the Header slot, deliberately NOT inside it.
+
+      Overriding `Header` replaces the whole masthead, and both shipped themes
+      do exactly that — so a search box placed in a header is one that vanishes
+      the moment a site is themed, and declarative manifest themes could never
+      have gained one at all. Here, every theme inherits it, including themes
+      written after this line. A theme that truly wants it gone hides
+      `.ab-site-search`.
+    */}
+    <SiteSearch locale={locale} value={Astro.url.searchParams.get('q') ?? ''} />
+    <main class="flex-1">
+      <Breadcrumbs items={breadcrumbs ?? []} locale={locale} />
+      <slot />
+    </main>
+    <Sidebar context={sidebarContext} locale={locale} />
+    <Footer siteTitle={site.siteTitle} social={site.social} locale={locale} />
+  </div>
+  {/* The click-to-load handler for embed facades (C-44). Included on every
+      public page rather than only on pages that contain one: an embed can be in
+      a post body, a Page, a product description or a plugin's section, and a
+      per-page flag would have to be threaded through four renderers with one of
+      them eventually forgotten. It is a delegated listener of a few hundred
+      bytes and it does nothing until a facade is clicked. */}
+  <EmbedRuntime />
+</BaseLayout>

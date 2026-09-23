@@ -1,0 +1,154 @@
+---
+/**
+ * Choosing a record's terms in the editor (C-128).
+ *
+ * ## One component, both editors
+ *
+ * `posts/new` and `posts/[id]/edit` are two screens with different ids on the
+ * same fields. Every feature added to one and not the other in this codebase
+ * has eventually been found broken; the AI panel is in both for the same
+ * reason, and so is this.
+ *
+ * ## It renders nothing when there is nothing to render
+ *
+ * An install that has defined no taxonomies sees no box, no heading and no
+ * empty state. A feature that is off should be invisible, not present and
+ * blank — the blank version reads as broken.
+ *
+ * ## Adding a term from here
+ *
+ * Whoever stocks the shelves adds "Ray-Ban" while writing the product, not by
+ * going to another screen first. The API allows it for anyone who may write
+ * content, and it is idempotent, so two editors adding the same term at the
+ * same moment both succeed.
+ */
+export interface Props {
+  /** `post` or `page`. Decides which taxonomies apply. */
+  collection: string;
+  /** The record's current terms, keyed by taxonomy slug. */
+  value?: Record<string, string[]>;
+}
+const { collection, value = {} } = Astro.props;
+---
+
+<div
+  id="term-picker"
+  class="hidden bg-white border border-gray-200 rounded-lg p-6"
+  data-collection={collection}
+  data-value={JSON.stringify(value ?? {})}
+>
+  <h3 class="text-lg font-semibold text-gray-900 mb-1">Taxonomies</h3>
+  <p class="text-sm text-gray-500 mb-4">Groupings this site defines. Nothing here is required.</p>
+  <div id="term-picker-body" class="space-y-4"></div>
+  {/* The form posts this. A hidden input rather than a field per checkbox: the
+      value is a MAP of lists, which a flat form encoding cannot express, and
+      the API reads JSON. */}
+  <input type="hidden" name="terms" id="terms-value" value={JSON.stringify(value ?? {})} />
+</div>
+
+<script>
+  (function () {
+    const rootEl = document.getElementById('term-picker');
+    const bodyEl = document.getElementById('term-picker-body');
+    const hidden = document.getElementById('terms-value') as HTMLInputElement | null;
+    if (!rootEl || !bodyEl || !hidden) return;
+    // Narrowed once, into consts the closures below capture — a `let` here
+    // would widen back to `| null` inside an async callback, which is what the
+    // type checker was pointing at.
+    const root: HTMLElement = rootEl;
+    const body: HTMLElement = bodyEl;
+
+    const collection = root.dataset.collection || 'post';
+    let selected: Record<string, string[]> = {};
+    try { selected = JSON.parse(root.dataset.value || '{}'); } catch { selected = {}; }
+
+    const csrf = () => decodeURIComponent((document.cookie.match(/(?:^|; )astrobaas_csrf=([^;]*)/) ?? [])[1] ?? '');
+    const sync = () => { hidden.value = JSON.stringify(selected); };
+
+    function el(tag: string, className = '', text = '') {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      // textContent, never innerHTML: a term name is operator-authored text.
+      if (text) node.textContent = text;
+      return node;
+    }
+
+    function renderTaxonomy(tax: any, terms: any[]) {
+      const box = el('div', 'border-t border-gray-100 pt-4 first:border-0 first:pt-0');
+      box.append(el('p', 'text-sm font-medium text-gray-700 mb-2', tax.label));
+
+      const list = el('div', 'flex flex-wrap gap-2 mb-2');
+      const mine = terms.filter((t) => t.taxonomy === tax.slug);
+      if (!mine.length) box.append(el('p', 'text-xs text-gray-400 mb-2', 'No terms yet.'));
+
+      for (const term of mine) {
+        const label = document.createElement('label');
+        label.className = 'inline-flex items-center gap-2 text-sm text-gray-700 border border-gray-200 rounded-lg px-2 py-1';
+        const box2 = document.createElement('input');
+        box2.type = 'checkbox';
+        box2.className = 'rounded border-gray-300';
+        box2.checked = (selected[tax.slug] ?? []).includes(term.slug);
+        box2.addEventListener('change', () => {
+          const current = new Set(selected[tax.slug] ?? []);
+          if (box2.checked) current.add(term.slug); else current.delete(term.slug);
+          if (current.size) selected[tax.slug] = [...current];
+          else delete selected[tax.slug];
+          sync();
+        });
+        label.append(box2, document.createTextNode(term.name || term.slug));
+        list.append(label);
+      }
+      box.append(list);
+
+      const row = el('div', 'flex items-center gap-2');
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = `Add a ${String(tax.label).toLowerCase()}…`;
+      input.className = 'flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm';
+      const add = el('button', 'px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50', 'Add') as HTMLButtonElement;
+      add.type = 'button';
+      const status = el('span', 'text-xs text-gray-500');
+      add.addEventListener('click', async () => {
+        const name = input.value.trim();
+        if (!name) return;
+        add.disabled = true;
+        const res = await fetch('/api/taxonomies', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf() },
+          body: JSON.stringify({ taxonomy: tax.slug, name }),
+        });
+        const json = await res.json().catch(() => null);
+        add.disabled = false;
+        if (!res.ok || !json?.data?.slug) {
+          status.textContent = json?.message || 'That could not be added.';
+          return;
+        }
+        input.value = '';
+        // Tick it straight away: somebody who typed a brand while writing a
+        // product meant to put the product in it.
+        const current = new Set(selected[tax.slug] ?? []);
+        current.add(json.data.slug);
+        selected[tax.slug] = [...current];
+        sync();
+        load();
+      });
+      row.append(input, add, status);
+      box.append(row);
+      return box;
+    }
+
+    async function load() {
+      const res = await fetch(`/api/taxonomies?collection=${encodeURIComponent(collection)}`);
+      if (!res.ok) return;
+      const json = await res.json().catch(() => null);
+      const defs = (json?.data?.taxonomies ?? []).filter((d: any) => (d.appliesTo ?? []).includes(collection));
+      if (!defs.length) return;  // Nothing defined: no box at all.
+      const terms = json?.data?.terms ?? [];
+      body.replaceChildren(...defs.map((d: any) => renderTaxonomy(d, terms)));
+      root.classList.remove('hidden');
+    }
+
+    sync();
+    load();
+  })();
+</script>

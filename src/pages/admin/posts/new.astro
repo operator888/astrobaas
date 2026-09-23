@@ -1,0 +1,670 @@
+---
+import AdminLayout from '../../../layouts/AdminLayout.astro';
+import RichTextEditor from '../../../components/admin/RichTextEditor.astro';
+import AiAssist from '../../../components/admin/AiAssist.astro';
+import SectionInserter from '../../../components/admin/SectionInserter.astro';
+import MediaLibrary from '../../../components/admin/MediaLibrary.astro';
+import { LocalDB } from '../../../lib/localdb';
+import { locales, defaultLocale, isMultilingual } from '../../../lib/i18n';
+import ContentAnalysis from '../../../components/admin/ContentAnalysis.astro';
+import { discourageIndexing } from '../../../lib/indexing';
+import { resolvePatterns } from '../../../lib/pattern-registry';
+import { settingsMap } from '../../../lib/settings-map';
+import TermPicker from '../../../components/admin/TermPicker.astro';
+
+await LocalDB.init();
+const categories = await LocalDB.getCategories();
+// Language picker only appears when the site actually serves more than one.
+const siteLocales = locales();
+const siteDefaultLocale = defaultLocale();
+const siteIsMultilingual = isMultilingual();
+
+// The site-wide switch, so the analysis panel can say "the whole site is
+// hidden from search" instead of scoring discoverability on a page nobody
+// will ever see. The prop existed with no writer until an audit found it.
+const siteHidden = await discourageIndexing();
+
+// The layout a new record starts from (C-51).
+//
+// Resolved SERVER-SIDE from the pattern NAME an operator chose, never from a
+// stored HTML blob: a blob is never re-vetted, so it rots the day the section
+// vocabulary changes. resolvePatterns is the same call the editor's palette
+// makes, so a pattern the vet rejected is offered by neither and prefills
+// nothing.
+//
+// The default is the POST one; switching the Type select to Page swaps it in
+// the browser, and only while the body is still untouched.
+const startSettings = settingsMap(await LocalDB.getSettings());
+const patternsByName = new Map(resolvePatterns().patterns.map((sp) => [sp.name, sp.html]));
+const startBodyPost = patternsByName.get(String(startSettings.default_body_post ?? '')) ?? '';
+const startBodyPage = patternsByName.get(String(startSettings.default_body_page ?? '')) ?? '';
+---
+
+<AdminLayout title="Create New Post">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-8">
+      <div>
+        <h1 class="text-3xl font-bold text-gray-900">Create New Post</h1>
+        <p class="text-gray-600 mt-2">Write and publish your content</p>
+      </div>
+      <div class="flex space-x-3">
+        <button type="button" id="save-draft" class="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors duration-200">
+          Save Draft
+        </button>
+        <button type="button" id="preview-post" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors duration-200">
+          Preview
+        </button>
+        <button type="submit" form="post-form" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors duration-200">
+          Publish Post
+        </button>
+      </div>
+    </div>
+
+    <form id="post-form" class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <!-- Main Content -->
+      <div class="lg:col-span-2 space-y-6">
+        <!-- Title -->
+        <div class="bg-white border border-gray-200 rounded-lg p-6">
+          <label for="post-title" class="block text-sm font-medium text-gray-700 mb-2">Title</label>
+          <input 
+            type="text" 
+            id="post-title" 
+            name="title" 
+            required
+            class="w-full px-3 py-2 text-lg border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="Enter your post title..."
+          />
+        </div>
+
+        <!-- Slug -->
+        <div class="bg-white border border-gray-200 rounded-lg p-6">
+          <label for="post-slug" class="block text-sm font-medium text-gray-700 mb-2">URL Slug</label>
+          <div class="flex items-center">
+            <span class="text-gray-500 mr-2">yoursite.com/blog/</span>
+            <input 
+              type="text" 
+              id="post-slug" 
+              name="slug" 
+              required
+              class="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="post-url-slug"
+            />
+          </div>
+          <p class="text-xs text-gray-500 mt-1">URL-friendly version of the title</p>
+        </div>
+
+        <!-- Content Editor -->
+        <div class="bg-white border border-gray-200 rounded-lg p-6">
+          <label class="block text-sm font-medium text-gray-700 mb-4">Content</label>
+          <SectionInserter targetId="post-content" />
+          {/*
+            `data-start-*` rather than two <script> constants: this frontmatter
+            and the <script> below are separate modules, so a value defined
+            here is invisible there — the shape that has cost seven bugs in
+            this branch.
+          */}
+          <div
+            id="post-start-bodies"
+            hidden
+            data-post={startBodyPost}
+            data-page={startBodyPage}
+          ></div>
+          <RichTextEditor name="content" id="post-content" content={startBodyPost} />
+        </div>
+
+        <TermPicker collection="post" />
+
+        <AiAssist />
+
+        <!-- Excerpt -->
+        <div class="bg-white border border-gray-200 rounded-lg p-6">
+          <label for="post-excerpt" class="block text-sm font-medium text-gray-700 mb-2">Excerpt</label>
+          <textarea 
+            id="post-excerpt" 
+            name="excerpt" 
+            rows="3"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="Brief description of your post..."
+          ></textarea>
+          <p class="text-xs text-gray-500 mt-1">Optional short description for previews and SEO</p>
+        </div>
+
+        <!-- SEO Settings -->
+        <div class="bg-white border border-gray-200 rounded-lg p-6">
+          <h3 class="text-lg font-semibold text-gray-900 mb-4">SEO Settings</h3>
+          
+          <div class="space-y-4">
+            <ContentAnalysis contentSelector="#post-content" metaTitleId="meta-title" metaDescriptionId="meta-description" locale={defaultLocale()} siteNoindex={siteHidden} />
+
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2" for="post-keyphrase">Focus keyphrase</label>
+              <input
+                type="text"
+                id="post-keyphrase"
+                name="focus_keyphrase"
+                placeholder="what someone would search for"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+              <p class="text-xs text-gray-500 mt-1">
+                Optional. Set it and the analysis below checks where the phrase appears; leave it
+                empty and those checks are simply skipped rather than counted against you.
+              </p>
+            </div>
+            <div>
+              <label for="meta-title" class="block text-sm font-medium text-gray-700 mb-2">Meta Title</label>
+              <input 
+                type="text" 
+                id="meta-title" 
+                name="meta_title" 
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                placeholder="SEO title (leave blank to use post title)"
+              />
+              <div class="flex justify-between text-xs text-gray-500 mt-1">
+                <span>Recommended: 50-60 characters</span>
+                <span id="meta-title-count">0/60</span>
+              </div>
+            </div>
+            
+            <div>
+              <label for="meta-description" class="block text-sm font-medium text-gray-700 mb-2">Meta Description</label>
+              <textarea 
+                id="meta-description" 
+                name="meta_description" 
+                rows="2"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                placeholder="Brief description for search engines..."
+              ></textarea>
+              <div class="flex justify-between text-xs text-gray-500 mt-1">
+                <span>Recommended: 150-160 characters</span>
+                <span id="meta-description-count">0/160</span>
+              </div>
+            </div>
+
+            <div>
+              <label class="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  id="post-noindex"
+                  name="noindex"
+                  class="mt-1 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span class="text-sm text-gray-700">
+                  <span class="font-medium">Hide from search engines</span><br />
+                  <span class="text-gray-500">Also leaves it out of the sitemap and the feed.</span>
+                </span>
+              </label>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <label class="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  id="post-pinned"
+                  name="pinned"
+                  class="mt-1 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span class="text-sm text-gray-700">
+                  <span class="font-medium">Pin to the top</span><br />
+                  <span class="text-gray-500">Above the newest posts in every listing.</span>
+                </span>
+              </label>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1" for="post-menu-order">Manual order</label>
+                <input
+                  type="number"
+                  id="post-menu-order"
+                  name="menu_order"
+                  class="w-24 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+                <p class="text-xs text-gray-500 mt-1">
+                  Lower comes first. Leave empty and this post falls back to date order,
+                  behind anything that has a number.
+                </p>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- Sidebar -->
+      <div class="lg:col-span-1 space-y-6">
+        <!-- Publish Settings -->
+        <div class="bg-white border border-gray-200 rounded-lg p-6">
+          <h3 class="text-lg font-semibold text-gray-900 mb-4">Publish Settings</h3>
+          
+          <div class="space-y-4">
+            <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2" for="kind">Type</label>
+
+              <select id="kind" name="kind" class="w-full px-3 py-2 border border-gray-300 rounded-lg mb-4">
+
+                <option value="post">Post — appears in the blog at /blog/slug</option>
+
+                <option value="page">Page — a standalone page at /slug</option>
+
+              </select>
+              <label for="post-status" class="block text-sm font-medium text-gray-700 mb-2">Status</label>
+              <select 
+                id="post-status" 
+                name="status" 
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              >
+                <option value="draft">Draft</option>
+                <option value="published">Published</option>
+                <option value="scheduled">Scheduled</option>
+              </select>
+            </div>
+
+            {siteIsMultilingual && (
+              <div>
+                <label for="post-locale" class="block text-sm font-medium text-gray-700 mb-2">Language</label>
+                <select
+                  id="post-locale"
+                  name="locale"
+                  class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  {siteLocales.map((l) => (
+                    <option value={l} selected={l === siteDefaultLocale}>{l}</option>
+                  ))}
+                </select>
+                <label for="post-translation-of" class="block text-sm font-medium text-gray-700 mt-4 mb-2">
+                  Translation of <span class="font-normal text-gray-400">(optional)</span>
+                </label>
+                <input
+                  id="post-translation-of"
+                  name="translation_of"
+                  placeholder="id of the original-language post"
+                  class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+                <p class="text-xs text-gray-400 mt-1">
+                  Links this post to the same article in another language, so it shows on the
+                  Translations dashboard and gets hreflang tags. Leave empty for an original.
+                </p>
+              </div>
+            )}
+
+            <div>
+              <label for="publish-date" class="block text-sm font-medium text-gray-700 mb-2">Publish Date</label>
+              <input 
+                type="datetime-local" 
+                id="publish-date" 
+                name="publish_date" 
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+            
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">Author</label>
+              <p class="text-sm text-gray-600 px-3 py-2 bg-gray-50 rounded-lg">The author is set to the current signed-in user on save.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Category -->
+        <div class="bg-white border border-gray-200 rounded-lg p-6">
+          <h3 class="text-lg font-semibold text-gray-900 mb-4">Category</h3>
+          <select
+            id="post-category"
+            name="category_id"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          >
+            <option value="">— None —</option>
+            {categories.map((c) => (
+              <option value={c.id}>{c.name}</option>
+            ))}
+          </select>
+          <a href="/admin/categories" class="mt-3 inline-block text-sm text-blue-600 hover:text-blue-800">
+            Manage categories →
+          </a>
+        </div>
+
+        <!-- Tags -->
+        <div class="bg-white border border-gray-200 rounded-lg p-6">
+          <h3 class="text-lg font-semibold text-gray-900 mb-4">Tags</h3>
+          
+          <input 
+            type="text" 
+            id="post-tags" 
+            name="tags" 
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="Enter tags separated by commas"
+          />
+          <p class="text-xs text-gray-500 mt-1">Separate tags with commas</p>
+          
+          <div id="tag-suggestions" class="mt-2 flex flex-wrap gap-1">
+            <button type="button" class="tag-suggestion px-2 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200">web development</button>
+            <button type="button" class="tag-suggestion px-2 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200">javascript</button>
+            <button type="button" class="tag-suggestion px-2 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200">tutorial</button>
+          </div>
+        </div>
+
+        <!-- Featured Image -->
+        <div class="bg-white border border-gray-200 rounded-lg p-6">
+          <h3 class="text-lg font-semibold text-gray-900 mb-4">Featured Image</h3>
+          
+          <div id="featured-image-preview" class="hidden mb-4">
+            <img id="featured-image-img" src="" alt="Featured image" class="w-full h-32 object-cover rounded-lg" />
+            <button type="button" id="remove-featured-image" class="mt-2 text-sm text-red-600 hover:text-red-800">
+              Remove Image
+            </button>
+          </div>
+          
+          <button type="button" id="select-featured-image" class="w-full px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors duration-200">
+            Select Featured Image
+          </button>
+          
+          <input type="hidden" id="featured-image-url" name="featured_image" />
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <!-- Media Library Modal -->
+  <div id="media-modal" class="fixed inset-0 bg-black bg-opacity-50 z-50 hidden">
+    <div class="flex items-center justify-center min-h-screen p-4">
+      <div class="bg-white rounded-lg max-w-6xl w-full max-h-[90vh] overflow-hidden">
+        <div class="flex items-center justify-between p-6 border-b border-gray-200">
+          <h2 class="text-xl font-semibold text-gray-900">Select Media</h2>
+          <button id="close-media-modal" class="text-gray-400 hover:text-gray-600">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+        <div class="p-6 overflow-y-auto max-h-[calc(90vh-120px)]">
+          <MediaLibrary insertTargetId="post-content" />
+        </div>
+      </div>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../../lib/apiClient';
+  import { charCount } from '../../../lib/admin-ui';
+  class PostEditor {
+    constructor() {
+      this.form = document.getElementById('post-form');
+      this.titleInput = document.getElementById('post-title');
+      this.slugInput = document.getElementById('post-slug');
+      this.metaTitleInput = document.getElementById('meta-title');
+      this.metaDescriptionInput = document.getElementById('meta-description');
+      this.mediaModal = document.getElementById('media-modal');
+      this.featuredImagePreview = document.getElementById('featured-image-preview');
+      this.featuredImageImg = document.getElementById('featured-image-img');
+      this.featuredImageUrl = document.getElementById('featured-image-url');
+      
+      this.init();
+    }
+    
+    init() {
+      // Auto-generate slug from title
+      this.titleInput.addEventListener('input', this.generateSlug.bind(this));
+      
+      // Character counters
+      // The shared counter — this screen's copy silently lacked the over-limit
+      // colour the edit screen applied.
+      // Switching Type swaps the starting layout (C-51) — but ONLY while the
+      // body is still exactly what we put there. Once an author has typed a
+      // word, changing the dropdown must not throw it away.
+      const startBodies = document.getElementById('post-start-bodies');
+      if (startBodies) {
+        const kindSelect = document.getElementById('kind');
+        const editor = document.querySelector('#post-content .editor-content');
+        const textarea = document.querySelector('textarea[name="content"]');
+        const forKind = (k) => (k === 'page' ? startBodies.dataset.page : startBodies.dataset.post) || '';
+        let planted = forKind(kindSelect?.value ?? 'post');
+        kindSelect?.addEventListener('change', () => {
+          if (!editor || !textarea) return;
+          const now = editor.innerHTML.trim();
+          if (now !== '' && now !== planted.trim()) return;
+          planted = forKind(kindSelect.value);
+          editor.innerHTML = planted;
+          textarea.value = planted;
+          textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+      }
+
+      charCount(this.metaTitleInput, document.getElementById('meta-title-count'), 60);
+      // Typing in the field claims it. `isTrusted` distinguishes the author's
+      // own keystroke from the synthetic event the mirror dispatches, so
+      // mirroring cannot mark the field as touched by itself.
+      this.metaTitleTouched = false;
+      this.metaTitleInput.addEventListener('input', (e) => {
+        if (e.isTrusted) this.metaTitleTouched = true;
+      });
+      charCount(this.metaDescriptionInput, document.getElementById('meta-description-count'), 160);
+      
+      // Form submission
+      this.form.addEventListener('submit', this.handleSubmit.bind(this));
+      
+      // Draft saving
+      document.getElementById('save-draft').addEventListener('click', this.saveDraft.bind(this));
+      
+      // Preview
+      document.getElementById('preview-post').addEventListener('click', this.previewPost.bind(this));
+      
+      // Featured image
+      document.getElementById('select-featured-image').addEventListener('click', this.openMediaModal.bind(this));
+      document.getElementById('remove-featured-image').addEventListener('click', this.removeFeaturedImage.bind(this));
+      document.getElementById('close-media-modal').addEventListener('click', this.closeMediaModal.bind(this));
+      
+      // Tag suggestions
+      document.addEventListener('click', this.handleTagSuggestion.bind(this));
+      
+      // Media selection
+      document.addEventListener('mediaSelected', this.handleMediaSelected.bind(this));
+      
+      // Set default publish date
+      this.setDefaultPublishDate();
+    }
+    
+    generateSlug() {
+      const title = this.titleInput.value;
+      const slug = title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      
+      this.slugInput.value = slug;
+      
+      // MIRROR the title until the author touches this field.
+      //
+      // The old rule was "fill it if empty", and generateSlug runs on every
+      // keystroke — so it filled on the FIRST character and then never again,
+      // because the field was no longer empty. Every post created through this
+      // screen shipped a one-letter meta title, which BaseLayout renders as the
+      // page <title> and og:title.
+      if (!this.metaTitleTouched) {
+        this.metaTitleInput.value = title;
+        this.metaTitleInput.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }
+    
+    setDefaultPublishDate() {
+      const now = new Date();
+      const localDateTime = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
+        .toISOString()
+        .slice(0, 16);
+      document.getElementById('publish-date').value = localDateTime;
+    }
+    
+    collectPayload(status) {
+      const fd = new FormData(this.form);
+      const get = (k) => {
+        const v = fd.get(k);
+        return v == null ? '' : String(v);
+      };
+      const payload = {
+        title: get('title').trim(),
+        slug: get('slug').trim() || undefined,
+        content: get('content'),
+        excerpt: get('excerpt').trim() || undefined,
+        featured_image: get('featured_image').trim() || undefined,
+        category_id: get('category_id').trim() || undefined,
+        meta_title: get('meta_title').trim() || undefined,
+        meta_description: get('meta_description').trim() || undefined,
+        noindex: !!document.getElementById('post-noindex')?.checked,
+        focus_keyphrase: document.getElementById('post-keyphrase')?.value || undefined,
+        pinned: !!document.getElementById('post-pinned')?.checked,
+        // An empty box is ABSENT, not 0. Zero is a real position — the very
+        // front — and a cleared field must not silently claim it.
+        ...(document.getElementById('post-menu-order')?.value.trim()
+          ? { menu_order: Number(document.getElementById('post-menu-order').value) }
+          : {}),
+        status: status || get('status') || 'draft',
+        // 'post' or 'page'. A Page routes at /slug instead of /blog/slug; it is
+        // the same record, so it inherits revisions, autosave and i18n.
+        kind: get('kind') === 'page' ? 'page' : 'post',
+        publish_date: get('publish_date') || undefined,
+        // Only present on multilingual sites (the picker is conditional).
+        locale: get('locale') || undefined,
+        translation_of: get('translation_of') || undefined,
+      };
+      const tags = get('tags').split(',').map(t => t.trim()).filter(Boolean);
+      if (tags.length) payload.tags = tags;
+
+      // Custom taxonomies (C-128). This serialiser builds an explicit key list
+      // rather than posting the form, so a field that only exists as markup is
+      // invisible to it — the term picker rendered, ticked and synced its
+      // hidden input, and nothing ever sent it. The whole assignment feature
+      // was inert in the admin while every server-side test passed.
+      const terms = get('terms');
+      if (terms) {
+        try {
+          const parsed = JSON.parse(terms);
+          if (parsed && typeof parsed === 'object' && Object.keys(parsed).length) payload.terms = parsed;
+        } catch { /* a malformed field is no terms, not a failed save */ }
+      }
+      return payload;
+    }
+
+    async handleSubmit(e) {
+      e.preventDefault();
+      const payload = this.collectPayload('published');
+      if (!payload.title) {
+        this.showNotification('A title is required.', 'error');
+        return;
+      }
+      const res = await api.post('/api/posts', payload);
+      if (!res.ok) {
+        this.showNotification(`Publish failed: ${res.error}`, 'error');
+        return;
+      }
+      this.showNotification('Post published successfully!', 'success');
+      setTimeout(() => { window.location.href = '/admin/posts'; }, 600);
+    }
+
+    async saveDraft() {
+      const payload = this.collectPayload('draft');
+      if (!payload.title) {
+        this.showNotification('A title is required.', 'error');
+        return;
+      }
+      const res = await api.post('/api/posts', payload);
+      if (!res.ok) {
+        this.showNotification(`Save failed: ${res.error}`, 'error');
+        return;
+      }
+      this.showNotification('Draft saved successfully!', 'success');
+      setTimeout(() => { window.location.href = `/admin/posts/${res.data.id}/edit`; }, 600);
+    }
+    
+    previewPost() {
+      // Preview the (possibly unsaved) content in a new window.
+      const data = this.collectPayload();
+      // POST the draft to a real Astro page, which runs the SAME
+      // applyFilters -> sanitizeHtml pipeline the front end runs, inside the
+      // same layout. The old version wrote an interpolated template string into
+      // an about:blank window: unsanitised (self-XSS, and no CSP applies there)
+      // and untrue (no theme tokens, no section styles, no plugin filters), so
+      // it showed something the published page would never look like.
+      //
+      // A form POST rather than fetch+write, so the browser navigates the new
+      // tab normally and the draft body never lands in a URL, history entry or
+      // Referer header.
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = '/admin/posts/preview';
+      form.target = 'post-preview';
+      for (const [key, value] of Object.entries({ title: data.title || '', content: data.content || '' })) {
+        const field = document.createElement('input');
+        field.type = 'hidden';
+        field.name = key;
+        field.value = value;
+        form.appendChild(field);
+      }
+      document.body.appendChild(form);
+      window.open('', 'post-preview');
+      form.submit();
+      form.remove();
+    }
+    
+    openMediaModal() {
+      this.mediaModal.classList.remove('hidden');
+      document.body.style.overflow = 'hidden';
+    }
+    
+    closeMediaModal() {
+      this.mediaModal.classList.add('hidden');
+      document.body.style.overflow = '';
+    }
+    
+    handleMediaSelected(e) {
+      const { url, filename } = e.detail;
+      
+      // Set featured image
+      this.featuredImageUrl.value = url;
+      this.featuredImageImg.src = url;
+      this.featuredImageImg.alt = filename;
+      this.featuredImagePreview.classList.remove('hidden');
+      
+      // Close modal
+      this.closeMediaModal();
+    }
+    
+    removeFeaturedImage() {
+      this.featuredImageUrl.value = '';
+      this.featuredImageImg.src = '';
+      this.featuredImagePreview.classList.add('hidden');
+    }
+    
+    handleTagSuggestion(e) {
+      const suggestion = e.target.closest('.tag-suggestion');
+      if (suggestion) {
+        const tag = suggestion.textContent;
+        const tagsInput = document.getElementById('post-tags');
+        const currentTags = tagsInput.value;
+        
+        if (currentTags) {
+          tagsInput.value = currentTags + ', ' + tag;
+        } else {
+          tagsInput.value = tag;
+        }
+      }
+    }
+    
+    showNotification(message, type = 'info') {
+      const notification = document.createElement('div');
+      notification.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 ${
+        type === 'success' ? 'bg-green-500 text-white' : 
+        type === 'error' ? 'bg-red-500 text-white' : 
+        'bg-blue-500 text-white'
+      }`;
+      notification.textContent = message;
+      
+      document.body.appendChild(notification);
+      
+      setTimeout(() => {
+        notification.remove();
+      }, 3000);
+    }
+  }
+  
+  // Initialize post editor
+  document.addEventListener('DOMContentLoaded', () => {
+    new PostEditor();
+  });
+</script>

@@ -1,0 +1,26 @@
+{
+  "name": "AstroBaaS example registry",
+  "updated_at": "2026-08-01",
+  "plugins": [
+    {
+      "id": "faq-and-seo",
+      "name": "FAQ + SEO Meta",
+      "version": "1.0.0",
+      "description": "Reference declarative plugin: FAQ content type, SEO meta tags, and styling — no code, no rebuild.",
+      "author": "AstroBaaS",
+      "homepage": "https://github.com/operator888/astrobaas",
+      "kind": "declarative",
+      "manifestUrl": "https://raw.githubusercontent.com/operator888/astrobaas/main/examples/plugins/faq-and-seo.manifest.json",
+      "sha256": "f7e169e784d7be27be00742c67ddb67340aec438414c9511b2f201ab6fb2e4bb"
+    },
+    {
+      "id": "smtp2go",
+      "name": "SMTP2GO",
+      "version": "1.0.0",
+      "description": "Send transactional email (password resets, contact forms, order notifications) through SMTP2GO's HTTP API. Ships with AstroBaaS — set SMTP2GO_API_KEY and SMTP2GO_SENDER, then activate it under Plugins.",
+      "author": "AstroBaaS",
+      "homepage": "https://github.com/operator888/astrobaas/blob/main/PLUGIN_DEVELOPMENT.md#smtp2go-connector",
+      "kind": "bundled"
+    }
+  ]
+}

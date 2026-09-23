@@ -1,0 +1,201 @@
+---
+import PublicLayout from '../layouts/PublicLayout.astro';
+import { LocalDB } from '../lib/localdb';
+import { postHref } from '../lib/locale-links';
+import Spinner3D from '../components/showcase/Spinner3D';
+
+// Everything on this animated page is driven by CMS data — the heading/tagline
+// come from settings, the floating cards are the published posts, and the 3D
+// mesh colour is the active theme's primary colour. This proves "CMS data ->
+// animated/3D frontend" without putting any effect code in the CMS itself.
+await LocalDB.init();
+const settings = Object.fromEntries((await LocalDB.getSettings()).map((s) => [s.key, s.value]));
+const theme = await LocalDB.getActiveTheme();
+const primary = theme?.settings.colors.primary ?? '#3B82F6';
+const secondary = theme?.settings.colors.secondary ?? '#8B5CF6';
+const siteTitle = typeof settings.site_title === 'string' ? settings.site_title : 'AstroBaaS';
+
+const posts = (await LocalDB.getPosts())
+  .filter((p) => p.status === 'published')
+  .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+  .slice(0, 6);
+---
+
+<PublicLayout title="Showcase" description="Scroll-driven parallax, float-on-scroll, and a 3D island — all fed by AstroBaaS content.">
+  <!-- Hero with layered parallax -->
+  <section class="showcase-hero" data-c1={primary} data-c2={secondary}>
+    <div class="parallax-layer layer-back" aria-hidden="true"></div>
+    <div class="parallax-layer layer-mid" aria-hidden="true"></div>
+    <div class="hero-content">
+      <h1 class="reveal">{siteTitle} in motion</h1>
+      <p class="reveal">
+        A live demo: this page reads its content from the CMS and renders it with
+        scroll-driven parallax, float-on-scroll, and a hydrated 3D island.
+      </p>
+      <a href="#cards" class="hero-cta reveal">Scroll ↓</a>
+    </div>
+  </section>
+
+  <!-- 3D island: only hydrates when scrolled into view -->
+  <section class="showcase-3d">
+    <div class="canvas-wrap">
+      <Spinner3D client:visible color={primary} />
+    </div>
+    <div class="showcase-3d-copy reveal">
+      <h2>A real 3D island</h2>
+      <p>
+        This rotating mesh is a React Three Fiber component hydrated with
+        <code>client:visible</code> — the Three.js bundle loads only when it
+        scrolls into view. Its colour is the active theme's primary colour,
+        pulled straight from AstroBaaS.
+      </p>
+    </div>
+  </section>
+
+  <!-- Float-on-scroll cards, one per published post -->
+  <section id="cards" class="showcase-cards">
+    <h2 class="reveal">Content, floating in</h2>
+    {posts.length === 0 ? (
+      <p class="reveal muted">Publish a post in the admin and it appears here.</p>
+    ) : (
+      <div class="card-grid">
+        {posts.map((p, i) => (
+          <article class="float-card" data-i={i}>
+            <h3>{p.title}</h3>
+            <p>{p.excerpt || ''}</p>
+            <a href={postHref(`/blog/${p.slug}`, p)}>Read →</a>
+          </article>
+        ))}
+      </div>
+    )}
+  </section>
+</PublicLayout>
+
+<style>
+  .showcase-hero {
+    position: relative;
+    min-height: 90vh;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    background: linear-gradient(160deg, color-mix(in srgb, var(--c1) 18%, #0b1020), #0b1020);
+    color: #fff;
+    text-align: center;
+  }
+  .parallax-layer {
+    position: absolute;
+    inset: -20% -10%;
+    background-repeat: no-repeat;
+    will-change: transform;
+  }
+  .layer-back {
+    background:
+      radial-gradient(40% 40% at 25% 30%, color-mix(in srgb, var(--c2) 55%, transparent), transparent),
+      radial-gradient(35% 35% at 80% 60%, color-mix(in srgb, var(--c1) 55%, transparent), transparent);
+    filter: blur(40px);
+    transform: translateY(calc(var(--scroll, 0) * 120px));
+  }
+  .layer-mid {
+    background: radial-gradient(30% 30% at 60% 20%, color-mix(in srgb, var(--c1) 40%, transparent), transparent);
+    filter: blur(20px);
+    transform: translateY(calc(var(--scroll, 0) * 60px));
+  }
+  .hero-content { position: relative; z-index: 1; max-width: 46rem; padding: 1.5rem; }
+  .hero-content h1 { font-size: clamp(2.2rem, 6vw, 4rem); margin-bottom: 1rem; }
+  .hero-content p { font-size: 1.15rem; opacity: 0.85; margin-bottom: 1.5rem; }
+  .hero-cta { color: #fff; border: 1px solid rgba(255,255,255,0.5); padding: 0.6rem 1.2rem; border-radius: 999px; }
+
+  .showcase-3d {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+    align-items: center;
+    max-width: 72rem;
+    margin: 0 auto;
+    padding: 6rem 1.5rem;
+  }
+  .canvas-wrap { aspect-ratio: 1; max-height: 420px; }
+  .showcase-3d-copy h2 { font-size: 2rem; margin-bottom: 0.75rem; }
+  @media (max-width: 800px) { .showcase-3d { grid-template-columns: 1fr; } }
+
+  .showcase-cards { max-width: 72rem; margin: 0 auto; padding: 2rem 1.5rem 8rem; }
+  .showcase-cards > h2 { font-size: 2rem; margin-bottom: 2rem; text-align: center; }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1.5rem; }
+  .float-card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 1rem;
+    padding: 1.5rem;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.05);
+  }
+  .float-card h3 { margin-bottom: 0.5rem; }
+  .float-card a { color: var(--primary-color, #2563eb); }
+  .muted { color: #6b7280; text-align: center; }
+
+  /* Float-on-scroll reveal: elements rise + fade in as they enter the viewport. */
+  .reveal, .float-card {
+    opacity: 0;
+    transform: translateY(28px);
+    transition: opacity 0.6s ease, transform 0.6s ease;
+  }
+  .float-card { transition-delay: calc(var(--i, 0) * 80ms); }
+  .reveal.in-view, .float-card.in-view { opacity: 1; transform: none; }
+
+  /* Respect users who prefer no motion: show everything statically, no parallax. */
+  @media (prefers-reduced-motion: reduce) {
+    .reveal, .float-card { opacity: 1; transform: none; transition: none; }
+    .parallax-layer { transform: none !important; }
+  }
+</style>
+
+<script>
+  // @ts-nocheck
+  // Tiny, dependency-free scroll choreography. No effect lives in the CMS — this
+  // is pure frontend, gated on reduced-motion.
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Apply the CSS custom properties that used to be inline `style` attributes
+  // (blocked under the hash-based CSP) via CSSOM, which CSP does not govern.
+  const heroForVars = document.querySelector('.showcase-hero');
+  if (heroForVars) {
+    if (heroForVars.dataset.c1) heroForVars.style.setProperty('--c1', heroForVars.dataset.c1);
+    if (heroForVars.dataset.c2) heroForVars.style.setProperty('--c2', heroForVars.dataset.c2);
+  }
+  document.querySelectorAll('.float-card').forEach((el) => {
+    if (el.dataset.i != null) el.style.setProperty('--i', el.dataset.i);
+  });
+
+  // Float-on-scroll: reveal elements when they enter the viewport.
+  const io = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        if (e.isIntersecting) {
+          e.target.classList.add('in-view');
+          io.unobserve(e.target);
+        }
+      }
+    },
+    { threshold: 0.15 },
+  );
+  document.querySelectorAll('.reveal, .float-card').forEach((el) => {
+    if (reduce) el.classList.add('in-view');
+    else io.observe(el);
+  });
+
+  // Parallax: drive a --scroll custom property from the hero's scroll progress.
+  if (!reduce) {
+    const hero = document.querySelector('.showcase-hero');
+    let ticking = false;
+    const onScroll = () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        const p = Math.min(1, Math.max(0, window.scrollY / window.innerHeight));
+        hero && hero.style.setProperty('--scroll', String(p));
+        ticking = false;
+      });
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  }
+</script>

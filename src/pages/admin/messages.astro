@@ -1,0 +1,270 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { LocalDB } from '../../lib/localdb';
+import { canOpenAdminPage } from '../../lib/admin-access';
+
+await LocalDB.init();
+const user = Astro.locals.user;
+// One rule, asked — not re-implemented. A hand-written role test here is
+// how the page, the middleware and the sidebar drift apart.
+if (!canOpenAdminPage('/admin/messages', user?.role)) {
+  return Astro.redirect('/admin');
+}
+
+const t = Astro.locals.t;
+const messages = await LocalDB.getMessages();
+const subscribers = await LocalDB.getSubscribers();
+const unread = messages.filter((m) => !m.read).length;
+---
+
+<AdminLayout title={t('admin.messages.title')}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="mb-8">
+      <h1 class="text-3xl font-bold text-gray-900">{t('admin.messages.title')}</h1>
+      <p class="text-gray-600 mt-2">{t('admin.messages.subtitle')}</p>
+    </div>
+
+    <!-- Stats -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+      <div class="bg-white rounded-lg border border-gray-200 p-6">
+        <div class="text-2xl font-bold text-gray-900">{messages.length}</div>
+        <div class="text-sm text-gray-600">{t('admin.messages.statTotal')}</div>
+      </div>
+      <div class="bg-white rounded-lg border border-gray-200 p-6">
+        <div class="text-2xl font-bold text-blue-600">{unread}</div>
+        <div class="text-sm text-gray-600">{t('admin.messages.statUnread')}</div>
+      </div>
+      <div class="bg-white rounded-lg border border-gray-200 p-6">
+        <div class="text-2xl font-bold text-green-600">{subscribers.length}</div>
+        <div class="text-sm text-gray-600">{t('admin.messages.statSubscribers')}</div>
+      </div>
+    </div>
+
+    <!-- Contact messages -->
+    <div class="bg-white rounded-lg border border-gray-200 overflow-hidden mb-8">
+      <div class="p-6 border-b border-gray-200">
+        <h2 class="text-lg font-semibold text-gray-900">{t('admin.messages.contactHeading')}</h2>
+      </div>
+      {messages.length === 0 ? (
+        <p class="p-6 text-sm text-gray-500">{t('admin.messages.empty')}</p>
+      ) : (
+        <ul class="divide-y divide-gray-200">
+          {messages.map((m) => (
+            <li class={`p-6 ${m.read ? '' : 'bg-blue-50/40'}`}>
+              <div class="flex items-start justify-between gap-4">
+                <div class="min-w-0">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="font-medium text-gray-900">{m.name}</span>
+                    <a href={`mailto:${m.email}`} class="text-sm text-blue-600 hover:underline">{m.email}</a>
+                    {!m.read && <span class="px-2 py-0.5 text-xs bg-blue-100 text-blue-800 rounded-full">{t('admin.messages.newBadge')}</span>}
+                    {m.spam_flagged && (
+                      <span
+                        class="px-2 py-0.5 text-xs bg-amber-100 text-amber-800 rounded-full"
+                        title={(m.spam_reasons ?? []).join(' ')}
+                      >Possibly spam</span>
+                    )}
+                  </div>
+                  {m.subject && <div class="text-sm text-gray-500 mt-0.5">{t('admin.messages.subject', { subject: m.subject })}</div>}
+                  {m.spam_flagged && (m.spam_reasons ?? []).length > 0 && (
+                    <div class="text-xs text-amber-700 mt-1">
+                      {/*
+                        Shown, not hidden behind a filter. Nothing here was
+                        REJECTED — a heuristic that silently drops the one
+                        enquiry that mattered is worse than a badge somebody
+                        has to read past.
+                      */}
+                      {(m.spam_reasons ?? []).join(' ')}
+                    </div>
+                  )}
+                  <p class="text-gray-700 mt-2 whitespace-pre-line break-words">{m.message}</p>
+                  <div class="text-xs text-gray-400 mt-2">{new Date(m.created_at).toLocaleString()}</div>
+                </div>
+                <div class="flex flex-col items-end gap-2 shrink-0">
+                  <button class="text-sm text-gray-600 hover:text-gray-900 toggle-read" data-id={m.id} data-read={m.read ? '1' : '0'}>
+                    {m.read ? t('admin.messages.markUnread') : t('admin.messages.markRead')}
+                  </button>
+                  <button class="text-sm text-red-600 hover:text-red-800 delete-message" data-id={m.id}>{t('admin.messages.delete')}</button>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+
+    <!-- Subscribers -->
+    <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
+      <div class="p-6 border-b border-gray-200">
+        <h2 class="text-lg font-semibold text-gray-900">
+          {t('admin.messages.subscribersHeading', undefined, { count: subscribers.length })}
+        </h2>
+      </div>
+      {subscribers.length === 0 ? (
+        <p class="p-6 text-sm text-gray-500">{t('admin.messages.subscribersEmpty')}</p>
+      ) : (
+        <ul class="divide-y divide-gray-200">
+          {subscribers.map((s) => (
+            <li class="px-6 py-3 flex items-center justify-between gap-4">
+              <a href={`mailto:${s.email}`} class="text-sm text-blue-600 hover:underline">{s.email}</a>
+              <span class="flex items-center gap-3">
+                <span class="text-xs text-gray-400">{new Date(s.created_at).toLocaleDateString()}</span>
+                {/* Removing ONE person, without the GDPR erasure — which also
+                    deletes their customer record, their messages and their
+                    email log. "Please stop emailing me" should not cost
+                    somebody their order history. */}
+                <button
+                  class="delete-subscriber text-xs px-2 py-1 rounded border border-gray-300 text-gray-600 hover:bg-red-50 hover:text-red-700 hover:border-red-300"
+                  data-id={s.id}
+                  data-email={s.email}
+                >{t('admin.messages.subscriberRemove')}</button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+
+    {/*
+      Campaigns (C-111). On this screen because it is where the list already
+      lives — a separate page would mean an operator holding two ideas about
+      the same people.
+    */}
+    <div class="bg-white rounded-lg border border-gray-200 overflow-hidden mt-8">
+      <div class="p-6 border-b border-gray-200">
+        <h2 class="text-lg font-semibold text-gray-900">Send a newsletter</h2>
+        <p class="text-sm text-gray-600 mt-1 max-w-2xl">
+          Goes to everyone who confirmed a subscription, a batch at a time, each message carrying a
+          one-click unsubscribe.
+        </p>
+        <p class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 mt-3 max-w-2xl">
+          <strong>This is not a mailing service.</strong> There is no bounce handling and no
+          complaint feedback loop. A campaign to a large list through your own mail server can cost
+          you the deliverability of your <em>order confirmations</em>, which is far more expensive
+          than a newsletter. For anything beyond a few hundred addresses, use a provider.
+        </p>
+      </div>
+      <div class="p-6 space-y-4">
+        <div id="nc-notice" class="hidden"></div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="nc-subject">Subject</label>
+          <input id="nc-subject" type="text" maxlength="200"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="nc-body">Message</label>
+          <textarea id="nc-body" rows="8"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg"
+            placeholder="Plain text. Blank lines become paragraphs."></textarea>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <button id="nc-draft" type="button"
+            class="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">
+            Save draft
+          </button>
+          <button id="nc-send" type="button"
+            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+            Send to {subscribers.length} subscriber{subscribers.length === 1 ? '' : 's'}
+          </button>
+          <span id="nc-ready" class="text-xs text-gray-400"></span>
+        </div>
+        <div id="nc-history" class="pt-2"></div>
+      </div>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../lib/apiClient';
+  import { flash as sharedFlash } from '../../lib/admin-ui';
+
+  /* ---- newsletter campaigns (C-111) ---- */
+  {
+    const notice = document.getElementById('nc-notice');
+    const subject = document.getElementById('nc-subject');
+    const body = document.getElementById('nc-body');
+    const history = document.getElementById('nc-history');
+    const ready = document.getElementById('nc-ready');
+
+    const refresh = async () => {
+      const res = await api.get('/api/newsletter/campaigns');
+      if (!res.ok) return;
+      // Said BEFORE somebody writes a newsletter, not after they press Send.
+      ready.textContent = res.data?.emailChannelReady
+        ? ''
+        : 'No email channel is configured — nothing would be delivered.';
+      const rows = res.data?.campaigns ?? [];
+      history.replaceChildren();
+      if (rows.length === 0) return;
+      const h = document.createElement('h3');
+      h.className = 'text-sm font-semibold text-gray-900 mb-2';
+      h.textContent = 'Sent';
+      const ul = document.createElement('ul');
+      ul.className = 'divide-y divide-gray-100 text-sm';
+      for (const c of rows.slice(0, 10)) {
+        const li = document.createElement('li');
+        li.className = 'py-2 flex items-center justify-between gap-4';
+        const left = document.createElement('span');
+        left.className = 'truncate text-gray-700';
+        left.textContent = c.subject ?? '(no subject)';
+        const right = document.createElement('span');
+        right.className = 'text-xs text-gray-500 whitespace-nowrap';
+        const failed = Number(c.failed_count ?? 0);
+        // Addresses in a batch whose sender stopped before it could record the
+        // result, or whose mail server took the message and never answered:
+        // they may or may not have received it, and are NOT resent.
+        const unconfirmed = Number(c.unconfirmed_count ?? 0);
+        right.textContent = c.status === 'sending'
+          ? `sending — ${c.sent_count ?? 0} of ${c.audience ?? '?'}`
+          : `${c.status} · ${c.sent_count ?? 0} sent${failed ? `, ${failed} failed` : ''}`
+            + (unconfirmed ? `, ${unconfirmed} unconfirmed` : '');
+        li.append(left, right);
+        ul.appendChild(li);
+      }
+      history.append(h, ul);
+    };
+
+    const submit = async (send) => {
+      const res = await api.post('/api/newsletter/campaigns', {
+        subject: subject.value, body: body.value, send,
+      });
+      if (!res.ok) { sharedFlash(notice, res.error, 'error'); return; }
+      sharedFlash(notice, res.message || (send ? 'Sending.' : 'Draft saved.'));
+      if (send) { subject.value = ''; body.value = ''; }
+      refresh();
+    };
+
+    document.getElementById('nc-draft')?.addEventListener('click', () => submit(false));
+    document.getElementById('nc-send')?.addEventListener('click', () => {
+      // A send cannot be recalled. One confirmation, naming the count.
+      const n = Number(document.getElementById('nc-send').textContent.match(/\d+/)?.[0] ?? 0);
+      if (!confirm(`Send this to ${n} subscriber${n === 1 ? '' : 's'}? This cannot be undone.`)) return;
+      submit(true);
+    });
+    refresh();
+  }
+
+  document.addEventListener('click', async (e) => {
+    // Dispatch is on the CLASS, never on the button's text — the labels below
+    // are translated, the selectors are not.
+    const del = e.target.closest('.delete-message');
+    const toggle = e.target.closest('.toggle-read');
+    const unsub = e.target.closest('.delete-subscriber');
+    if (unsub) {
+      if (!confirm(window.t('admin.messages.subscriberRemoveConfirm', { email: unsub.dataset.email }))) return;
+      const res = await api.post('/api/newsletter/subscribers/delete', { id: unsub.dataset.id });
+      if (res.ok) location.reload();
+      else alert(res.error || window.t('admin.messages.subscriberRemoveFailed'));
+    } else if (del) {
+      if (!confirm(window.t('admin.messages.deleteConfirm'))) return;
+      const res = await api.post('/api/messages/delete', { id: del.dataset.id });
+      if (res.ok) location.reload();
+      else alert(res.error || window.t('admin.messages.deleteFailed'));
+    } else if (toggle) {
+      const read = toggle.dataset.read === '1';
+      const res = await api.post('/api/messages/read', { id: toggle.dataset.id, read: !read });
+      if (res.ok) location.reload();
+      else alert(res.error || window.t('admin.messages.updateFailed'));
+    }
+  });
+</script>

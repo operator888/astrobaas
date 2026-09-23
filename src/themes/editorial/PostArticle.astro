@@ -1,0 +1,26 @@
+---
+/**
+ * Editorial theme — `PostArticle` override.
+ *
+ * The article page as a print spread: kicker, huge serif headline, a one-line
+ * dateline, then a measured column. The byline sits ABOVE the rule because in
+ * editorial convention the credit is part of the head, not the footer.
+ */
+import type { PostArticleProps } from '../../core/theme-slots';
+
+const { post, contentHtml, author, category, date, readTime } = Astro.props as PostArticleProps;
+---
+
+<article class="editorial-article max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-14">
+  <header class="text-center mb-10">
+    <p class="text-xs uppercase tracking-widest text-gray-500 mb-4">{category}</p>
+    <h1 class="font-serif text-4xl md:text-6xl leading-[1.05] text-gray-900 mb-6">{post.title}</h1>
+    <p class="text-sm text-gray-500">
+      By <span class="text-gray-700">{author}</span>
+      <span aria-hidden="true"> · </span><time>{date}</time>
+      <span aria-hidden="true"> · </span>{readTime} min
+    </p>
+    <div class="mt-8 mx-auto w-16 border-b-2 border-gray-900"></div>
+  </header>
+  <div class="prose prose-lg mx-auto" set:html={contentHtml} />
+</article>

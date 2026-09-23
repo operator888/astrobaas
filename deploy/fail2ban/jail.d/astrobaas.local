@@ -1,0 +1,80 @@
+# AstroBaaS — fail2ban jails for the reference nginx vhost.
+#
+#   sudo apt install fail2ban
+#   sudo cp ../filter.d/astrobaas-429.conf /etc/fail2ban/filter.d/
+#   sudo cp astrobaas.local /etc/fail2ban/jail.d/
+#   # replace cms.example.com in the log paths, then:
+#   sudo fail2ban-client reload && sudo fail2ban-client status
+#
+# WHAT THIS IS FOR
+#
+# The rate limits (nginx's and the app's) already REFUSE a flood; they do not
+# stop it arriving. An address that is refused hundreds of times a minute still
+# costs a TLS handshake and a log line per request. These jails move a
+# persistent offender down to the firewall, where it costs nothing.
+#
+# The thresholds are deliberately loose. One catalogue page view is ~450
+# requests (see the vhost header), so a busy shopper can collect a few 429s
+# legitimately; banning on a handful would ban customers. These fire on an
+# address that is rejected CONTINUOUSLY.
+#
+# BEHIND CLOUDFLARE, READ THIS FIRST
+#
+# fail2ban's default action is an iptables/nftables rule on THIS machine. Behind
+# Cloudflare the TCP peer is always a Cloudflare edge, so:
+#   1. enable the real-IP lines in the vhost, or every ban is a Cloudflare
+#      address and the site goes dark for a whole region; and
+#   2. ban at Cloudflare instead of locally — a local firewall rule cannot
+#      match the visitor's address, which is not in the packet. fail2ban ships
+#      an action for it (action.d/cloudflare-token.conf, fail2ban >= 1.0.1):
+#        action = cloudflare-token[cfzone="example.com", cftoken="..."]
+#      Keep the token in a file readable only by root, not here.
+#
+# Always list your own addresses (office, monitoring, the storefront server)
+# in each jail's ignoreip, space-separated, e.g.
+#   ignoreip = 127.0.0.1/8 ::1 203.0.113.10 198.51.100.20
+# A headless storefront's server makes every API call for every shopper; if it
+# is ever rate-limited, banning it takes the shop down. (Set per jail rather
+# than in [DEFAULT], which would change every other jail on the box too.)
+
+# Addresses that keep hitting a 429 — the edge limit or the app's own.
+[astrobaas-429]
+enabled  = true
+ignoreip = 127.0.0.1/8 ::1
+port     = http,https
+filter   = astrobaas-429
+logpath  = /var/log/nginx/cms.example.com.access.log
+# 60 rejections inside 2 minutes, banned for an hour, escalating on repeat.
+maxretry = 60
+findtime = 2m
+bantime  = 1h
+bantime.increment = true
+bantime.maxtime   = 1w
+
+# The same, read from nginx's ERROR log, using fail2ban's stock filter: nginx
+# logs one "limiting requests ... by zone" line per edge rejection. Covers a
+# vhost whose access log is off or in another format. Only the AstroBaaS zones
+# are counted, so another site's limits on the same box are not mixed in.
+[astrobaas-nginx-limit-req]
+enabled  = true
+ignoreip = 127.0.0.1/8 ::1
+port     = http,https
+filter   = nginx-limit-req[ngx_limit_req_zones="astrobaas_general|astrobaas_login|astrobaas_rare"]
+logpath  = /var/log/nginx/cms.example.com.error.log
+maxretry = 60
+findtime = 2m
+bantime  = 1h
+bantime.increment = true
+bantime.maxtime   = 1w
+
+# Credential stuffing, tighter: the login zone is 30/min per address, so an
+# address rejected by it 20 times in 10 minutes is not a person mistyping.
+[astrobaas-login]
+enabled  = true
+ignoreip = 127.0.0.1/8 ::1
+port     = http,https
+filter   = nginx-limit-req[ngx_limit_req_zones="astrobaas_login"]
+logpath  = /var/log/nginx/cms.example.com.error.log
+maxretry = 20
+findtime = 10m
+bantime  = 6h

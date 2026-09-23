@@ -1,0 +1,162 @@
+# AstroBaaS — reference systemd unit.
+#
+#   sudo cp astrobaas.service /etc/systemd/system/cms-example-com.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cms-example-com
+#
+# Replace cms-example-com and /var/www/cms-example-com throughout. The layout
+# below is the one deploy.sh already creates:
+#
+#   /var/www/<slug>/releases/<timestamp>/   one build
+#   /var/www/<slug>/current -> releases/…   symlink, flipped on deploy
+#   /var/www/<slug>/shared/.env             secrets, survives releases
+#   /var/www/<slug>/shared/data/            database + uploads, survive releases
+#   /var/www/<slug>/shared/maintenance/     the page nginx shows while this is down
+#
+# deploy.sh reads User= and Environment=PORT= from THIS unit to decide who owns
+# shared/data and which port to probe, so keep them here rather than in .env.
+#
+# THE POINT OF shared/: everything the app writes lives outside the release
+# directory. A deploy that swaps `current` must not move the uploads with it, or
+# every image uploaded since the last deploy 404s.
+
+[Unit]
+Description=AstroBaaS — cms.example.com
+After=network-online.target
+Wants=network-online.target
+
+# These belong in [Unit], not [Service] — systemd ignores them there, and the
+# crash-loop guard below would silently not exist. A missing or too-short
+# AUTH_SECRET throws on first use, which without this is an invisible restart
+# loop that fills the journal and never serves a request.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/cms-example-com/current
+
+# Secrets live here, not in this file: a unit file is world-readable by default
+# and AUTH_SECRET is the key every session cookie is signed with.
+#   sudo install -o root -g www-data -m 0640 /dev/null /var/www/cms-example-com/shared/.env
+EnvironmentFile=/var/www/cms-example-com/shared/.env
+
+# Bind to LOOPBACK ONLY.
+#
+# This is not a preference. TRUST_PROXY=1 tells the app to believe the
+# X-Forwarded-For header nginx sets. If the port is also reachable directly,
+# anyone can send that header themselves and get a forged client IP — a fresh
+# rate-limit bucket per request, and a login throttle that counts against
+# somebody else's address.
+Environment=HOST=127.0.0.1
+Environment=PORT=3002
+
+# Believe the proxy's headers — and ONLY safe because of the loopback bind
+# above. This is what makes X-Forwarded-For yield the real client IP for rate
+# limiting and the login throttle, and what makes X-Forwarded-Proto yield
+# https:// in the absolute media URLs the API publishes. Without it, a shop
+# behind TLS-terminating nginx publishes http:// image URLs, which an https
+# storefront page will refuse to load as mixed content.
+Environment=TRUST_PROXY=1
+
+# NODE_ENV is not what gates the production security rules (the app derives that
+# from the build), but SECURITY.md's checklist asks for it and some libraries
+# read it. Set it anyway.
+Environment=NODE_ENV=production
+
+# Both default to paths inside the WorkingDirectory — that is, inside the
+# release being swapped — which ProtectSystem=strict makes read-only and which
+# a deploy would replace anyway. They must point into shared/.
+Environment=DB_PATH=/var/www/cms-example-com/shared/data/db.json
+Environment=UPLOADS_DIR=/var/www/cms-example-com/shared/data/uploads
+# (With DATABASE_URL set, DB_PATH is unused and the SQLite file plus its -wal
+# and -shm siblings need a writable directory instead — still under shared/.)
+
+# Files strangers attach to public forms. NOT under UPLOADS_DIR, which nginx
+# serves to anyone; nothing but the app reads this directory.
+#
+# Set explicitly because the old code default was `private-uploads/` in the
+# WORKING DIRECTORY — the release — which ProtectSystem=strict makes read-only:
+# every form attachment failed with EROFS, and the ones that had been written
+# somewhere writable were left behind by the next deploy. The code now defaults
+# to beside the database, which is this same path; saying it here means the
+# unit does not depend on that.
+Environment=PRIVATE_UPLOADS_DIR=/var/www/cms-example-com/shared/data/private-uploads
+
+# V8's heap ceiling, sized against MemoryMax below — NOT equal to it.
+#
+# Without it, Node picks a heap limit from the machine's RAM, not from this
+# unit's cgroup, so on a 4 GB box the heap may grow past MemoryMax and the
+# kernel OOM-kills the process mid-request instead of V8 collecting garbage.
+# About half of MemoryMax, and under MemoryHigh, because a large share of this
+# app's memory is NOT heap: sharp/libvips decode images in native memory, and
+# upload Buffers live outside the old space. Raise all three together.
+Environment=NODE_OPTIONS=--max-old-space-size=512
+
+# Graceful shutdown budget (src/lib/shutdown.ts): on SIGTERM the app stops
+# taking scheduled work, waits for in-flight requests (a checkout mid-write),
+# flushes buffered view counts, and exits 0. MUST stay below TimeoutStopSec
+# below, or systemd's SIGKILL lands first and the drain is cut off.
+Environment=SHUTDOWN_TIMEOUT_MS=25000
+
+ExecStart=/usr/bin/node ./dist/server/entry.mjs
+
+# SIGTERM (the default), then SIGKILL after TimeoutStopSec. The default 90 s
+# would hold a `systemctl restart` for a minute and a half behind one stuck
+# request; 30 s is the 25 s drain above plus a margin.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Every open socket and file is a descriptor. The distribution default soft
+# limit (1024) is reached by a few hundred concurrent visitors plus their
+# keep-alive connections, and then accept() fails with EMFILE — which Node
+# reports as a crash in whatever happened to open the next file.
+LimitNOFILE=65536
+
+# Restart, but give up if it is crash-looping.
+#
+# A missing or too-short AUTH_SECRET throws on first use. With a bare
+# Restart=always that becomes an invisible restart loop that fills the journal
+# and never serves a request; the limits below turn it into a failed unit an
+# operator can see with `systemctl status`.
+Restart=always
+RestartSec=2
+
+# --- Hardening -------------------------------------------------------------
+# The app writes exactly two things: the database and the uploads directory.
+# Everything else can be read-only, including its own release directory — a
+# compromised process should not be able to rewrite the code it runs next boot.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+# ^ sharp's native module needs a writable+executable mapping. Setting this to
+#   yes makes every image upload fail with a mmap error, and the failure looks
+#   like a broken pipeline rather than a sandbox rule.
+
+# The only writable paths. If you set DB_PATH, UPLOADS_DIR or
+# PRIVATE_UPLOADS_DIR elsewhere, they must be listed here or every write fails
+# with EROFS.
+ReadWritePaths=/var/www/cms-example-com/shared
+
+# A single shop does not need more than this, and a bound turns a runaway image
+# job into a restart instead of an OOM that takes the database with it.
+# NODE_OPTIONS above is sized against these two; change them together.
+MemoryMax=1G
+MemoryHigh=768M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=astrobaas
+
+[Install]
+WantedBy=multi-user.target

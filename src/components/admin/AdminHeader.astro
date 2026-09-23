@@ -1,0 +1,139 @@
+---
+/**
+ * The admin header bar.
+ *
+ * Labels come from `admin.chrome.*` so the shell is in the operator's language
+ * on every screen; the two icon-only controls carry an aria-label for the same
+ * reason, since an unnamed button is unusable in ANY language.
+ */
+const t = Astro.locals.t;
+---
+
+<header class="bg-white shadow-sm border-b border-gray-200">
+  <div class="flex items-center justify-between h-16 px-6">
+    <!-- Mobile menu button -->
+    <button id="mobile-menu-button" aria-label={t('admin.chrome.openMenu')} class="lg:hidden p-2 rounded-md text-gray-600 hover:text-gray-900 hover:bg-gray-100">
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+      </svg>
+    </button>
+    
+    <!-- Page title will be inserted here by individual pages -->
+    <div class="flex-1 lg:flex-none">
+      <h1 id="page-title" class="text-xl font-semibold text-gray-900"></h1>
+    </div>
+    
+    <!-- Header actions -->
+    <div class="flex items-center space-x-4">
+      {/*
+        The palette's visible half.
+
+        ⌘K is the fast path, and a shortcut with no on-screen affordance is a
+        feature only the person who wrote it ever uses. The shortcut is printed
+        on the control rather than described in documentation nobody opens.
+        `aria-keyshortcuts` tells a screen reader the same thing.
+      */}
+      <button
+        id="ab-palette-open"
+        type="button"
+        aria-keyshortcuts="Meta+K Control+K"
+        class="hidden sm:flex items-center gap-2 pl-3 pr-2 py-2 border border-gray-300 rounded-lg text-sm text-gray-500 bg-white hover:bg-gray-50 transition-colors duration-200"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M11 19a8 8 0 110-16 8 8 0 010 16z"/>
+        </svg>
+        <span>{t('admin.palette.open')}</span>
+        {/*
+          The glyph is set by the CLIENT, because the server cannot know which
+          keyboard is in front of the reader. It shipped as a hardcoded ⌘K while
+          the handler binds `metaKey || ctrlKey`, so every Windows and Linux
+          operator was shown the one on-screen instruction for this control
+          naming a key their keyboard does not have. `aria-keyshortcuts` already
+          named both correctly, so a screen reader was better informed than the
+          screen. Defaults to Ctrl, which is the more common case and the safer
+          thing to be wrong about.
+        */}
+        <kbd id="ab-palette-kbd" class="ml-1 px-1.5 py-0.5 rounded border border-gray-300 bg-gray-50 text-[10px] font-sans text-gray-500">Ctrl K</kbd>
+      </button>
+      <!-- Notifications -->
+      <button class="p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg relative">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-5 5v-5zM10.5 3.5a6 6 0 0 1 6 6v2l1.5 1.5v1h-13v-1L6.5 11.5v-2a6 6 0 0 1 6-6z"/>
+        </svg>
+        <span class="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
+      </button>
+      
+      <!-- View site -->
+      <a href="/" target="_blank" class="inline-flex items-center px-3 py-2 border border-gray-300 text-sm font-medium rounded-lg text-gray-700 bg-white hover:bg-gray-50 transition-colors duration-200">
+        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+        </svg>
+        {t('admin.chrome.viewSite')}
+      </a>
+      
+      <!-- User menu -->
+      <div class="relative">
+        <button id="user-menu-button" aria-label={t('admin.chrome.userMenu')} class="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-100 transition-colors duration-200">
+          <div class="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center">
+            <span class="text-white text-sm font-medium">A</span>
+          </div>
+          <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+        
+        <!-- Dropdown menu -->
+        <div id="user-menu" class="hidden absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50">
+          <div class="px-4 py-2 text-xs text-gray-500" id="user-menu-email">{t('admin.chrome.loading')}</div>
+          <a href="/admin/profile" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
+            {t('admin.chrome.profile')}
+          </a>
+          <div class="border-t border-gray-200 my-1"></div>
+          <form method="POST" action="/api/auth/logout">
+            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
+              {t('admin.chrome.signOut')}
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<script>
+  // @ts-nocheck
+  document.addEventListener('DOMContentLoaded', () => {
+    // User menu toggle
+    const userMenuButton = document.getElementById('user-menu-button');
+    const userMenu = document.getElementById('user-menu');
+
+    if (userMenuButton && userMenu) {
+      userMenuButton.addEventListener('click', (e) => {
+        e.stopPropagation();
+        userMenu.classList.toggle('hidden');
+      });
+
+      // Close menu when clicking outside
+      document.addEventListener('click', () => {
+        userMenu.classList.add('hidden');
+      });
+    }
+
+    // Populate user email
+    fetch('/api/auth/me')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d && d.success && d.data) {
+          const u = d.data;
+          const el = document.getElementById('user-menu-email');
+          if (el) el.textContent = u.email || u.name || '';
+          // Update every identity hook (header + sidebar share these).
+          const setAll = (sel, val) => document.querySelectorAll(sel).forEach((node) => { node.textContent = val; });
+          setAll('[data-user-name]', u.name || window.t('admin.chrome.userFallbackName'));
+          setAll('[data-user-email]', u.email || '');
+          setAll('[data-user-avatar]', (u.name || u.email || '?')[0].toUpperCase());
+        }
+      })
+      .catch(() => {});
+  });
+</script>

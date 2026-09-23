@@ -1,0 +1,37 @@
+---
+/** Marquee theme — `Footer` override. The masthead again, small, on ink. */
+import type { FooterProps } from '../../core/theme-slots';
+
+const { siteTitle = 'AstroBaaS', social = {} } = Astro.props as FooterProps;
+const year = new Date().getFullYear();
+const links = [
+  social.twitter && { href: social.twitter, label: 'Twitter' },
+  social.github && { href: social.github, label: 'GitHub' },
+  social.linkedin && { href: social.linkedin, label: 'LinkedIn' },
+].filter(Boolean) as { href: string; label: string }[];
+---
+
+<footer class="no-print mq-footer mt-16">
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10 flex flex-wrap items-baseline justify-between gap-4">
+    <span class="mq-footer-title ab-heading-font font-bold uppercase tracking-tight text-2xl">{siteTitle}</span>
+    <p class="mq-footer-meta text-xs font-bold uppercase tracking-widest">
+      © {year}
+      {links.map((l) => (
+        <>
+          <span aria-hidden="true"> · </span>
+          <a href={l.href} class="underline underline-offset-4">{l.label}</a>
+        </>
+      ))}
+    </p>
+  </div>
+</footer>
+
+<style>
+  .mq-footer {
+    background: var(--text-color);
+  }
+  .mq-footer-title,
+  .mq-footer-meta {
+    color: var(--background-color);
+  }
+</style>

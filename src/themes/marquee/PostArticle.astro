@@ -1,0 +1,38 @@
+---
+/**
+ * Marquee theme — `PostArticle` override.
+ *
+ * The article head as a poster: category stamp, headline in display caps on the
+ * accent block, meta as a ticket strip. The prose itself stays calm — a poster
+ * theme that also shouted the body text would be unreadable, and readable is
+ * still the job.
+ */
+import type { PostArticleProps } from '../../core/theme-slots';
+
+const { post, contentHtml, author, category, date, readTime } = Astro.props as PostArticleProps;
+---
+
+<article class="mq-article">
+  <header class="mq-article-head">
+    <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-14">
+      <p class="inline-block text-xs font-bold uppercase tracking-widest px-3 py-1 border-4 mb-6 ab-border-on-accent ab-on-accent">{category}</p>
+      <h1 class="font-bold uppercase leading-[0.95] tracking-tight ab-heading-font ab-on-accent mq-article-title">{post.title}</h1>
+    </div>
+  </header>
+  <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+    <p class="py-4 text-xs font-bold uppercase tracking-widest border-b-4 ab-border-ink ab-ink">
+      By {author} · {date} · {readTime} min
+    </p>
+    <div class="prose prose-lg py-10" set:html={contentHtml} />
+  </div>
+</article>
+
+<style>
+  .mq-article-head {
+    background: var(--accent-color);
+    border-bottom: 4px solid var(--text-color);
+  }
+  .mq-article-title {
+    font-size: clamp(2rem, 6vw, 4.2rem);
+  }
+</style>

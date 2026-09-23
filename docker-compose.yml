@@ -1,0 +1,54 @@
+# Minimal production-ish compose: one app container with a named volume so
+# db.json and uploads survive `docker compose up --build` / redeploys.
+#
+#   1. cp .env.example .env   &&   edit AUTH_SECRET (openssl rand -hex 32)
+#   2. docker compose up --build
+#
+# Put a TLS-terminating reverse proxy (Caddy/Nginx/Traefik) in front for HTTPS,
+# and set TRUST_PROXY=1 below so client IPs are read from its headers.
+services:
+  astrocms:
+    build: .
+    ports:
+      # LOOPBACK ONLY, and the two settings are a pair.
+      #
+      # A bare "4321:4321" publishes on every interface — and Docker writes its
+      # own iptables rules, so a host firewall (ufw) that says otherwise does
+      # not stop it. With TRUST_PROXY=1 (below) the app believes
+      # X-Forwarded-For, and anyone who can reach this port directly can send
+      # that header themselves: a forged client IP, a fresh rate-limit bucket
+      # per request, a login throttle counted against somebody else's address.
+      #
+      # The reverse proxy on this host reaches 127.0.0.1:4321. If the proxy is
+      # another container, drop `ports:` entirely and put both on one network.
+      # Only publish on 0.0.0.0 for a throwaway local test, with TRUST_PROXY
+      # unset.
+      - "127.0.0.1:4321:4321"
+    environment:
+      # Quoted: unquoted, the ": " inside the message made this whole file
+      # invalid YAML, and `docker compose up` refused to start at all.
+      AUTH_SECRET: "${AUTH_SECRET:?set AUTH_SECRET in .env - generate with: openssl rand -hex 32}"
+      NODE_ENV: production
+      # SITE_URL: https://cms.example.com
+      # TRUST_PROXY: "1"
+      # DB_PATH, UPLOADS_DIR and PRIVATE_UPLOADS_DIR are set by the image to
+      # paths inside /app/data, the volume below. Override them only with other
+      # paths inside a volume.
+      #
+      # The graceful drain on `docker compose down` / redeploy: 25 s to finish
+      # in-flight requests and flush buffered view counts, inside the 30 s
+      # stop_grace_period below. The image's own default is 8 s, to fit a bare
+      # `docker stop` (10 s).
+      SHUTDOWN_TIMEOUT_MS: "25000"
+    # Longer than SHUTDOWN_TIMEOUT_MS, or Docker's SIGKILL cuts the drain off.
+    stop_grace_period: 30s
+    # A tiny init as PID 1. Node as PID 1 has no default signal handlers, so a
+    # SIGTERM that arrives before the app has registered its own (before the
+    # first request) would be ignored until the grace period ran out.
+    init: true
+    volumes:
+      - astrocms_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  astrocms_data:

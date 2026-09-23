@@ -1,0 +1,806 @@
+---
+// @ts-nocheck
+import { MAX_MEDIA_SIZE, MAX_VIDEO_SIZE } from '../../lib/media/ingest';
+
+interface Props {
+  insertTargetId?: string;
+  multiple?: boolean;
+  accept?: string;
+  onSelect?: string;
+}
+
+const {
+  multiple = false, accept = "image/*,video/mp4,video/webm", onSelect,
+  /**
+   * The id of a contenteditable to insert into. Omitted, the Insert control is
+   * not rendered at all — a button that does nothing is worse than no button.
+   */
+  insertTargetId,
+} = Astro.props;
+
+// Frontmatter labels. The strings inside the <script> below use window.t
+// instead — AdminLayout loads /admin-i18n.js before any page script runs.
+const t = Astro.locals.t;
+
+/*
+ * The formats line states the REAL ceilings, read from the same constants the
+ * uploader enforces.
+ *
+ * It used to read "Supports: JPG, PNG, GIF, WebP (Max: 10MB)" with the 10
+ * spelled into three catalogues. An install that raised MEDIA_MAX_IMAGE_MB got
+ * a screen that told it the old number, in three languages, and the only way
+ * to notice was to try a file and have it work when the label said it would
+ * not. Copy that restates a configurable limit is a copy of that limit, and
+ * copies drift.
+ */
+const mb = (bytes: number) => Math.round(bytes / (1024 * 1024));
+---
+
+<div class="media-library" data-insert-target={insertTargetId ?? ''}>
+  <!-- Upload Area -->
+  <div class="upload-area border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-gray-400 transition-colors duration-200">
+    <input 
+      type="file" 
+      id="media-upload" 
+      class="hidden" 
+      multiple={multiple}
+      accept={accept}
+    />
+    <label for="media-upload" class="cursor-pointer">
+      <div class="flex flex-col items-center">
+        <svg class="w-12 h-12 text-gray-400 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+        </svg>
+        <p class="text-lg font-medium text-gray-700 mb-2">{t('admin.media.uploadHeading')}</p>
+        <p class="text-sm text-gray-500">{t('admin.media.uploadHint')}</p>
+        <p class="text-xs text-gray-400 mt-2">{t('admin.media.uploadFormats', { image: mb(MAX_MEDIA_SIZE), video: mb(MAX_VIDEO_SIZE) })}</p>
+      </div>
+    </label>
+  </div>
+
+  <!-- Upload Progress -->
+  <div id="upload-progress" class="hidden mt-4">
+    <div class="bg-gray-200 rounded-full h-2">
+      <div class="bg-blue-600 h-2 rounded-full transition-all duration-300 w-0"></div>
+    </div>
+    <p class="text-sm text-gray-600 mt-2">{t('admin.media.uploading')} <span id="progress-text">0%</span></p>
+  </div>
+
+  <!-- Media Grid -->
+  <div class="media-grid mt-8">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-lg font-semibold text-gray-900">{t('admin.media.title')}</h3>
+      <div class="flex items-center space-x-4">
+        <!-- Search -->
+        <div class="relative">
+          <input 
+            type="text" 
+            id="media-search" 
+            placeholder={t('admin.media.searchPlaceholder')}
+            class="pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <svg class="w-5 h-5 text-gray-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+        </div>
+        
+        <!-- View Toggle -->
+        <div class="flex border border-gray-300 rounded-lg">
+          <button id="grid-view" type="button" title={t('admin.media.gridView')} aria-label={t('admin.media.gridView')} class="px-3 py-2 text-gray-600 hover:text-gray-900 border-r border-gray-300 bg-blue-50 text-blue-700">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zM5 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zM11 5a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zM11 13a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/>
+            </svg>
+          </button>
+          <button id="list-view" type="button" title={t('admin.media.listView')} aria-label={t('admin.media.listView')} class="px-3 py-2 text-gray-600 hover:text-gray-900">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <p id="media-status" class="hidden"></p>
+    {/*
+      Folder chips (C-61). Rendered from the counts the list endpoint returns,
+      so the sidebar and the filter cannot disagree about what folders exist.
+      Hidden entirely until a library actually uses folders — an empty row of
+      chips reads as broken rather than as unused.
+    */}
+    <div id="media-folders" class="hidden flex-wrap gap-2 mb-3"></div>
+    <p id="media-count" class="text-xs text-gray-500 mb-2"></p>
+
+    <!-- Grid View -->
+    {/*
+      The gallery bar (C-63). There was no path from "pick six pictures" to "a
+      gallery of those six": the section gave placeholder images and the library
+      could insert exactly ONE figure, so an author swapped each placeholder by
+      hand and any they forgot shipped the theme's default.
+    */}
+    <div id="media-gallery-bar" class="hidden sticky top-0 z-20 mb-3 flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2">
+      <span id="media-gallery-count" class="text-sm text-blue-900"></span>
+      <button id="media-gallery-insert" type="button"
+        class="px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg">
+        Insert gallery
+      </button>
+      <button id="media-gallery-clear" type="button"
+        class="px-3 py-1.5 text-sm border border-blue-300 text-blue-800 rounded-lg hover:bg-blue-100">
+        Clear
+      </button>
+      <span class="text-xs text-blue-700">Numbers are the order they will appear in.</span>
+    </div>
+
+    <div id="media-grid-view" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+      <p id="media-empty" class="text-sm text-gray-500 col-span-full">{t('admin.media.loading')}</p>
+    </div>
+
+    <!-- List View -->
+    <div id="media-list-view" class="hidden">
+      <div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+        <table class="min-w-full divide-y divide-gray-200">
+          <thead class="bg-gray-50">
+            <tr>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.media.colFile')}</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.media.colType')}</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.media.colSize')}</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.media.colDate')}</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.media.colActions')}</th>
+            </tr>
+          </thead>
+          <tbody id="media-list-tbody" class="bg-white divide-y divide-gray-200">
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {/*
+      The sentinel the IntersectionObserver watches, with an explicit button
+      beside it. The observer covers the normal case; the button means a
+      browser without IntersectionObserver, or somebody who would rather click
+      than scroll, is not stranded on page one of a 948-item library.
+    */}
+    <div id="media-sentinel" class="hidden py-6 text-center">
+      <button type="button" id="media-load-more"
+        class="px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium">
+        {t('admin.media.loadMore')}
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // @ts-nocheck
+  import { api, apiFetch } from '../../lib/apiClient';
+  import { escapeHtml } from '../../lib/escape-html';
+  import { mediaInsertHtml, galleryHtml } from '../../lib/media-embed';
+  import { insertIntoEditor } from '../../lib/editor-insert';
+
+  /** Matches the server default. Enough to fill a grid without being a page-weight problem. */
+  const PAGE_SIZE = 48;
+  /** Long enough that typing a word is one request, short enough to feel instant. */
+  const SEARCH_DEBOUNCE_MS = 300;
+  class MediaLibrary {
+    constructor(element) {
+      this.element = element;
+      // Read from the DOM, not from a closure: the frontmatter and this script
+      // are separate modules, so a prop only reaches here as an attribute.
+      this.insertTargetId = element.dataset.insertTarget || '';
+      this.uploadInput = element.querySelector('#media-upload');
+      this.uploadArea = element.querySelector('.upload-area');
+      this.progressBar = element.querySelector('#upload-progress');
+      this.searchInput = element.querySelector('#media-search');
+      this.gridView = element.querySelector('#grid-view');
+      this.listView = element.querySelector('#list-view');
+      this.gridContainer = element.querySelector('#media-grid-view');
+      this.listContainer = element.querySelector('#media-list-view');
+      this.listTbody = element.querySelector('#media-list-tbody');
+      this.emptyText = element.querySelector('#media-empty');
+      this.statusEl = element.querySelector('#media-status');
+      this.countEl = element.querySelector('#media-count');
+      this.foldersEl = element.querySelector('#media-folders');
+      // `null` means no filter; `''` means the UNFILED bucket. Those are two
+      // different requests and the endpoint distinguishes them by whether the
+      // parameter is present at all.
+      this.folder = null;
+      this.sentinel = element.querySelector('#media-sentinel');
+      this.loadMoreBtn = element.querySelector('#media-load-more');
+      if (this.loadMoreBtn) this.loadMoreBtn.addEventListener('click', () => this.loadMore());
+
+      this.init();
+    }
+
+    async init() {
+      this.uploadInput.addEventListener('change', this.handleFileUpload.bind(this));
+      this.uploadArea.addEventListener('dragover', this.handleDragOver.bind(this));
+      this.uploadArea.addEventListener('drop', this.handleDrop.bind(this));
+      this.gridView.addEventListener('click', () => this.switchView('grid'));
+      this.listView.addEventListener('click', () => this.switchView('list'));
+      this.searchInput.addEventListener('input', this.handleSearch.bind(this));
+      this.element.addEventListener('click', this.handleMediaClick.bind(this));
+
+      /*
+       * PAGED, and only the view you can see.
+       *
+       * This used to fetch the WHOLE library and then call renderGrid(items)
+       * AND renderList(items) from the same array. On the production shop that
+       * is 948 items rendered as ~1,900 <img> elements pointing at ~950
+       * distinct thumbnails — one click produced 33 HTTP 503s for one manager.
+       *
+       * Now: one page of 48, only the visible view is built, and more arrives
+       * as the sentinel comes into sight.
+       */
+      this.items = [];
+      this.offset = 0;
+      this.total = 0;
+      this.hasMore = false;
+      this.query = '';
+      this.loading = false;
+      this.view = 'grid';
+      this.searchTimer = null;
+      // PICK ORDER is gallery order — an author who wants a sequence must be
+      // able to express one, and the product form already treats pick order as
+      // meaningful for exactly this reason.
+      this.picked = [];
+
+      this.observeSentinel();
+      await this.reload();
+    }
+
+    /** Reset to page one. Used on first load and on every new search. */
+    async reload() {
+      this.items = [];
+      this.offset = 0;
+      this.renderCurrentView();
+      await this.loadMore();
+    }
+
+    /**
+     * The folder chips (C-61).
+     *
+     * Counted over the WHOLE library by the endpoint, not over the page: a row
+     * that renumbered itself on every click would tell an operator the folder
+     * they are in is the only one with anything in it.
+     */
+    renderFolders(folders) {
+      if (!this.foldersEl || !Array.isArray(folders)) return;
+      // Nothing filed anywhere: no chips at all. A single "Unfiled (948)" chip
+      // is a control that does nothing.
+      const useful = folders.length > 1;
+      this.foldersEl.classList.toggle('hidden', !useful);
+      this.foldersEl.classList.toggle('flex', useful);
+      if (!useful) return;
+
+      const chip = (label, value, count) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        const on = this.folder === value;
+        // Full literals — Tailwind scans source TEXT, so a composed class is
+        // absent from the production stylesheet.
+        b.className = on
+          ? 'px-2.5 py-1 text-xs rounded-full bg-blue-600 text-white'
+          : 'px-2.5 py-1 text-xs rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200';
+        b.textContent = count === null ? label : `${label} (${count})`;
+        b.addEventListener('click', () => {
+          this.folder = on ? null : value;
+          this.items = [];
+          this.offset = 0;
+          this.hasMore = true;
+          this.loadMore();
+        });
+        return b;
+      };
+
+      this.foldersEl.replaceChildren();
+      this.foldersEl.appendChild(chip('All', null, null));
+      for (const f of folders) {
+        this.foldersEl.appendChild(chip(f.name || 'Unfiled', f.name, f.count));
+      }
+    }
+
+    async loadMore() {
+      // Guarded: the observer can fire repeatedly while a request is in flight,
+      // and re-entering here is how one scroll becomes the burst this change
+      // exists to remove.
+      if (this.loading) return;
+      this.loading = true;
+      this.setStatus(this.items.length ? 'Loading more…' : 'Loading…');
+      try {
+        const res = await api.get('/api/media/get', {
+          limit: PAGE_SIZE,
+          offset: this.offset,
+          ...(this.query ? { q: this.query } : {}),
+          ...(this.folder === null ? {} : { folder: this.folder }),
+        });
+        if (!res.ok) {
+          // Say WHICH failure. "Empty" and "slow down" need different actions.
+          this.setStatus(
+            res.status === 429
+              ? 'Too many requests just now — pausing. Try again in a moment.'
+              : (res.error || 'Could not load the media library.'),
+            'error',
+          );
+          return;
+        }
+        const page = res.data || [];
+        this.items = this.items.concat(page);
+        this.offset += page.length;
+        this.total = Number(res.meta?.total ?? this.items.length);
+        this.hasMore = Boolean(res.meta?.has_more) && page.length > 0;
+        this.renderFolders(res.meta?.folders);
+        this.renderCurrentView();
+        this.setStatus('');
+      } finally {
+        this.loading = false;
+      }
+    }
+
+    setStatus(text, tone) {
+      if (!this.statusEl) return;
+      this.statusEl.textContent = text || '';
+      this.statusEl.className = !text
+        ? 'hidden'
+        : tone === 'error'
+          ? 'text-sm rounded-lg px-3 py-2 mb-2 bg-red-50 text-red-700 border border-red-200'
+          : 'text-sm text-gray-500 px-1 py-2';
+    }
+
+    /** Build ONLY the view that is on screen. Switching builds the other one then. */
+    renderCurrentView() {
+      if (this.view === 'grid') this.renderGrid(this.items);
+      else this.renderList(this.items);
+      if (this.countEl) {
+        this.countEl.textContent = this.total
+          ? (this.items.length < this.total
+              ? `${this.items.length} of ${this.total}`
+              : `${this.total} items`)
+          : '';
+      }
+      if (this.sentinel) {
+        this.sentinel.classList.toggle('hidden', !this.hasMore);
+      }
+    }
+
+    observeSentinel() {
+      if (!this.sentinel || typeof IntersectionObserver === 'undefined') return;
+      // An explicit "Load more" button is also wired, so a browser without
+      // IntersectionObserver — or a user who prefers clicking — is not stranded.
+      this.observer = new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting) && this.hasMore && !this.loading) {
+          this.loadMore();
+        }
+      }, { rootMargin: '400px' });
+      this.observer.observe(this.sentinel);
+    }
+
+    renderGrid(items) {
+      if (!items.length) {
+        this.gridContainer.innerHTML = `<p class="text-sm text-gray-500 col-span-full">${escapeHtml(window.t('admin.media.empty'))}</p>`;
+        return;
+      }
+      this.gridContainer.innerHTML = items.map(item => `
+        <div class="media-item group relative bg-white border border-gray-200 rounded-lg overflow-hidden hover:shadow-md transition-shadow cursor-pointer" data-media-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-filename="${escapeHtml(item.original_name || item.filename)}">
+          <div class="aspect-square bg-gray-100 flex items-center justify-center">
+            ${item.mime_type?.startsWith('image/')
+              // Use the 400px derivative when there is one. The grid used to
+              // request the ORIGINAL for every tile — a 1.4 MB photo scaled to
+              // 200px in the browser, times however many rows are on screen.
+              ? `<img src="${escapeHtml(item.thumb_url || item.url)}" alt="${escapeHtml(item.alt_text || '')}" loading="lazy" decoding="async" class="w-full h-full object-cover" />`
+              : item.mime_type?.startsWith('video/')
+                // `preload="metadata"`, never `auto`: a library page showing
+                // twenty clips would otherwise start downloading twenty whole
+                // videos the moment it opened. Metadata is enough for the
+                // browser to paint a first frame, which is the thumbnail.
+                // Muted and without controls because this is a tile, not a
+                // player — clicking it selects the file.
+                ? `<video src="${escapeHtml(item.url)}" preload="metadata" muted playsinline class="w-full h-full object-cover pointer-events-none"></video>`
+                : item.mime_type === 'application/pdf'
+                  // A document tile says DOCUMENT at a glance. Before this, a
+                  // library of fifty PDFs was fifty grey squares with truncated
+                  // filenames — indistinguishable from each other and from a
+                  // file that simply failed to render a thumbnail.
+                  //
+                  // A glyph and a label rather than a rasterised first page:
+                  // rendering one needs a PDF rasteriser (poppler, mupdf) as a
+                  // system dependency on every self-host, which is the same
+                  // trade refused for server-side PDF generation and refused
+                  // again here for a thumbnail.
+                  ? `<span class="flex flex-col items-center justify-center gap-1 p-2 text-center">
+                       <span class="rounded bg-red-50 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-red-700">PDF</span>
+                       <span class="text-xs text-gray-500 line-clamp-2">${escapeHtml(item.original_name || item.filename)}</span>
+                     </span>`
+                  : `<span class="text-xs text-gray-500 p-2 text-center">${escapeHtml(item.original_name || item.filename)}</span>`}
+          </div>
+          ${this.insertTargetId && (item.mime_type?.startsWith('image/') || item.mime_type?.startsWith('video/')) ? `
+          <label class="absolute top-1 left-1 z-10 flex items-center gap-1 rounded bg-white/90 px-1.5 py-0.5 text-[10px] cursor-pointer">
+            <input type="checkbox" class="media-pick" data-media-id="${escapeHtml(item.id)}" ${this.picked.includes(item.id) ? 'checked' : ''} />
+            <span class="text-gray-700">${this.picked.includes(item.id) ? String(this.picked.indexOf(item.id) + 1) : 'pick'}</span>
+          </label>` : ''}
+          <div class="p-2">
+            <p class="text-xs text-gray-600 truncate">${escapeHtml(item.original_name || item.filename)}</p>
+            <p class="text-xs text-gray-400">${this.formatFileSize(item.size || 0)}</p>
+            ${item.mime_type?.startsWith('image/') && !(item.alt_text || '').trim()
+              // Shown only for images: a PDF has no alt text to be missing.
+              // A badge rather than a warning colour on the tile — the point is
+              // to be findable, not to make a full library look broken.
+              ? `<button type="button" data-action="alt" class="mt-1 inline-block rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-50 text-amber-800 hover:bg-amber-100">${escapeHtml(window.t('admin.media.addAlt'))}</button>`
+              : item.mime_type?.startsWith('image/')
+                ? `<button type="button" data-action="alt" class="mt-1 block w-full text-left text-[10px] text-gray-400 truncate hover:text-blue-600" title="${escapeHtml(item.alt_text)}">${escapeHtml(item.alt_text)}</button>`
+                : ''}
+          </div>
+          <div class="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-20 transition-all flex items-center justify-center opacity-0 group-hover:opacity-100">
+            <div class="flex space-x-2">
+${this.insertTargetId ? `
+              <button type="button" data-action="insert" class="p-2 bg-white rounded-full shadow-lg hover:bg-gray-50" title="${escapeHtml(window.t('admin.media.insert'))}" aria-label="${escapeHtml(window.t('admin.media.insert'))}">
+                <svg class="w-4 h-4 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+              </button>` : ''}
+              <button type="button" data-action="select" class="p-2 bg-white rounded-full shadow-lg hover:bg-gray-50" title="${escapeHtml(window.t('admin.media.select'))}" aria-label="${escapeHtml(window.t('admin.media.select'))}">
+                <svg class="w-4 h-4 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+              </button>
+              <button type="button" data-action="replace" class="p-2 bg-white rounded-full shadow-lg hover:bg-gray-50" title="${escapeHtml(window.t('admin.media.replace'))}" aria-label="${escapeHtml(window.t('admin.media.replace'))}">
+                <svg class="w-4 h-4 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M20 9A8 8 0 006.3 5.3M4 15a8 8 0 0013.7 3.7"></path></svg>
+              </button>
+              <button type="button" data-action="delete" class="p-2 bg-white rounded-full shadow-lg hover:bg-gray-50" title="${escapeHtml(window.t('admin.media.delete'))}" aria-label="${escapeHtml(window.t('admin.media.delete'))}">
+                <svg class="w-4 h-4 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    renderList(items) {
+      if (!this.listTbody) return;
+      this.listTbody.innerHTML = items.map(item => `
+        <tr class="hover:bg-gray-50 media-item" data-media-id="${item.id}" data-url="${item.url}" data-filename="${item.original_name || item.filename}">
+          <td class="px-6 py-4 whitespace-nowrap">
+            <div class="flex items-center">
+              ${item.mime_type?.startsWith('image/')
+                ? `<img class="h-10 w-10 rounded object-cover" src="${escapeHtml(item.thumb_url || item.url)}" alt="" loading="lazy" decoding="async" />`
+                : item.mime_type === 'application/pdf'
+                  ? `<div class="flex h-10 w-10 items-center justify-center rounded bg-red-50 text-[10px] font-semibold text-red-700">PDF</div>`
+                  : `<div class="h-10 w-10 rounded bg-gray-200"></div>`}
+              <div class="ml-4 text-sm font-medium text-gray-900">${item.original_name || item.filename}</div>
+            </div>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.mime_type || '—'}</td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${this.formatFileSize(item.size || 0)}</td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${new Date(item.created_at).toLocaleString()}</td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+            <button type="button" data-action="select" class="text-blue-600 hover:text-blue-900 mr-3">${escapeHtml(window.t('admin.media.select'))}</button>
+            <button type="button" data-action="replace" class="text-blue-600 hover:text-blue-900 mr-3">${escapeHtml(window.t('admin.media.replace'))}</button>
+            <button type="button" data-action="delete" class="text-red-600 hover:text-red-900">${escapeHtml(window.t('admin.media.delete'))}</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    handleFileUpload(e) {
+      this.uploadFiles(Array.from(e.target.files));
+    }
+
+    handleDragOver(e) {
+      e.preventDefault();
+      this.uploadArea.classList.add('border-blue-400', 'bg-blue-50');
+    }
+
+    handleDrop(e) {
+      e.preventDefault();
+      this.uploadArea.classList.remove('border-blue-400', 'bg-blue-50');
+      this.uploadFiles(Array.from(e.dataTransfer.files));
+    }
+
+    async uploadFiles(files) {
+      if (!files.length) return;
+      this.progressBar.classList.remove('hidden');
+      const progressBar = this.progressBar.querySelector('.bg-blue-600');
+      const progressText = this.progressBar.querySelector('#progress-text');
+      // Collected and reported ONCE. Every failure used to raise its own
+      // alert(), so a rate-limited batch of ten meant ten modal dialogs saying
+      // the same thing, dismissed one at a time.
+      const failures = [];
+      try {
+        // SEQUENTIAL, deliberately. Firing ten uploads at once recreates the
+        // burst this whole change exists to remove, and the server would be
+        // entitled to refuse most of them.
+        for (let i = 0; i < files.length; i++) {
+          progressBar.style.width = `${Math.round((i / files.length) * 100)}%`;
+          progressText.textContent = `${i + 1}/${files.length}`;
+          const res = await this.uploadOne(files[i]);
+          if (!res.ok) {
+            console.error('Upload failed:', res.error);
+            failures.push(`${files[i].name}: ${res.error || 'upload failed'}`);
+          }
+        }
+        progressBar.style.width = '100%';
+        progressText.textContent = window.t('admin.media.uploadDone');
+      } finally {
+        setTimeout(() => this.progressBar.classList.add('hidden'), 600);
+        await this.reload();
+      }
+
+      if (failures.length) {
+        alert(window.t('admin.media.uploadFailed', { error: failures.join('\n') }));
+      }
+    }
+
+    /**
+     * One upload, retrying a THROTTLED one instead of surfacing it.
+     *
+     * A 429 is the server saying "later", not "no" — and it now says how much
+     * later. Retrying twice on that signal turns a batch that used to
+     * half-fail into one that completes slightly slower.
+     *
+     * Only 429 is retried. A rejected file type or an oversized image fails
+     * identically however many times it is sent, and retrying it only delays
+     * telling the operator something they have to act on.
+     */
+    async uploadOne(file, attempt = 0) {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await apiFetch('/api/media/upload', { method: 'POST', body: fd });
+      if (res.ok || res.status !== 429 || attempt >= 2) return res;
+
+      // The server's own number, bounded at both ends: 0 would retry instantly
+      // from everything just throttled, and an hour would freeze the tab.
+      const waitMs = Math.min(Math.max((Number(res.retryAfter) || 1) * 1000, 500), 10_000);
+      this.setStatus(window.t('admin.media.rateLimited', { seconds: Math.round(waitMs / 1000) }));
+      await new Promise((r) => setTimeout(r, waitMs));
+      return this.uploadOne(file, attempt + 1);
+    }
+
+    formatFileSize(bytes) {
+      // Only the spelled-out unit is a word. KB/MB/GB are international
+      // symbols and are the same in every locale this ships.
+      const unit = window.t('admin.media.unitBytes');
+      if (bytes === 0) return `0 ${unit}`;
+      const k = 1024;
+      const sizes = [unit, 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+    
+    switchView(view) {
+      this.view = view;
+      // Render the newly-visible view NOW rather than keeping both in the DOM.
+      this.renderCurrentView();
+      if (view === 'grid') {
+        this.gridView.classList.add('bg-blue-50', 'text-blue-700');
+        this.listView.classList.remove('bg-blue-50', 'text-blue-700');
+        this.gridContainer.classList.remove('hidden');
+        this.listContainer.classList.add('hidden');
+      } else {
+        this.listView.classList.add('bg-blue-50', 'text-blue-700');
+        this.gridView.classList.remove('bg-blue-50', 'text-blue-700');
+        this.listContainer.classList.remove('hidden');
+        this.gridContainer.classList.add('hidden');
+      }
+    }
+    
+    handleSearch(e) {
+      /*
+       * Searching on the SERVER.
+       *
+       * The old filter hid rendered rows, which is why the whole library had to
+       * be fetched first — it could only ever find what was already on the
+       * page. Server-side, a search reaches every item without any of them
+       * being downloaded.
+       *
+       * Debounced, because otherwise "aviator" is seven requests, and the
+       * burst is the thing being fixed.
+       */
+      const query = String(e.target.value || '').trim();
+      clearTimeout(this.searchTimer);
+      this.searchTimer = setTimeout(() => {
+        if (query === this.query) return;
+        this.query = query;
+        this.reload();
+      }, SEARCH_DEBOUNCE_MS);
+    }
+    
+    handleMediaClick(e) {
+      // Dispatch on data-action, NOT on title=. The title is a human-readable
+      // tooltip and is about to be translated; matching on it meant Select and
+      // Delete stopped working the moment the label changed — in an admin
+      // that is a media library you can browse and not use.
+      const selectButton = e.target.closest('button[data-action="select"]');
+      const deleteButton = e.target.closest('button[data-action="delete"]');
+      const replaceButton = e.target.closest('button[data-action="replace"]');
+      const altButton = e.target.closest('button[data-action="alt"]');
+      const insertButton = e.target.closest('button[data-action="insert"]');
+      const mediaItem = e.target.closest('.media-item');
+
+      // The gallery controls (C-63), handled before the tile actions — a click
+      // on the pick checkbox is inside a `.media-item`, and without this it
+      // would ALSO be read as a click on the tile.
+      const pick = e.target.closest('.media-pick');
+      if (pick) {
+        e.stopPropagation();
+        this.togglePick(pick.dataset.mediaId, pick.checked);
+        return;
+      }
+      if (e.target.closest('#media-gallery-insert')) { this.insertGallery(); return; }
+      if (e.target.closest('#media-gallery-clear')) {
+        this.picked = [];
+        this.syncGalleryBar();
+        this.renderCurrentView();
+        return;
+      }
+
+      if (insertButton && mediaItem) {
+        this.insertIntoBody(mediaItem);
+      } else if (altButton && mediaItem) {
+        this.editAltText(mediaItem);
+      } else if (selectButton && mediaItem) {
+        this.selectMedia(mediaItem);
+      } else if (replaceButton && mediaItem) {
+        this.replaceMedia(mediaItem);
+      } else if (deleteButton && mediaItem) {
+        this.deleteMedia(mediaItem);
+      }
+    }
+
+    /**
+     * Describe this picture.
+     *
+     * A prompt rather than a modal, deliberately: alt text is one short line,
+     * and the alternative is a dialog to build, style, trap focus in and
+     * dismiss — for a field whose whole content is a sentence. The tile shows
+     * the current value so the operator is editing, not guessing.
+     *
+     * The record is patched, then the grid re-reads from the server rather than
+     * being poked in place: the response is not the database, and a tile that
+     * showed a value the server rejected would be the worst kind of lie here.
+     */
+    async editAltText(mediaItem) {
+      const id = mediaItem.dataset.mediaId;
+      if (!id) return;
+      const current = mediaItem.querySelector('button[data-action="alt"]')?.title || '';
+      const next = prompt(window.t('admin.media.altPrompt'), current);
+      if (next === null) return;
+
+      const { ok, json } = await api('/api/media/update', 'PATCH', {
+        ids: [id],
+        patch: { alt_text: next },
+      });
+      if (!ok) {
+        alert(json?.message || window.t('admin.media.altFailed'));
+        return;
+      }
+      await this.reload();
+    }
+    
+    /**
+     * Put this file into the post body.
+     *
+     * The library has dispatched `mediaSelected` since it was written, and the
+     * only listeners set the FEATURED IMAGE — so it was browsable and unusable
+     * for the thing people open it for.
+     *
+     * The markup comes from `lib/media-embed.ts` and the insertion from
+     * `lib/editor-insert.ts`, which is also what the section palette uses. That
+     * matters: the caret rule (insert where the author is, append when they
+     * clicked the grid first) and the hidden-textarea sync are the two things
+     * easy to get wrong here, and getting the sync wrong means the change is
+     * visible and then gone after save.
+     */
+    insertIntoBody(mediaItem) {
+      const surface = this.insertTargetId ? document.getElementById(this.insertTargetId) : null;
+      if (!surface) return;
+      const id = mediaItem.dataset.mediaId;
+      const item = this.items.find((m) => m.id === id);
+      if (!item) return;
+      const html = mediaInsertHtml(item);
+      if (!html) return;
+      insertIntoEditor(surface, html);
+      mediaItem.classList.add('ring-2', 'ring-green-500');
+      setTimeout(() => mediaItem.classList.remove('ring-2', 'ring-green-500'), 1000);
+    }
+
+    /** The gallery bar reflects what is picked, or hides itself. */
+    syncGalleryBar() {
+      const bar = this.element.querySelector('#media-gallery-bar');
+      if (!bar) return;
+      const count = this.picked.length;
+      bar.classList.toggle('hidden', count === 0);
+      bar.classList.toggle('flex', count > 0);
+      const label = this.element.querySelector('#media-gallery-count');
+      if (label) label.textContent = `${count} picked`;
+    }
+
+    togglePick(id, on) {
+      const at = this.picked.indexOf(id);
+      if (on && at < 0) this.picked.push(id);
+      if (!on && at >= 0) this.picked.splice(at, 1);
+      this.syncGalleryBar();
+      // Re-rendered so the ORDER NUMBERS are right: after removing the second
+      // of four, the remaining ones have to renumber or the bar is lying about
+      // what the gallery will look like.
+      this.renderCurrentView();
+    }
+
+    insertGallery() {
+      const surface = this.insertTargetId ? document.getElementById(this.insertTargetId) : null;
+      if (!surface || this.picked.length === 0) return;
+      // Mapped through the PICKED order, not the library order.
+      const chosen = this.picked
+        .map((id) => this.items.find((m) => m.id === id))
+        .filter(Boolean);
+      const html = galleryHtml(chosen);
+      if (!html) return;
+      insertIntoEditor(surface, html);
+      this.picked = [];
+      this.syncGalleryBar();
+      this.renderCurrentView();
+    }
+
+    selectMedia(mediaItem) {
+      const url = mediaItem.dataset.url || mediaItem.querySelector('img')?.src;
+      const filename = mediaItem.dataset.filename || '';
+      this.element.dispatchEvent(new CustomEvent('mediaSelected', {
+        detail: { url, filename, element: mediaItem },
+        bubbles: true,
+      }));
+      mediaItem.classList.add('ring-2', 'ring-blue-500');
+      setTimeout(() => mediaItem.classList.remove('ring-2', 'ring-blue-500'), 1000);
+    }
+
+    /**
+     * Swap the file behind this record, keeping the record.
+     *
+     * The confirmation says what actually happens, because "replace" sounds
+     * harmless and this rewrites stored page and product content. An operator
+     * who did not expect that should be able to stop here.
+     */
+    async replaceMedia(mediaItem) {
+      const id = mediaItem.dataset.mediaId;
+      if (!id) return;
+      if (!confirm(window.t('admin.media.replaceConfirm'))) return;
+
+      const picker = document.createElement('input');
+      picker.type = 'file';
+      // The two video containers every current browser plays, named rather
+      // than `video/*`: the file chooser should not invite a .mov the sniffer
+      // is going to refuse after the operator has waited for it to upload.
+      picker.accept = 'image/*,video/mp4,video/webm,application/pdf,.svg,text/plain,text/markdown';
+      picker.addEventListener('change', async () => {
+        const file = picker.files && picker.files[0];
+        if (!file) return;
+        const fd = new FormData();
+        fd.set('id', id);
+        fd.set('file', file);
+        // Same call shape the upload uses: a multipart body goes through
+        // apiFetch directly, since `api.post` sends JSON.
+        const res = await apiFetch('/api/media/replace', { method: 'POST', body: fd });
+        if (!res.ok) {
+          alert(window.t('admin.media.replaceFailed', { error: res.error }));
+          return;
+        }
+        const r = res.data && res.data.replaced;
+        alert(window.t('admin.media.replaced', {
+          posts: r ? r.posts_updated : 0,
+          products: r ? r.products_updated : 0,
+        }));
+        await this.reload();
+      });
+      picker.click();
+    }
+
+    async deleteMedia(mediaItem) {
+      const id = mediaItem.dataset.mediaId;
+      if (!id) return;
+      if (!confirm(window.t('admin.media.deleteConfirm'))) return;
+      const res = await api.post('/api/media/delete', { id });
+      if (!res.ok) {
+        alert(window.t('admin.media.deleteFailed', { error: res.error }));
+        return;
+      }
+      await this.reload();
+    }
+  }
+  
+  // Initialize media library
+  document.addEventListener('DOMContentLoaded', () => {
+    const mediaLibraries = document.querySelectorAll('.media-library');
+    mediaLibraries.forEach(library => new MediaLibrary(library));
+  });
+</script>

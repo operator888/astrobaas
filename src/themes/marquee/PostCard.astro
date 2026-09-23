@@ -1,0 +1,16 @@
+---
+/** Marquee theme — `PostCard` override. A stamped tile, not a soft card. */
+import type { PostCardProps } from '../../core/theme-slots';
+import { postHref } from '../../lib/locale-links';
+
+const { post } = Astro.props as PostCardProps;
+---
+
+<article class="mq-card p-6 border-4 mb-6 ab-border-ink ab-surface">
+  <p class="text-xs font-bold uppercase tracking-widest mb-2 ab-accent">{post.category} · {post.date}</p>
+  <h3 class="font-bold uppercase leading-tight text-2xl mb-3 ab-heading-font ab-ink">
+    <a href={postHref(`/blog/${post.slug}`, post)} class="hover:underline underline-offset-4 ab-inherit">{post.title}</a>
+  </h3>
+  <p class="leading-relaxed mb-3 ab-muted">{post.excerpt}</p>
+  <p class="text-xs font-bold uppercase tracking-widest ab-ink">By {post.author} · {post.readTime} min</p>
+</article>

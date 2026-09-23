@@ -1,0 +1,432 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { summarisePrescription } from '../../core/models';
+import { LocalDB } from '../../lib/localdb';
+import { ORDER_STATUSES } from '../../lib/commerce-service';
+import { refundedTotal, refundableRemaining } from '../../lib/payments/refunds';
+import { getProvider } from '../../lib/payments/registry';
+import { canOpenAdminPage } from '../../lib/admin-access';
+import { canWriteCommerce } from '../../lib/auth';
+import { formatMoney } from '../../lib/money-format';
+import { formatAddressOneLine, addressesEqual } from '../../lib/commerce/address';
+
+await LocalDB.init();
+const user = Astro.locals.user;
+// Same rule the middleware enforces, asked the same way — a second, hand-written
+// role test here is how the two drift apart.
+if (!canOpenAdminPage('/admin/orders', user?.role)) {
+  return Astro.redirect('/admin');
+}
+
+/**
+ * What this viewer may actually DO here, asked with the same predicates the API
+ * asks — never re-derived from the role.
+ *
+ * A `manager` may read orders and customers but not write either, which is
+ * deliberate. The page rendered an ENABLED status dropdown and an enabled
+ * Refund button for them anyway, and both 403'd on use. A control that looks
+ * live and silently fails is worse than no control: it teaches the operator
+ * that the software is broken, and it hides the real rule behind a dead end.
+ */
+const canWrite = canWriteCommerce(user?.role);
+const canRefund = user?.role === 'admin';
+const t = Astro.locals.t;
+
+const orders = (await LocalDB.getOrders()).sort((a, b) => b.created_at.localeCompare(a.created_at));
+// The hardcoded el-GR here was one of five, and disagreed with the sale
+// email's formatMoney — the screen and the receipt stated the same total two
+// ways. The locale now follows the staff member reading it.
+const adminLocale = Astro.locals.uiLocale ?? undefined;
+const money = (cents: number, cur = 'EUR') => formatMoney(cents, { currency: cur, locale: adminLocale });
+const open = orders.filter((o) => o.status === 'pending' || o.status === 'processing').length;
+const revenue = orders.filter((o) => o.status === 'completed').reduce((n, o) => n + o.total_cents, 0);
+// Payment status is tracked separately from fulfilment: "processing" says we
+// are working on it, "paid" says the money arrived. Showing only the first is
+// how orders get shipped unpaid, so both appear on every row.
+const paymentColor: Record<string, string> = {
+  paid: 'bg-green-100 text-green-800',
+  pending: 'bg-amber-100 text-amber-800',
+  failed: 'bg-red-100 text-red-800',
+  refunded: 'bg-purple-100 text-purple-800',
+  unpaid: 'bg-gray-100 text-gray-600',
+};
+// Labels, keyed by the payment_status VALUE. The keys stay English because they
+// are the API's vocabulary; only the right-hand side is shown to anyone.
+const paymentLabel: Record<string, string> = {
+  paid: t('admin.orders.paymentPaid'),
+  pending: t('admin.orders.paymentPending'),
+  failed: t('admin.orders.paymentFailed'),
+  refunded: t('admin.orders.paymentRefunded'),
+  unpaid: t('admin.orders.paymentUnpaid'),
+};
+// A refund button is offered only when it can actually work: the order is paid
+// through a provider that implements refunds, and something is still
+// outstanding. Showing one that 501s is worse than showing none.
+const refundInfo = (o: (typeof orders)[number]) => {
+  const remaining = refundableRemaining(o);
+  const provider = o.payment_provider ? getProvider(o.payment_provider) : undefined;
+  return {
+    refunded: refundedTotal(o),
+    remaining,
+    supported: typeof provider?.refund === 'function',
+    providerLabel: provider?.label ?? o.payment_method ?? 'manual',
+    canRefund: (o.payment_status ?? 'unpaid') === 'paid' && remaining > 0 && typeof provider?.refund === 'function',
+  };
+};
+
+// Same split for fulfilment status: `ORDER_STATUSES` supplies the values the
+// select posts, this map supplies what the operator reads. A status with no
+// label falls back to its own value rather than to an empty badge.
+const statusLabel: Record<string, string> = {
+  pending: t('admin.orders.statusPending'),
+  processing: t('admin.orders.statusProcessing'),
+  'on-hold': t('admin.orders.statusOnHold'),
+  completed: t('admin.orders.statusCompleted'),
+  cancelled: t('admin.orders.statusCancelled'),
+  refunded: t('admin.orders.statusRefunded'),
+  failed: t('admin.orders.statusFailed'),
+};
+
+const statusColor: Record<string, string> = {
+  pending: 'bg-amber-100 text-amber-800',
+  processing: 'bg-blue-100 text-blue-800',
+  'on-hold': 'bg-gray-100 text-gray-700',
+  completed: 'bg-green-100 text-green-800',
+  cancelled: 'bg-gray-200 text-gray-600',
+  refunded: 'bg-purple-100 text-purple-800',
+  failed: 'bg-red-100 text-red-700',
+};
+---
+
+<AdminLayout title={t('admin.orders.title')}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="mb-8">
+      <h1 class="text-3xl font-bold text-gray-900">{t('admin.orders.title')}</h1>
+      <p class="text-gray-600 mt-2">{t('admin.orders.subtitle')}</p>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+      <div class="bg-white rounded-lg border border-gray-200 p-6">
+        <div class="text-2xl font-bold text-gray-900">{orders.length}</div>
+        <div class="text-sm text-gray-600">{t('admin.orders.statTotal')}</div>
+      </div>
+      <div class="bg-white rounded-lg border border-gray-200 p-6">
+        <div class="text-2xl font-bold text-blue-600">{open}</div>
+        <div class="text-sm text-gray-600">{t('admin.orders.statOpen')}</div>
+      </div>
+      <div class="bg-white rounded-lg border border-gray-200 p-6">
+        <div class="text-2xl font-bold text-green-600">{money(revenue)}</div>
+        <div class="text-sm text-gray-600">{t('admin.orders.statRevenue')}</div>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
+      {orders.length === 0 ? (
+        <p class="p-6 text-sm text-gray-500">{t('admin.orders.empty')}</p>
+      ) : (
+        <ul class="divide-y divide-gray-200">
+          {orders.map((o) => (
+            <li class="p-6">
+              <div class="flex items-start justify-between gap-4 flex-wrap">
+                <div class="min-w-0">
+                  <div class="flex items-center gap-3 flex-wrap">
+                    <span class="font-semibold text-gray-900">{o.number}</span>
+                    <span class={`px-2 py-0.5 rounded-full text-xs ${statusColor[o.status] ?? 'bg-gray-100'}`}>{statusLabel[o.status] ?? o.status}</span>
+                    <span class={`px-2 py-0.5 rounded-full text-xs ${paymentColor[o.payment_status ?? 'unpaid'] ?? 'bg-gray-100'}`}>
+                      {paymentLabel[o.payment_status ?? 'unpaid'] ?? o.payment_status}
+                    </span>
+                    {o.payment_method && (
+                      <span class="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-800">
+                        {o.payment_method === 'bank-transfer' ? t('admin.orders.methodBankTransfer') : o.payment_method}
+                      </span>
+                    )}
+                    <span class="text-sm text-gray-500">{new Date(o.created_at).toLocaleString()}</span>
+                  </div>
+                  {/*
+                    What the payment path and checkout flagged. There is no
+                    attention feed on this screen yet, so the flags are shown on
+                    the row itself — the one place staff already look.
+                    `needs_refund` first and loudest: money arrived for an order
+                    that will not ship.
+                  */}
+                  {(o.needs_refund || o.risk_held || o.risk_flagged || (o.payment_declines ?? 0) > 0
+                    || (o.status === 'cancelled' && o.cancelled_reason === 'hold-expired')) && (
+                    <div class="flex items-center gap-2 flex-wrap mt-1">
+                      {o.needs_refund && (
+                        <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-600 text-white">{t('admin.orders.needsRefund')}</span>
+                      )}
+                      {o.risk_held && (
+                        <span class="px-2 py-0.5 rounded-full text-xs bg-orange-100 text-orange-800">{t('admin.orders.riskHeld')}</span>
+                      )}
+                      {o.risk_flagged && !o.risk_held && (
+                        <span class="px-2 py-0.5 rounded-full text-xs bg-orange-50 text-orange-700" title={(o.risk_reasons ?? []).join('\n')}>
+                          {t('admin.orders.riskFlagged')}
+                        </span>
+                      )}
+                      {(o.payment_declines ?? 0) > 0 && (
+                        <span class="px-2 py-0.5 rounded-full text-xs bg-red-50 text-red-700">
+                          {t('admin.orders.declines', { count: String(o.payment_declines) })}
+                        </span>
+                      )}
+                      {/* Only on a CANCELLED order: the reason describes that
+                          cancellation, and an order reopened before S4.18 may
+                          still carry it. */}
+                      {o.status === 'cancelled' && o.cancelled_reason === 'hold-expired' && (
+                        <span class="px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-600">{t('admin.orders.holdExpired')}</span>
+                      )}
+                    </div>
+                  )}
+                  {o.risk_held && (o.risk_reasons ?? []).length > 0 && (
+                    <ul class="text-xs text-orange-800 mt-1 list-disc list-inside">
+                      {(o.risk_reasons ?? []).map((reason) => <li>{reason}</li>)}
+                    </ul>
+                  )}
+                  <div class="text-sm text-gray-700 mt-1">
+                    {o.name || '—'} · <a href={`mailto:${o.email}`} class="text-blue-600 hover:underline">{o.email}</a>
+                    {o.phone && <span> · {o.phone}</span>}
+                  </div>
+                  {/*
+                    The STRUCTURED address when there is one, the legacy line
+                    when there is not.
+
+                    Not both: on a new order the flat string is a rendering OF
+                    the structured fields, so showing the two together prints
+                    the same address twice and invites staff to wonder which is
+                    authoritative. On an old order the line is all there is, and
+                    saying so honestly beats an empty address block.
+                  */}
+                  {o.shipping_address ? (
+                    <div class="text-sm text-gray-500 mt-0.5">
+                      {o.shipping_address.name && <div>{o.shipping_address.name}</div>}
+                      {o.shipping_address.company && <div>{o.shipping_address.company}</div>}
+                      <div>{formatAddressOneLine(o.shipping_address, adminLocale)}</div>
+                      {o.shipping_address.phone && <div>{o.shipping_address.phone}</div>}
+                      {o.shipping_address.tax_id && <div>ΑΦΜ / VAT: {o.shipping_address.tax_id}</div>}
+                      {/* Only when it genuinely differs — repeating an identical
+                          billing block is noise on every order that has one. */}
+                      {o.billing_address && !addressesEqual(o.billing_address, o.shipping_address) && (
+                        <div class="mt-1 pt-1 border-t border-gray-200">
+                          <span class="text-xs uppercase tracking-wide text-gray-400">Billing</span>
+                          {o.billing_address.name && <div>{o.billing_address.name}</div>}
+                          {o.billing_address.company && <div>{o.billing_address.company}</div>}
+                          <div>{formatAddressOneLine(o.billing_address, adminLocale)}</div>
+                          {o.billing_address.tax_id && <div>ΑΦΜ / VAT: {o.billing_address.tax_id}</div>}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    o.address && <div class="text-sm text-gray-500 mt-0.5">{o.address}</div>
+                  )}
+                  <ul class="mt-2 text-sm text-gray-600 list-disc list-inside">
+                    {o.items.map((i, lineIndex) => (
+                      <li>
+                        {i.qty} × {i.name} — {money(i.total_cents, o.currency)}
+                        {i.prescription && (
+                          <span class="block ml-5 mt-0.5 font-mono text-xs text-indigo-700">
+                            {t('admin.orders.prescription')} {summarisePrescription(i.prescription)}
+                            {i.prescription.issued_by && (
+                              <span class="text-gray-400"> · {i.prescription.issued_by}</span>
+                            )}
+                            {/* The one control that removes health data this
+                                system deliberately KEEPS through a subject
+                                erasure — so it is a deliberate act by the
+                                optician, on the order in front of them, and it
+                                is audited. There is no bulk version. */}
+                            {canWrite && (
+                              <button
+                                class="delete-rx ml-2 font-sans text-xs text-gray-400 hover:text-red-600 underline"
+                                data-order={o.id}
+                                data-line={lineIndex}
+                                data-number={o.number}
+                              >{t('admin.orders.prescriptionDelete')}</button>
+                            )}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                  {o.note && <div class="text-xs text-gray-400 mt-2">{t('admin.orders.note', { note: o.note })}</div>}
+
+                  {/* Fulfilment. Beside the status, never inside it: dispatch is
+                      not a payment state, and an order can be processing and
+                      already posted. The email sends once, on the first save. */}
+                  {canWrite && (
+                    <div class="mt-3 flex flex-wrap items-center gap-2">
+                      <input
+                        class="ship-carrier w-32 px-2 py-1 text-xs border border-gray-300 rounded"
+                        data-id={o.id}
+                        value={o.tracking_carrier ?? ''}
+                        placeholder={t('admin.orders.trackingCarrier')} />
+                      <input
+                        class="ship-number w-44 px-2 py-1 text-xs font-mono border border-gray-300 rounded"
+                        data-id={o.id}
+                        value={o.tracking_number ?? ''}
+                        placeholder={t('admin.orders.trackingNumber')} />
+                      <button
+                        class="ship-save text-xs px-3 py-1 rounded-lg border border-blue-300 text-blue-700 hover:bg-blue-50"
+                        data-id={o.id}
+                      >{o.shipped_at ? t('admin.orders.trackingUpdate') : t('admin.orders.trackingSend')}</button>
+                      {o.shipped_at && (
+                        <span class="text-xs text-green-700">
+                          {t('admin.orders.shippedOn', { date: new Date(o.shipped_at).toLocaleDateString() })}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* The SHOP's note. `note` above is the customer's words and is
+                      cleared by an erasure; this is the shop's own record. */}
+                  {canWrite && (
+                    <textarea
+                      class="staff-note mt-2 w-full px-2 py-1 text-xs border border-gray-200 rounded bg-amber-50"
+                      data-id={o.id}
+                      rows="2"
+                      placeholder={t('admin.orders.staffNotePlaceholder')}>{o.staff_note ?? ''}</textarea>
+                  )}
+                </div>
+                <div class="flex flex-col items-end gap-2 shrink-0">
+                  <div class="text-lg font-bold text-gray-900">{money(o.total_cents, o.currency)}</div>
+                  {refundInfo(o).refunded > 0 && (
+                    <div class="text-xs text-purple-700">
+                      {t('admin.orders.refundedAmount', { amount: money(refundInfo(o).refunded, o.currency) })}
+                      {refundInfo(o).remaining > 0 && <span> · {t('admin.orders.refundRemaining', { amount: money(refundInfo(o).remaining, o.currency) })}</span>}
+                    </div>
+                  )}
+                  <select
+                    class:list={['status-select text-sm border rounded-lg px-2 py-1',
+                      canWrite ? 'border-gray-300' : 'border-gray-200 bg-gray-100 text-gray-500 cursor-not-allowed']}
+                    data-id={o.id}
+                    data-current={o.status}
+                    disabled={!canWrite}
+                    title={canWrite ? undefined : t('admin.orders.statusLocked')}
+                  >
+                    {ORDER_STATUSES.map((s) => (
+                      <option value={s} selected={s === o.status}>{statusLabel[s] ?? s}</option>
+                    ))}
+                  </select>
+                  {refundInfo(o).canRefund && canRefund && (
+                    <button
+                      class="refund-btn text-sm px-3 py-1 rounded-lg border border-purple-300 text-purple-700 hover:bg-purple-50"
+                      data-id={o.id}
+                      data-number={o.number}
+                      data-remaining={refundInfo(o).remaining}
+                      data-currency={o.currency}
+                      data-provider={refundInfo(o).providerLabel}
+                    >
+                      {t('admin.orders.refund')}
+                    </button>
+                  )}
+                  {(o.payment_status ?? 'unpaid') === 'paid' && !refundInfo(o).supported && (
+                    <span class="text-xs text-gray-400">
+                      {t('admin.orders.refundInProviderDashboard', { provider: refundInfo(o).providerLabel })}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../lib/apiClient';
+  document.addEventListener('change', async (e) => {
+    const sel = e.target.closest('.status-select');
+    if (!sel) return;
+    const res = await api.put(`/api/orders/${sel.dataset.id}`, { status: sel.value });
+    if (res.ok) location.reload();
+    else {
+      alert(res.error || window.t('admin.orders.updateFailed'));
+      sel.value = sel.dataset.current;
+    }
+  });
+
+  // Refunds move money out of the business, so the flow is deliberately
+  // deliberate: the operator types the amount, sees exactly what will be sent
+  // and to whom, and confirms. No one-click "refund everything".
+  // Saved on blur rather than with a button: one Save per order row is clutter,
+  // and a note nobody pressed Save on is a note that was lost.
+  document.addEventListener('focusout', async (e) => {
+    const box = e.target.closest?.('.staff-note');
+    if (!box || box.value === box.defaultValue) return;
+    const res = await api.put(`/api/orders/${encodeURIComponent(box.dataset.id)}`, {
+      staff_note: box.value,
+    });
+    if (res.ok) box.defaultValue = box.value;
+    else alert(res.error || window.t('admin.orders.staffNoteFailed'));
+  });
+
+  document.addEventListener('click', async (e) => {
+    // Dispatch on the CLASS, never the translated label.
+    const ship = e.target.closest('.ship-save');
+    if (ship) {
+      const id = ship.dataset.id;
+      const row = ship.closest('div');
+      const res = await api.post(`/api/orders/${encodeURIComponent(id)}/ship`, {
+        tracking_carrier: row.querySelector('.ship-carrier')?.value ?? '',
+        tracking_number: row.querySelector('.ship-number')?.value ?? '',
+      });
+      if (res.ok) location.reload();
+      else alert(res.error || window.t('admin.orders.trackingFailed'));
+      return;
+    }
+
+    const rx = e.target.closest('.delete-rx');
+    if (rx) {
+      if (!confirm(window.t('admin.orders.prescriptionDeleteConfirm', { number: rx.dataset.number }))) return;
+      const res = await api.delete(
+        `/api/orders/${encodeURIComponent(rx.dataset.order)}/prescription?line=${encodeURIComponent(rx.dataset.line)}`,
+      );
+      if (res.ok) location.reload();
+      else alert(res.error || window.t('admin.orders.prescriptionDeleteFailed'));
+      return;
+    }
+
+    const btn = e.target.closest('.refund-btn');
+    if (!btn) return;
+
+    const remaining = Number(btn.dataset.remaining);
+    const cur = btn.dataset.currency || 'EUR';
+    const fmt = (c) => (c / 100).toFixed(2);
+
+    const entered = prompt(
+      window.t('admin.orders.refundPromptTitle', { number: btn.dataset.number, provider: btn.dataset.provider }) +
+        '\n\n' +
+        window.t('admin.orders.refundPromptMax', { amount: fmt(remaining), currency: cur }) +
+        '\n' +
+        window.t('admin.orders.refundPromptEnter', { amount: fmt(remaining), currency: cur }),
+      '',
+    );
+    if (entered === null) return; // cancelled
+
+    let amountCents = null;
+    if (entered.trim() !== '') {
+      const parsed = Number(entered.replace(',', '.'));
+      if (!Number.isFinite(parsed) || parsed <= 0) return alert(window.t('admin.orders.amountInvalid'));
+      amountCents = Math.round(parsed * 100);
+      if (amountCents > remaining) {
+        return alert(window.t('admin.orders.amountTooHigh', { amount: fmt(remaining), currency: cur }));
+      }
+    }
+
+    const label = amountCents === null
+      ? window.t('admin.orders.refundFullAmount', { amount: fmt(remaining), currency: cur })
+      : `${fmt(amountCents)} ${cur}`;
+    if (!confirm(window.t('admin.orders.refundConfirm', { amount: label }))) return;
+
+    btn.disabled = true;
+    btn.textContent = window.t('admin.orders.refunding');
+    const res = await api.post(`/api/orders/${btn.dataset.id}/refund`,
+      amountCents === null ? {} : { amount_cents: amountCents });
+    if (res.ok) location.reload();
+    else {
+      alert(res.error || window.t('admin.orders.refundFailed'));
+      btn.disabled = false;
+      btn.textContent = window.t('admin.orders.refund');
+    }
+  });
+</script>

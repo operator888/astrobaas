@@ -1,0 +1,194 @@
+---
+/**
+ * The admin navigation.
+ *
+ * ## Grouped by what a person is trying to do
+ *
+ * Seventeen flat links in one column is a list you read every time rather than
+ * a place you learn. The groups below are intents, not technical categories: a
+ * shop owner opening this in the morning is going to Orders, and somebody
+ * writing is going to Posts, and neither of them is thinking about whether a
+ * webhook is "content" or "system".
+ *
+ * Shop comes first because these installs are shops. System is last and stays
+ * collapsed in the reader's mind — it is the drawer you open twice a year.
+ *
+ * ## Why this is a DATA structure and not seventeen blocks of markup
+ *
+ * It used to be seventeen hand-copied <a> blocks. Adding a screen meant copying
+ * one and editing it, and the last person to do that shipped `Redirects` as a
+ * bare English string while every other label went through `t()` — invisible
+ * until a Greek shop opened the menu.
+ *
+ * As a list, a new screen is one entry, the translation is required by the
+ * shape, and a group with nothing in it for this role cannot render an empty
+ * heading, because that is computed rather than remembered.
+ *
+ * Every link is still filtered through `canOpenAdminPage`, the same function
+ * the middleware enforces with. Hiding a link is presentation, not access
+ * control: the middleware still denies the request. This exists so the menu
+ * matches what the user can actually reach, rather than bouncing them back to
+ * the dashboard having learned nothing except that the product looks broken.
+ */
+import { navFor, isActiveNav, contentTypeNavFor } from '../../lib/admin-nav';
+import { pluginNavFor } from '../../lib/plugin-platform/admin-pages';
+import { isCommerceEnabled } from '../../lib/commerce-service';
+import { LocalDB } from '../../lib/localdb';
+import { settingsMap } from '../../lib/settings-map';
+import { resolveBranding } from '../../lib/branding';
+
+const role = Astro.locals.user?.role;
+
+// Labels live in `admin.chrome.*`. The HREFS stay hard-coded: `can()` matches on
+// the href, so the thing being matched on is never the thing being translated.
+const t = Astro.locals.t;
+
+/** The current path, so the active screen can say so. */
+const here = Astro.url.pathname;
+const isActive = (href: string) => isActiveNav(href, here);
+
+
+
+// Filtered by role, with empty groups dropped — see navFor().
+//
+// The Shop group also answers to the commerce master switch: on an install
+// that is not a shop, Products/Orders/Customers in the menu would be three
+// standing invitations to a part of the product the operator turned off.
+// (The screens stay REACHABLE for staff — the settings page links there —
+// this is presentation, not access control.)
+const commerceOn = await isCommerceEnabled();
+
+// What this install calls itself (C-159). Falls back to the site title and
+// then to the product name, so an install that has configured nothing renders
+// exactly as before.
+const branding = resolveBranding(settingsMap(await LocalDB.getSettings()));
+const groups = navFor(role).filter((g) => commerceOn || g.heading !== 'groupShop');
+
+// Screens contributed by active plugins. Filtered by the SAME rule as every
+// link above — a plugin cannot put a link in front of someone who would be
+// bounced by the middleware for clicking it.
+const pluginLinks = pluginNavFor(role);
+
+// One link per registered custom collection (admin-defined and plugin-defined
+// alike): defining a type IS what puts its screen in the menu. See
+// contentTypeNavFor() for why these are not NAV entries.
+const collectionLinks = contentTypeNavFor(role);
+
+const LINK = 'flex items-center px-4 py-2.5 rounded-lg transition-colors duration-150 group';
+const IDLE = 'text-gray-700 hover:text-gray-900 hover:bg-gray-100';
+const ACTIVE = 'bg-blue-50 text-blue-700 font-medium';
+---
+
+<div class="flex flex-col h-full bg-white border-r border-gray-200">
+  <!-- Logo -->
+  <div class="flex items-center h-16 px-6 border-b border-gray-200">
+    <div class="flex items-center space-x-2">
+      {branding.logo ? (
+        <img src={branding.logo} alt="" class="w-8 h-8 object-contain" width="32" height="32" />
+      ) : (
+        <svg class="w-8 h-8 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+          <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+      )}
+      <span class="text-xl font-bold text-gray-900">{branding.name}</span>
+    </div>
+  </div>
+
+  <nav class="flex-1 px-4 py-4 overflow-y-auto" aria-label="Admin">
+    {groups.map((group) => (
+      <div class={group.heading ? 'pt-4 first:pt-0' : ''}>
+        {group.heading && (
+          <p class="px-4 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+            {t(`admin.chrome.${group.heading}`)}
+          </p>
+        )}
+        <div class="space-y-0.5">
+          {group.items.map((item) => (
+          <>
+            <a
+              href={item.href}
+              class={`${LINK} ${isActive(item.href) ? ACTIVE : IDLE}`}
+              aria-current={isActive(item.href) ? 'page' : undefined}
+            >
+              <svg
+                class={`w-5 h-5 mr-3 ${isActive(item.href) ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-600'}`}
+                fill="none" stroke="currentColor" viewBox="0 0 24 24"
+              >
+                {item.paths.map((d) => (
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={d} />
+                ))}
+              </svg>
+              {t(`admin.chrome.${item.key}`)}
+            </a>
+
+            {/*
+              Posts keeps its shortcut to a new draft, directly beneath it. It
+              is the one place in the admin where the next action is obvious
+              enough to earn a second link, and writers use it constantly.
+            */}
+            {item.href === '/admin/posts' && (
+              <a href="/admin/posts/new" class="flex items-center pl-12 pr-4 py-1.5 text-sm text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors duration-150">
+                <span class="mr-2 text-gray-400 text-base leading-none">+</span>{t('admin.chrome.addNew')}
+              </a>
+            )}
+          </>
+          ))}
+        </div>
+      </div>
+    ))}
+
+    {collectionLinks.length > 0 && (
+      <div class="pt-4 mt-4 border-t border-gray-200">
+        <p class="px-4 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+          {t('admin.chrome.collections')}
+        </p>
+        <div class="space-y-0.5">
+          {collectionLinks.map((link) => (
+            <a href={link.href} class={`${LINK} ${isActive(link.href) ? ACTIVE : IDLE}`}>
+              <svg class="w-5 h-5 mr-3 text-gray-400 group-hover:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6c0-1.1 3.58-2 8-2s8 .9 8 2-3.58 2-8 2-8-.9-8-2zm0 0v12c0 1.1 3.58 2 8 2s8-.9 8-2V6m-16 6c0 1.1 3.58 2 8 2s8-.9 8-2"/>
+              </svg>
+              {link.label}
+            </a>
+          ))}
+        </div>
+      </div>
+    )}
+
+    {pluginLinks.length > 0 && (
+      <div class="pt-4 mt-4 border-t border-gray-200">
+        <p class="px-4 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+          {t('admin.chrome.pluginsSection')}
+        </p>
+        <div class="space-y-0.5">
+          {pluginLinks.map((link) => (
+            <a href={link.href} class={`${LINK} ${isActive(link.href) ? ACTIVE : IDLE}`}>
+              <svg class="w-5 h-5 mr-3 text-gray-400 group-hover:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+              </svg>
+              {link.label}
+            </a>
+          ))}
+        </div>
+      </div>
+    )}
+  </nav>
+
+  <!-- User Profile -->
+  <div class="p-4 border-t border-gray-200">
+    <div class="flex items-center space-x-3">
+      <div class="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center">
+        <span class="text-white text-sm font-medium" data-user-avatar>A</span>
+      </div>
+      <div class="flex-1 min-w-0">
+        <p class="text-sm font-medium text-gray-900 truncate" data-user-name>{t('admin.chrome.userNamePlaceholder')}</p>
+        <p class="text-xs text-gray-500 truncate" data-user-email>admin@example.com</p>
+      </div>
+      <a href="/logout" class="text-gray-400 hover:text-gray-600" aria-label={t('admin.chrome.signOut')} title={t('admin.chrome.signOut')}>
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+        </svg>
+      </a>
+    </div>
+  </div>
+</div>

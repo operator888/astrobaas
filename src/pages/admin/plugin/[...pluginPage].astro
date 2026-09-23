@@ -1,0 +1,83 @@
+---
+/**
+ * Render a plugin-owned admin screen.
+ *
+ * Mounted under `/admin/plugin/<plugin-id>/<page>`, a namespace no core screen
+ * shares — see lib/plugin-platform/admin-pages.ts for why that matters to the
+ * longest-prefix-wins authorisation table.
+ *
+ * The middleware has already enforced `canOpenAdminPage`, which consults this
+ * page's declared roles and denies an undeclared one to everything but an
+ * administrator. The check repeated below is the fail-closed half of the same
+ * race the API dispatcher guards: the registry can change between the
+ * middleware's read and this one, and the safe side of that is to refuse.
+ *
+ * `set:html` renders plugin markup verbatim. That is deliberate. A plugin is
+ * code already running in this process — it can read the database directly —
+ * so sanitising its own admin UI would buy nothing and would break every
+ * legitimate form and table. What a plugin must do is escape any DATA it
+ * interpolates, and PLUGIN_DEVELOPMENT.md says so.
+ */
+import AdminLayout from '../../../layouts/AdminLayout.astro';
+import { LocalDB } from '../../../lib/localdb';
+import { ensurePluginsBootstrapped } from '../../../plugins';
+import { resolveAdminPage } from '../../../lib/plugin-platform/admin-pages';
+import { canOpenAdminPage } from '../../../lib/admin-access';
+
+export const prerender = false;
+
+await LocalDB.init();
+await ensurePluginsBootstrapped();
+
+const user = Astro.locals.user ?? null;
+const pathname = Astro.url.pathname;
+const page = resolveAdminPage(pathname);
+
+// An unknown plugin page and an unauthorised one answer identically. Which
+// screens a shop's plugins provide is itself information.
+if (!page || !canOpenAdminPage(pathname, user?.role as any)) {
+  return Astro.redirect('/admin');
+}
+
+let body = '';
+let failed = false;
+try {
+  body = String(await page.render({
+    params: {},
+    url: Astro.url,
+    user: user as any,
+    csrf: Astro.locals.csrf || '',
+  }));
+} catch (err) {
+  // A plugin screen that throws must not take the admin down with it: an
+  // operator needs the rest of the admin precisely when a plugin is misbehaving.
+  console.error(`[astrobaas] plugin "${page.pluginId}" admin page ${page.href} threw:`, err);
+  failed = true;
+}
+---
+
+<AdminLayout title={page.title}>
+  <div class="p-6">
+    <header class="mb-6">
+      <h1 class="text-2xl font-bold text-gray-900">{page.title}</h1>
+      <p class="text-xs text-gray-500 mt-1">Provided by the <code class="bg-gray-100 px-1 rounded">{page.pluginId}</code> plugin</p>
+    </header>
+
+    {failed ? (
+      <div class="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-800">
+        This screen failed to render. The error is in the server log, named with the
+        plugin id. The rest of the admin is unaffected.
+      </div>
+    ) : (
+      <div set:html={body}></div>
+    )}
+  </div>
+
+  {/* Plugin JavaScript is served same-origin rather than inlined: the app ships
+      a hash-based CSP with no 'unsafe-inline', so an inline script would be
+      dropped by the browser without a word. Same reason plugin CSS is served
+      from /plugins.css. */}
+  {!failed && page.script && (
+    <script is:inline src={`/plugin-admin.js?page=${encodeURIComponent(page.href)}`}></script>
+  )}
+</AdminLayout>

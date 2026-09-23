@@ -1,0 +1,65 @@
+---
+/**
+ * Editorial theme — `Home` override.
+ *
+ * A magazine front page: the newest article IS the hero, set huge in the serif,
+ * with the next few as a rule-separated list beneath. No marketing copy at all
+ * — an editorial site's front door is its journalism, and a theme that replaced
+ * the stock hero with prettier marketing would have missed its own point.
+ *
+ * Renders honestly when empty: a fresh install shows the masthead welcome
+ * instead of a blank page, because a theme must never assume content exists.
+ */
+import type { HomeProps } from '../../core/theme-slots';
+import { postHref, routeHref } from '../../lib/locale-links';
+
+const { siteTitle = 'AstroBaaS', siteTagline = '', posts = [] } = Astro.props as HomeProps;
+const [lead, ...rest] = posts;
+---
+
+<div class="editorial-home max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+  {lead ? (
+    <>
+      <article class="pb-10 border-b-2 border-gray-900">
+        <div class="flex items-baseline gap-3 text-xs uppercase tracking-widest text-gray-500 mb-4">
+          <span>{lead.category}</span>
+          <span aria-hidden="true">/</span>
+          <time>{lead.date}</time>
+        </div>
+        <h1 class="font-serif text-4xl md:text-6xl leading-[1.05] text-gray-900 mb-5">
+          <a href={postHref(`/blog/${lead.slug}`, lead)} class="hover:underline underline-offset-8 ab-inherit">{lead.title}</a>
+        </h1>
+        <p class="text-lg text-gray-600 leading-relaxed max-w-3xl mb-4">{lead.excerpt}</p>
+        <p class="text-sm text-gray-500">By <span class="text-gray-700">{lead.author}</span> · {lead.readTime} min</p>
+      </article>
+
+      <div class="divide-y divide-gray-200">
+        {rest.map((post) => (
+          <article class="py-7">
+            <div class="flex items-baseline gap-3 text-xs uppercase tracking-widest text-gray-500 mb-2">
+              <span>{post.category}</span>
+              <span aria-hidden="true">/</span>
+              <time>{post.date}</time>
+            </div>
+            <h2 class="font-serif text-2xl leading-snug text-gray-900 mb-1">
+              <a href={postHref(`/blog/${post.slug}`, post)} class="hover:underline underline-offset-4 ab-inherit">{post.title}</a>
+            </h2>
+            <p class="text-gray-600 max-w-2xl">{post.excerpt}</p>
+          </article>
+        ))}
+      </div>
+
+      <div class="pt-10 text-center">
+        <a href={routeHref('/blog', Astro.locals.locale)} class="inline-block text-xs uppercase tracking-widest border border-gray-900 px-6 py-3 hover:bg-gray-900 hover:text-white transition-colors">
+          The full journal
+        </a>
+      </div>
+    </>
+  ) : (
+    <div class="py-24 text-center">
+      <h1 class="font-serif text-5xl text-gray-900 mb-4">{siteTitle}</h1>
+      {siteTagline && <p class="text-lg text-gray-600">{siteTagline}</p>}
+      <p class="mt-8 text-sm uppercase tracking-widest text-gray-500">The first article will appear here.</p>
+    </div>
+  )}
+</div>

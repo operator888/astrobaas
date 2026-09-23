@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+  xmlns:content="http://purl.org/rss/1.0/modules/content/"
+  xmlns:dc="http://purl.org/dc/elements/1.1/"
+  xmlns:excerpt="http://wordpress.org/export/1.2/excerpt/"
+  xmlns:wp="http://wordpress.org/export/1.2/">
+<channel>
+  <title>Example Optics</title>
+  <link>https://old-shop.example</link>
+  <wp:base_site_url>https://old-shop.example</wp:base_site_url>
+  <wp:author>
+    <wp:author_login><![CDATA[maria]]></wp:author_login>
+    <wp:author_email><![CDATA[maria@old-shop.example]]></wp:author_email>
+    <wp:author_display_name><![CDATA[Maria K.]]></wp:author_display_name>
+  </wp:author>
+  <item>
+    <title>How to choose a frame</title>
+    <link>https://old-shop.example/2024/03/how-to-choose-a-frame/</link>
+    <dc:creator><![CDATA[maria]]></dc:creator>
+    <wp:post_id>42</wp:post_id>
+    <wp:post_name>how-to-choose-a-frame</wp:post_name>
+    <wp:post_type>post</wp:post_type>
+    <wp:status>publish</wp:status>
+    <wp:post_date_gmt>2024-03-05 09:30:00</wp:post_date_gmt>
+    <content:encoded><![CDATA[<p>A frame should fit your face. <script>alert(1)</script></p>]]></content:encoded>
+    <excerpt:encoded><![CDATA[Fit matters.]]></excerpt:encoded>
+    <category domain="category" nicename="frames"><![CDATA[Frames & Lenses]]></category>
+    <category domain="post_tag" nicename="titanium"><![CDATA[titanium]]></category>
+  </item>
+  <item>
+    <title>About us</title>
+    <link>https://old-shop.example/about-us/</link>
+    <wp:post_id>7</wp:post_id>
+    <wp:post_name>about-us</wp:post_name>
+    <wp:post_type>page</wp:post_type>
+    <wp:status>publish</wp:status>
+    <content:encoded><![CDATA[<p>We have been here since 1998.</p>]]></content:encoded>
+  </item>
+  <item>
+    <title>Secret plans</title>
+    <wp:post_id>99</wp:post_id>
+    <wp:post_name>secret-plans</wp:post_name>
+    <wp:post_type>post</wp:post_type>
+    <wp:status>private</wp:status>
+    <content:encoded><![CDATA[<p>Not for the public.</p>]]></content:encoded>
+  </item>
+  <item>
+    <title>Deleted draft</title>
+    <wp:post_id>100</wp:post_id>
+    <wp:post_type>post</wp:post_type>
+    <wp:status>trash</wp:status>
+  </item>
+  <item>
+    <title>A WooCommerce product</title>
+    <wp:post_id>101</wp:post_id>
+    <wp:post_name>a-product</wp:post_name>
+    <wp:post_type>product</wp:post_type>
+    <wp:status>publish</wp:status>
+  </item>
+</channel>
+</rss>

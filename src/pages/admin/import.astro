@@ -1,0 +1,489 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { canOpenAdminPage } from '../../lib/admin-access';
+import { getContentTypes } from '../../core/content-types';
+import { ensurePluginsBootstrapped } from '../../plugins';
+
+/**
+ * Bring a WordPress site across.
+ *
+ * The screen is built around one idea: **rehearse, read, then commit.** The
+ * form's default action is a dry run, and the button that actually writes only
+ * appears after a rehearsal has been read. An import cannot be undone, and the
+ * failure it protects against is not exotic — it is somebody clicking Import
+ * on a 900-post export and finding out afterwards that 300 of them were
+ * WooCommerce products, or that their private drafts are now public.
+ *
+ * The role check is asked, not re-implemented: `canOpenAdminPage` is the same
+ * predicate the middleware and the sidebar use, so all three cannot disagree.
+ */
+const user = Astro.locals.user;
+if (!canOpenAdminPage('/admin/import', user?.role)) {
+  return Astro.redirect('/admin');
+}
+
+// The collections an operator can move in and out (C-91). Built here rather
+// than in the browser so the list is the registry's, not a second copy of it —
+// and so a type registered by a plugin appears without anyone editing this
+// screen.
+await ensurePluginsBootstrapped();
+const collections = [
+  { name: 'post', label: 'Posts' },
+  { name: 'page', label: 'Pages' },
+  ...getContentTypes().map((d) => ({ name: d.name, label: d.label ?? d.name })),
+];
+---
+
+<AdminLayout title="Import a site">
+  <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">Import from WordPress</h1>
+    <p class="text-sm text-gray-500 mb-6">
+      Export your site from WordPress (<span class="font-mono text-xs">Tools → Export → All content</span>),
+      then upload the <span class="font-mono text-xs">.xml</span> file here. Nothing is written until you
+      read the summary and confirm.
+    </p>
+
+    <form id="import-form" class="bg-white border border-gray-200 rounded-xl p-6 mb-6 grid gap-5">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="wxr-file">Export file</label>
+        <input id="wxr-file" name="file" type="file" accept=".xml,text/xml,application/xml" required
+          class="w-full text-sm text-gray-700 file:mr-3 file:px-4 file:py-2 file:rounded-lg file:border-0 file:bg-blue-50 file:text-blue-700 file:font-medium hover:file:bg-blue-100" />
+        <p class="text-xs text-gray-400 mt-1">
+          Larger than 24&nbsp;MB? Run it from a terminal instead:
+          <span class="font-mono">npm run import:wp -- export.xml</span>
+        </p>
+      </div>
+
+      <fieldset class="grid gap-2">
+        <legend class="text-sm font-medium text-gray-700 mb-1">What to bring</legend>
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" name="include_pages" checked class="rounded border-gray-300" />
+          Pages as well as posts
+        </label>
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" name="fetch_media" class="rounded border-gray-300" />
+          Download images and files from the old site
+          <span class="text-xs text-gray-400">(the old site must still be online; up to 100 files per run here — use the CLI for a large library)</span>
+        </label>
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" name="include_trash" class="rounded border-gray-300" />
+          Include content WordPress had in the bin
+        </label>
+      </fieldset>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="extra-types">
+          Custom post types <span class="font-normal text-gray-400">(optional)</span>
+        </label>
+        <input id="extra-types" name="extra_types" placeholder="portfolio, recipe"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" />
+        <p class="text-xs text-gray-400 mt-1">
+          Comma separated. Anything not listed here is reported as skipped rather than guessed at.
+        </p>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <button type="submit" id="dry-run-btn"
+          class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50">
+          See what would happen
+        </button>
+        <span id="import-status" class="text-sm text-gray-500"></span>
+      </div>
+      <p id="import-error" class="text-sm text-red-600 m-0"></p>
+    </form>
+
+    <aside class="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6 text-sm text-blue-900">
+      <strong class="font-semibold">Running a WooCommerce shop?</strong>
+      A WXR export carries your posts and pages, but not your products, orders or customers —
+      WooCommerce keeps those in database tables the exporter does not write. Bring the shop
+      across from a terminal with
+      <span class="font-mono text-xs">npm run import:woo -- ./dump</span>, which reads the JSON a
+      dump parser produces. Importing products or orders turns the shop on if it is off.
+    </aside>
+
+    <section id="report" class="hidden bg-white border border-gray-200 rounded-xl p-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-1">Summary</h2>
+      <p id="report-site" class="text-sm text-gray-500 mb-4"></p>
+
+      <dl id="report-counts" class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6"></dl>
+
+      <div id="report-authors" class="hidden mb-6">
+        <h3 class="text-sm font-semibold text-gray-900 mb-1">Authors in the export</h3>
+        <p class="text-xs text-gray-500 mb-2">
+          No accounts are created. Invite these people yourself, then reassign their posts.
+        </p>
+        <ul id="report-authors-list" class="text-sm text-gray-700 list-disc pl-5"></ul>
+      </div>
+
+      <div id="report-skipped" class="hidden mb-6">
+        <h3 class="text-sm font-semibold text-gray-900 mb-1">Not imported</h3>
+        <ul id="report-skipped-list" class="text-sm text-gray-700 list-disc pl-5"></ul>
+      </div>
+
+      <div id="report-failed" class="hidden mb-6">
+        <h3 class="text-sm font-semibold text-red-700 mb-1">Failed</h3>
+        <ul id="report-failed-list" class="text-sm text-red-700 list-disc pl-5"></ul>
+      </div>
+
+      <div id="commit-row" class="hidden border-t border-gray-200 pt-5">
+        <p class="text-sm text-gray-700 mb-3">
+          This cannot be undone. Re-running the same export later is safe — items already
+          imported are skipped rather than duplicated.
+        </p>
+        <button type="button" id="commit-btn"
+          class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium disabled:opacity-50">
+          Import for real
+        </button>
+      </div>
+
+      <p id="done-note" class="hidden text-sm text-green-700 m-0"></p>
+    </section>
+
+    <!--
+      Your own content, both directions (C-91).
+
+      Deliberately on the same screen as the WordPress importer: an operator
+      looking for "how do I get my content in or out" looks in one place, and a
+      second screen is a second place to miss.
+    -->
+    <section class="bg-white border border-gray-200 rounded-xl p-6 mt-10">
+      <h2 class="text-lg font-semibold text-gray-900 mb-1">Your own content</h2>
+      <p class="text-sm text-gray-500 mb-5">
+        Take a collection out as a spreadsheet, edit it, and put it back. Rows are matched on
+        <span class="font-mono text-xs">slug</span> (or <span class="font-mono text-xs">id</span>),
+        so a file you sorted imports correctly. Nothing is written until you read the summary.
+      </p>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="tx-collection">Collection</label>
+          <select id="tx-collection" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+            {collections.map((c) => <option value={c.name}>{c.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="tx-format">Format</label>
+          <select id="tx-format" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+            <option value="csv">CSV (opens in Excel)</option>
+            <option value="json">JSON</option>
+          </select>
+        </div>
+        <div class="flex items-end">
+          <a id="tx-export" href="/api/transfer/post?format=csv"
+            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium">
+            Export
+          </a>
+        </div>
+      </div>
+
+      <div class="border-t border-gray-200 pt-5">
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="tx-file">Import a file</label>
+        <input id="tx-file" type="file" accept=".csv,.json,text/csv,application/json"
+          class="w-full text-sm text-gray-700 file:mr-3 file:px-4 file:py-2 file:rounded-lg file:border-0 file:bg-blue-50 file:text-blue-700 file:font-medium hover:file:bg-blue-100" />
+        <div class="mt-3 flex items-center gap-3">
+          <button type="button" id="tx-preview"
+            class="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50">
+            Check the file
+          </button>
+          <span id="tx-status" class="text-sm text-gray-600" role="status" aria-live="polite"></span>
+        </div>
+
+        <div id="tx-report" class="hidden mt-5">
+          <dl id="tx-counts" class="grid grid-cols-3 gap-4 mb-4"></dl>
+          <div id="tx-problems" class="hidden mb-4">
+            <h3 class="text-sm font-semibold text-gray-900 mb-1">Rows that will be skipped</h3>
+            <ul id="tx-problems-list" class="text-sm text-gray-700 list-disc pl-5"></ul>
+          </div>
+          <button type="button" id="tx-apply"
+            class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium">
+            Import for real
+          </button>
+        </div>
+      </div>
+    </section>
+  </div>
+</AdminLayout>
+
+<script>
+  /**
+   * Content export/import (C-91).
+   *
+   * The same rehearse-then-commit shape as the WordPress importer above, for
+   * the same reason: an import overwrites records and cannot be undone. The
+   * preview is computed by the SERVER, by the identical function that then
+   * applies it — a preview drawn in the browser would be a second
+   * implementation and would eventually disagree with what actually happens.
+   */
+  (function () {
+    const collection = document.getElementById('tx-collection') as HTMLSelectElement;
+    const format = document.getElementById('tx-format') as HTMLSelectElement;
+    const exportLink = document.getElementById('tx-export') as HTMLAnchorElement;
+    const file = document.getElementById('tx-file') as HTMLInputElement;
+    const previewBtn = document.getElementById('tx-preview') as HTMLButtonElement;
+    const applyBtn = document.getElementById('tx-apply') as HTMLButtonElement;
+    const status = document.getElementById('tx-status') as HTMLElement;
+    const report = document.getElementById('tx-report') as HTMLElement;
+    const counts = document.getElementById('tx-counts') as HTMLElement;
+    const problems = document.getElementById('tx-problems') as HTMLElement;
+    const problemsList = document.getElementById('tx-problems-list') as HTMLElement;
+    if (!collection || !exportLink) return;
+
+    let staged: { body: string; format: string; collection: string } | null = null;
+
+    const syncExport = () => {
+      exportLink.href = `/api/transfer/${encodeURIComponent(collection.value)}?format=${format.value}`;
+    };
+    collection.addEventListener('change', syncExport);
+    format.addEventListener('change', syncExport);
+    syncExport();
+
+    const csrf = () => (document.cookie.match(/(?:^|; )astrobaas_csrf=([^;]*)/) ?? [])[1] ?? '';
+
+    const post = (body: unknown) => fetch(`/api/transfer/${encodeURIComponent(collection.value)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': decodeURIComponent(csrf()) },
+      body: JSON.stringify(body),
+    });
+
+    // Un-stage on ANY change: the summary on screen would no longer describe
+    // what is about to happen.
+    const invalidate = () => { staged = null; report.classList.add('hidden'); };
+    for (const el of [collection, format, file]) el.addEventListener('change', invalidate);
+
+    previewBtn?.addEventListener('click', async () => {
+      const f = file.files?.[0];
+      if (!f) { status.textContent = 'Choose a file first.'; return; }
+      status.textContent = 'Reading…';
+      const text = await f.text();
+      const fmt = f.name.toLowerCase().endsWith('.json') ? 'json' : 'csv';
+      const res = await post({ body: text, format: fmt });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.data) {
+        status.textContent = json?.message || json?.error?.message || 'That file could not be read.';
+        return;
+      }
+      const plan = json.data;
+      staged = { body: text, format: fmt, collection: collection.value };
+      counts.replaceChildren();
+      for (const [label, value] of [['Create', plan.creates], ['Update', plan.updates], ['Skip', plan.skipped]]) {
+        const dt = document.createElement('dt');
+        dt.className = 'text-xs uppercase tracking-wide text-gray-500';
+        dt.textContent = String(label);
+        const dd = document.createElement('dd');
+        dd.className = 'text-2xl font-semibold text-gray-900';
+        dd.textContent = String(value);
+        const wrap = document.createElement('div');
+        wrap.append(dt, dd);
+        counts.appendChild(wrap);
+      }
+      const skipped = (plan.rows ?? []).filter((r: any) => r.action === 'skip');
+      problemsList.replaceChildren();
+      for (const r of skipped.slice(0, 50)) {
+        const li = document.createElement('li');
+        // textContent, never innerHTML: this text contains the operator's own
+        // data, which is exactly the string an attacker controls.
+        li.textContent = `Row ${r.line}: ${r.problem ?? 'skipped'}`;
+        problemsList.appendChild(li);
+      }
+      if (plan.unknownColumns?.length) {
+        const li = document.createElement('li');
+        li.textContent = `Columns with no matching field, ignored: ${plan.unknownColumns.join(', ')}`;
+        problemsList.appendChild(li);
+      }
+      problems.classList.toggle('hidden', problemsList.children.length === 0);
+      report.classList.remove('hidden');
+      status.textContent = '';
+    });
+
+    applyBtn?.addEventListener('click', async () => {
+      if (!staged || staged.collection !== collection.value) {
+        status.textContent = 'Check the file again first.';
+        return;
+      }
+      applyBtn.disabled = true;
+      status.textContent = 'Importing…';
+      const res = await post({ ...staged, apply: true });
+      const json = await res.json().catch(() => null);
+      applyBtn.disabled = false;
+      if (!res.ok || !json?.data) {
+        status.textContent = json?.message || 'The import failed.';
+        return;
+      }
+      status.textContent = `${json.data.created} created, ${json.data.updated} updated, ${json.data.skipped} skipped.`;
+      report.classList.add('hidden');
+      staged = null;
+    });
+  })();
+</script>
+
+<script>
+  (() => {
+    const form = document.getElementById('import-form') as HTMLFormElement | null;
+    if (!form) return;
+
+    const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+    const status = $<HTMLElement>('import-status');
+    const errorEl = $<HTMLElement>('import-error');
+    const report = $<HTMLElement>('report');
+    const commitRow = $<HTMLElement>('commit-row');
+    const commitBtn = $<HTMLButtonElement>('commit-btn');
+    const dryBtn = $<HTMLButtonElement>('dry-run-btn');
+    const doneNote = $<HTMLElement>('done-note');
+
+    const csrf = () =>
+      (window as any).__ASTROBAAS__?.csrf
+      || document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+      || '';
+
+    /**
+     * What was REHEARSED is what gets committed.
+     *
+     * The commit button used to rebuild the payload from the live form at
+     * click time, so a user could dry-run one file, then swap the file or tick
+     * "include the bin" and commit a configuration no rehearsal was ever shown
+     * for — the exact thing the rehearse-first design exists to prevent. The
+     * payload is now captured once at rehearsal time, the commit resends that
+     * capture, and ANY change to the form invalidates it until a new rehearsal
+     * has been read.
+     */
+    let staged: FormData | null = null;
+
+    function buildPayload(): FormData {
+      const fd = new FormData();
+      const file = (form!.elements.namedItem('file') as HTMLInputElement).files?.[0];
+      if (file) fd.set('file', file);
+      const checked = (name: string) =>
+        (form!.elements.namedItem(name) as HTMLInputElement | null)?.checked ? 'true' : 'false';
+      fd.set('include_pages', checked('include_pages'));
+      fd.set('fetch_media', checked('fetch_media'));
+      fd.set('include_trash', checked('include_trash'));
+      fd.set('extra_types', (form!.elements.namedItem('extra_types') as HTMLInputElement).value);
+      return fd;
+    }
+
+    /** Text, never markup: every string here comes out of somebody's export. */
+    function li(parent: HTMLElement, text: string) {
+      const el = document.createElement('li');
+      el.textContent = text;
+      parent.appendChild(el);
+    }
+
+    function count(dl: HTMLElement, label: string, n: number) {
+      const wrap = document.createElement('div');
+      const dt = document.createElement('dt');
+      dt.className = 'text-xs text-gray-500';
+      dt.textContent = label;
+      const dd = document.createElement('dd');
+      dd.className = 'text-xl font-semibold text-gray-900';
+      dd.textContent = String(n);
+      wrap.append(dt, dd);
+      dl.appendChild(wrap);
+    }
+
+    function render(data: any, wasDryRun: boolean) {
+      report.classList.remove('hidden');
+      $<HTMLElement>('report-site').textContent = data.source_site
+        ? `From ${data.source_site} — ${data.summary}`
+        : data.summary;
+
+      const counts = $<HTMLElement>('report-counts');
+      counts.replaceChildren();
+      count(counts, wasDryRun ? 'Posts to create' : 'Posts created', data.createdPosts);
+      count(counts, wasDryRun ? 'Pages to create' : 'Pages created', data.createdPages);
+      count(counts, wasDryRun ? 'Redirects to add' : 'Redirects added', data.createdRedirects);
+      count(counts, wasDryRun ? 'Files to fetch' : 'Files fetched', data.importedMedia);
+
+      const authorsBox = $<HTMLElement>('report-authors');
+      const authorsList = $<HTMLElement>('report-authors-list');
+      authorsList.replaceChildren();
+      if (data.authors?.length) {
+        authorsBox.classList.remove('hidden');
+        for (const a of data.authors) {
+          li(authorsList, a.displayName || a.login);
+        }
+      } else authorsBox.classList.add('hidden');
+
+      // Grouped by reason: "412 skipped" tells nobody anything, while
+      // "400 × attachments, 12 × in the bin" is something to act on.
+      const skippedBox = $<HTMLElement>('report-skipped');
+      const skippedList = $<HTMLElement>('report-skipped-list');
+      skippedList.replaceChildren();
+      if (data.skipped?.length) {
+        skippedBox.classList.remove('hidden');
+        const byReason = new Map<string, number>();
+        for (const s of data.skipped) byReason.set(s.reason, (byReason.get(s.reason) ?? 0) + 1);
+        for (const [reason, n] of [...byReason].sort((a, b) => b[1] - a[1])) {
+          li(skippedList, `${n} × ${reason}`);
+        }
+      } else skippedBox.classList.add('hidden');
+
+      const failedBox = $<HTMLElement>('report-failed');
+      const failedList = $<HTMLElement>('report-failed-list');
+      failedList.replaceChildren();
+      if (data.failed?.length) {
+        failedBox.classList.remove('hidden');
+        for (const f of data.failed.slice(0, 50)) li(failedList, `${f.title} — ${f.reason}`);
+      } else failedBox.classList.add('hidden');
+
+      if (wasDryRun) {
+        commitRow.classList.remove('hidden');
+        doneNote.classList.add('hidden');
+      } else {
+        commitRow.classList.add('hidden');
+        doneNote.classList.remove('hidden');
+        doneNote.textContent = 'Import complete. Running the same export again is safe.';
+      }
+      report.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    async function send(dryRun: boolean) {
+      errorEl.textContent = '';
+      dryBtn.disabled = true;
+      commitBtn.disabled = true;
+      status.textContent = dryRun ? 'Reading the export…' : 'Importing — this can take a while…';
+      try {
+        const fd = dryRun ? buildPayload() : staged;
+        if (!fd) {
+          errorEl.textContent = 'Run the rehearsal again before importing.';
+          return;
+        }
+        fd.set('dry_run', dryRun ? 'true' : 'false');
+        if (dryRun) staged = fd;
+        const res = await fetch('/api/import/wordpress', {
+          method: 'POST',
+          headers: { Accept: 'application/json', 'X-CSRF-Token': csrf() },
+          body: fd,
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          errorEl.textContent = json?.error?.message || json?.message || `Import failed (${res.status})`;
+          return;
+        }
+        render(json.data ?? json, dryRun);
+      } catch (err) {
+        errorEl.textContent = (err as Error).message || 'Could not reach the server';
+      } finally {
+        status.textContent = '';
+        dryBtn.disabled = false;
+        commitBtn.disabled = false;
+      }
+    }
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      // Always a rehearsal. Committing is a separate, deliberate click.
+      void send(true);
+    });
+    commitBtn.addEventListener('click', () => void send(false));
+
+    // Touching ANYTHING un-stages the rehearsal: the summary on screen no
+    // longer describes what would be imported, so the commit button goes away
+    // until a new rehearsal has been read.
+    const invalidate = () => {
+      staged = null;
+      commitRow.classList.add('hidden');
+    };
+    form.addEventListener('change', invalidate);
+    form.addEventListener('input', invalidate);
+  })();
+</script>

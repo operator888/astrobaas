@@ -1,0 +1,33 @@
+---
+/**
+ * Editorial theme — `PostCard` override.
+ *
+ * A deliberately different shape from the default: no cover image, a typographic
+ * rule-separated list row instead of a card grid tile. Demonstrates that a theme
+ * can change STRUCTURE, not just colors.
+ */
+import type { PostCardProps } from '../../core/theme-slots';
+import { postHref } from '../../lib/locale-links';
+
+const { post } = Astro.props as PostCardProps;
+---
+
+<article class="editorial-card border-b border-gray-200 py-8">
+  <div class="flex items-baseline gap-3 text-xs uppercase tracking-widest text-gray-500 mb-2">
+    <span>{post.category}</span>
+    <span aria-hidden="true">/</span>
+    <time>{post.date}</time>
+  </div>
+
+  <h3 class="font-serif text-2xl md:text-3xl leading-snug text-gray-900 mb-2">
+    <a href={postHref(`/blog/${post.slug}`, post)} class="hover:underline underline-offset-4 ab-inherit">
+      {post.title}
+    </a>
+  </h3>
+
+  <p class="text-gray-600 leading-relaxed max-w-2xl mb-3">{post.excerpt}</p>
+
+  <div class="text-sm text-gray-500">
+    By <span class="text-gray-700">{post.author}</span> · {post.readTime}
+  </div>
+</article>

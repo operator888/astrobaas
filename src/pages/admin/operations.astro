@@ -1,0 +1,317 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { canOpenAdminPage } from '../../lib/admin-access';
+import { profilingEnabled, slowestProfiles, profileSummary, PROFILE_BUFFER } from '../../lib/request-profile';
+
+/**
+ * The two background things, on one screen.
+ *
+ * "Why has my scheduled post not gone live?" and "did that email actually get
+ * sent?" were both answerable only by reading server logs — which the person
+ * running a small shop cannot do, and should not have to. Between them they
+ * account for most of the moments where the CMS looks broken and is not.
+ *
+ * One screen rather than two, because the answer to the first is often in the
+ * second: a scheduler that is not running has not sent the notifications
+ * either.
+ */
+const user = Astro.locals.user;
+if (!canOpenAdminPage('/admin/operations', user?.role)) {
+  return Astro.redirect('/admin');
+}
+
+// The performance breakdown (C-157). Rendered server-side rather than fetched:
+// the buffer lives in THIS process, and an endpoint behind a load balancer
+// would answer from whichever process took the request — a different set of
+// numbers each refresh, with nothing saying why.
+const profiling = profilingEnabled();
+const slowest = profiling ? slowestProfiles(10) : [];
+const perPath = profiling ? profileSummary().slice(0, 10) : [];
+---
+
+<AdminLayout title="Background jobs">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">Background jobs</h1>
+    <p class="text-sm text-gray-500 mb-6">
+      What the scheduler and the mailer have been doing on this server. Both run inside the
+      site itself, so this is the whole picture — there is no separate worker to check.
+    </p>
+
+    <section class="bg-white border border-gray-200 rounded-xl p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-1">Scheduled posts</h2>
+      <p id="sched-state" class="text-sm text-gray-500 mb-4">Loading…</p>
+      <dl id="sched-counts" class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4"></dl>
+      <p id="sched-error" class="text-sm text-red-600 m-0 mb-3"></p>
+      <div id="sched-overdue" class="hidden">
+        <h3 class="text-sm font-semibold text-gray-900 mb-1">Past their time and still waiting</h3>
+        <ul id="sched-overdue-list" class="text-sm text-gray-700 list-disc pl-5 space-y-1"></ul>
+      </div>
+    </section>
+
+    <section class="bg-white border border-gray-200 rounded-xl p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-1">Off-site backup</h2>
+      <p id="backup-state" class="text-sm text-gray-500 mb-3">Loading…</p>
+      <p id="backup-detail" class="text-sm text-gray-600 m-0"></p>
+      <p id="backup-error" class="text-sm text-red-600 m-0 mt-2"></p>
+    </section>
+
+    <!-- Where a slow request spent its time (C-157). -->
+    <section class="bg-white border border-gray-200 rounded-xl p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-1">Request timings</h2>
+      {!profiling && (
+        <p class="text-sm text-gray-500 m-0">
+          Off. Set <span class="font-mono text-xs">PROFILE_REQUESTS=1</span> and restart to record
+          the last {PROFILE_BUFFER} requests with a breakdown of where the time went. It is off by
+          default because keeping a list of recent URLs is a decision, not a default.
+        </p>
+      )}
+      {profiling && slowest.length === 0 && (
+        <p class="text-sm text-gray-500 m-0">Recording. Nothing measured yet — load a page or two.</p>
+      )}
+      {profiling && slowest.length > 0 && (
+        <div>
+          <p class="text-sm text-gray-500 mb-4">
+            The last {PROFILE_BUFFER} requests handled by <strong>this process</strong>. Behind a load
+            balancer each process keeps its own list, so these are a sample rather than the whole site.
+          </p>
+
+          <h3 class="text-sm font-semibold text-gray-900 mb-2">Busiest paths</h3>
+          <div class="overflow-x-auto mb-6">
+            <table class="min-w-full text-sm">
+              <thead>
+                <tr class="text-left text-xs uppercase tracking-wide text-gray-500">
+                  <th class="py-2 pr-4">Path</th><th class="py-2 pr-4">Requests</th>
+                  <th class="py-2 pr-4">Average</th><th class="py-2 pr-4">Slowest</th>
+                </tr>
+              </thead>
+              <tbody>
+                {perPath.map((row) => (
+                  <tr class="border-t border-gray-100">
+                    <td class="py-2 pr-4 font-mono text-xs text-gray-700">{row.path}</td>
+                    <td class="py-2 pr-4">{row.count}</td>
+                    <td class="py-2 pr-4">{row.avgMs} ms</td>
+                    <td class="py-2 pr-4">{row.maxMs} ms</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h3 class="text-sm font-semibold text-gray-900 mb-2">Slowest requests</h3>
+          <ul class="space-y-3">
+            {slowest.map((p) => (
+              <li class="border-t border-gray-100 pt-3">
+                <div class="flex items-baseline justify-between gap-4">
+                  <span class="font-mono text-xs text-gray-700">{p.method} {p.path}</span>
+                  <span class="text-sm font-semibold text-gray-900">{p.ms} ms</span>
+                </div>
+                <div class="text-xs text-gray-500 mt-1">
+                  {p.spans.map((s) => (
+                    <span class="inline-block mr-3">{s.name} {s.ms} ms{s.count > 1 ? ` ×${s.count}` : ''}</span>
+                  ))}
+                  <span class="inline-block mr-3">unaccounted {p.unaccounted} ms</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+
+    <section class="bg-white border border-gray-200 rounded-xl p-6">
+      <div class="flex flex-wrap items-baseline justify-between gap-3 mb-1">
+        <h2 class="text-lg font-semibold text-gray-900">Outbound email</h2>
+        <button type="button" id="ops-refresh"
+          class="px-3 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">
+          Refresh
+        </button>
+      </div>
+      <p id="mail-state" class="text-sm text-gray-500 mb-4">Loading…</p>
+      <p class="text-xs text-gray-400 mb-4">
+        Subjects and outcomes only. The contents are never stored — password-reset and
+        sign-in links go through the same sender, and a log holding those would be a list of
+        live credentials.
+      </p>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="text-left text-gray-500">
+            <tr>
+              <th class="py-2 pr-4 font-medium">When</th>
+              <th class="py-2 pr-4 font-medium">To</th>
+              <th class="py-2 pr-4 font-medium">Subject</th>
+              <th class="py-2 pr-4 font-medium">Sent via</th>
+              <th class="py-2 font-medium">Result</th>
+            </tr>
+          </thead>
+          <tbody id="mail-rows" class="text-gray-700"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</AdminLayout>
+
+<style is:global>
+  /* is:global because these classes are applied to <td> elements the client
+     script creates AFTER hydration — a scoped block only styles markup Astro
+     rendered, so scoped rules never reached them and the sent/failed column
+     showed no colour. The names are specific enough not to collide. */
+  .ops-ok { color: #15803d; }
+  .ops-failed { color: #b91c1c; font-weight: 600; }
+  .ops-unknown { color: #b45309; font-weight: 600; }
+</style>
+
+<script>
+  (() => {
+    const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+    if (!$('sched-state')) return;
+
+    function count(dl: HTMLElement, label: string, value: string | number) {
+      const wrap = document.createElement('div');
+      const dt = document.createElement('dt');
+      dt.className = 'text-xs text-gray-500';
+      dt.textContent = label;
+      const dd = document.createElement('dd');
+      dd.className = 'text-xl font-semibold text-gray-900';
+      dd.textContent = String(value);
+      wrap.append(dt, dd);
+      dl.appendChild(wrap);
+    }
+
+    const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : 'never');
+
+    async function load() {
+      try {
+        const res = await fetch('/api/operations?limit=50', { headers: { Accept: 'application/json' } });
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          $('sched-state').textContent = json?.error?.message || `Could not load (${res.status})`;
+          return;
+        }
+        const { scheduler, email } = json.data;
+
+        // The load-bearing sentence. "Enabled" in the environment and "running
+        // in this process" are different things, and only the second one
+        // publishes anything.
+        $('sched-state').textContent = !scheduler.enabled
+          ? 'The scheduler is switched off (SCHEDULER_DISABLED). Scheduled posts will not publish themselves.'
+          : scheduler.startedAt
+            ? scheduler.role === 'follower'
+              // Several processes share this database and another one holds the
+              // scheduler lease. Saying "last swept never" here would read as a
+              // broken scheduler when it is simply somebody else's turn.
+              ? `Standing by on this server: ${scheduler.lease?.currentHolder ?? 'another server'} is running the sweeps. This server takes over if that one stops.`
+              : `Running on this server every ${Math.round(scheduler.intervalMs / 1000)}s, since ${when(scheduler.startedAt)}. Last swept ${when(scheduler.lastRunAt)}.`
+            : 'Enabled, but it has not started on this server. Restart the site if scheduled posts are not publishing.';
+
+        const counts = $('sched-counts');
+        counts.replaceChildren();
+        count(counts, 'Waiting', scheduler.scheduled);
+        count(counts, 'Overdue', scheduler.overdue);
+        count(counts, 'Published last sweep', scheduler.lastPublished);
+        count(counts, 'Next one due', scheduler.next ? when(scheduler.next) : '—');
+
+        $('sched-error').textContent = scheduler.lastError
+          ? `The last sweep failed: ${scheduler.lastError}`
+          : '';
+
+        const overdueBox = $('sched-overdue');
+        const overdueList = $('sched-overdue-list');
+        overdueList.replaceChildren();
+        if (scheduler.overdueTitles?.length) {
+          overdueBox.classList.remove('hidden');
+          for (const p of scheduler.overdueTitles) {
+            const li = document.createElement('li');
+            li.textContent = `${p.title} — due ${when(p.due)}`;
+            overdueList.appendChild(li);
+          }
+        } else overdueBox.classList.add('hidden');
+
+        const b = json.data.backup;
+        if (!b?.configured) {
+          $('backup-state').textContent =
+            'No off-site backup is configured. A backup on the same disk as the site is not a '
+            + 'backup — set BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_KEY_ID and '
+            + 'BACKUP_S3_SECRET to push one to any S3-compatible bucket.';
+          $('backup-detail').textContent = '';
+          $('backup-error').textContent = '';
+        } else {
+          $('backup-state').textContent =
+            `Uploading to ${b.target} every ${b.everyHours}h, keeping the last ${b.keep}.`;
+          const running = b.inProgress
+            ? ` A backup has been running since ${when(b.inProgress.started_at)}${b.inProgress.by ? ` (${b.inProgress.by})` : ''}.`
+            : '';
+          if (b.last?.ok) {
+            $('backup-detail').textContent =
+              `Last backup ${when(b.last.at)} — ${b.last.key} (${Math.round((b.last.bytes ?? 0) / 1024)} KB, `
+              + `${b.last.files} file(s)${b.last.skipped ? `, ${b.last.skipped} too large to include` : ''}`
+              + `${b.last.pruned ? `, ${b.last.pruned} old one(s) removed` : ''}).${running}`;
+            $('backup-error').textContent = '';
+          } else if (b.last) {
+            $('backup-detail').textContent = `Last attempt ${when(b.last.at)}.`
+              + (b.lastSuccess ? ` Last successful backup ${when(b.lastSuccess.at)}.` : ' No backup has succeeded yet.')
+              + running;
+            $('backup-error').textContent = `That attempt failed: ${b.last.error}`;
+          } else {
+            $('backup-detail').textContent = running
+              ? running.trim()
+              : b.due
+                ? 'No backup has run yet. One is due and will go on the next sweep.'
+                : 'No backup has run yet.';
+            $('backup-error').textContent = '';
+          }
+        }
+
+        // Three states, not two: `outcome: 'unknown'` is a message that went out
+        // and was never answered — it may well have arrived, and was NOT resent.
+        // Showing it as "failed" would send the operator to resend it.
+        const unknownOutcome = (x: { ok?: boolean; outcome?: string } | null | undefined) => !!x && !x.ok && x.outcome === 'unknown';
+        const lastSendText = (x: { ok?: boolean; outcome?: string; error?: string }) => (x.ok
+          ? 'delivered to the transport'
+          : unknownOutcome(x) ? `outcome unknown — may have been delivered, not resent (${x.error})` : `failed (${x.error})`);
+        $('mail-state').textContent = email.channelActive
+          ? `Sending through ${email.transport}. Last attempt: ${email.lastSend ? `${when(email.lastSend.at)} — ${lastSendText(email.lastSend)}` : 'none since this server started'}.`
+          : 'No email channel is configured, so nothing can be sent. Set one up under Settings.';
+
+        const rows = $('mail-rows');
+        rows.replaceChildren();
+        if (!email.recent?.length) {
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 5;
+          td.className = 'py-3 text-gray-400';
+          td.textContent = 'Nothing sent yet.';
+          tr.appendChild(td);
+          rows.appendChild(tr);
+          return;
+        }
+        for (const e of email.recent) {
+          const tr = document.createElement('tr');
+          tr.className = 'border-t border-gray-100';
+          const cell = (text: string, cls = '') => {
+            const td = document.createElement('td');
+            td.className = `py-2 pr-4 ${cls}`;
+            td.textContent = text;
+            return td;
+          };
+          tr.append(
+            cell(when(e.created_at)),
+            cell(e.to),
+            cell(e.subject),
+            cell(e.transport, 'text-gray-500'),
+            e.ok
+              ? cell(e.response ? `sent — ${e.response}` : 'sent', 'ops-ok')
+              : unknownOutcome(e)
+                ? cell(`outcome unknown — ${e.error ?? 'no reply'}`, 'ops-unknown')
+                : cell(`failed — ${e.error ?? 'no reason given'}`, 'ops-failed'),
+          );
+          rows.appendChild(tr);
+        }
+      } catch (err) {
+        $('sched-state').textContent = (err as Error).message || 'Could not reach the server';
+      }
+    }
+
+    $('ops-refresh').addEventListener('click', () => void load());
+    void load();
+  })();
+</script>

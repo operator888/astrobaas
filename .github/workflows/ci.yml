@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    name: Build + unit + smoke (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # One Node version failing should not hide the result on the other.
+      fail-fast: false
+      matrix:
+        # 22 is the floor (`engines.node` is >=22.12.0, and .nvmrc pins it), 24
+        # is current. Self-hosters run whatever their distro ships, so testing
+        # only the version the maintainer happens to use is how a project finds
+        # out about a runtime break from a bug report instead of from CI.
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Build (type-check + bundle)
+        run: npm run build
+        env:
+          AUTH_SECRET: ci-only-secret-do-not-reuse-in-production
+      - name: Unit + smoke tests (lowdb driver)
+        run: npm test
+        env:
+          AUTH_SECRET: ci-only-secret-do-not-reuse-in-production
+      - name: Smoke tests (libSQL/SQLite doc-blob driver)
+        run: npm run smoke:libsql
+        env:
+          AUTH_SECRET: ci-only-secret-do-not-reuse-in-production
+      - name: Smoke tests (relational libSQL driver)
+        run: npm run smoke:relational
+        env:
+          AUTH_SECRET: ci-only-secret-do-not-reuse-in-production
+      - name: Package build + external-import test
+        run: npm run test:pkg
+        env:
+          AUTH_SECRET: ci-only-secret-do-not-reuse-in-production
+      - name: Audit dependency licences
+        # A single transitive AGPL/SSPL dependency would make the paid modules
+        # unsellable, silently, on an ordinary `npm install`. Nothing else in
+        # this pipeline would notice. See THIRD-PARTY-NOTICES.md.
+        run: npm run audit:licenses
+
+      - name: Audit runtime dependencies
+        # Advisories reached "2 high" once because nobody was looking. This
+        # fails the build on high/critical in what actually ships; dev-only
+        # tooling is excluded because a vulnerable test runner is not a
+        # vulnerable deployment, and conflating the two teaches people to
+        # ignore the job.
+        run: npm audit --omit=dev --audit-level=high
+
+  e2e:
+    name: Browser e2e (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      # `npm run e2e` is `astro build && node tests/prod-gates.test.mjs &&
+      # playwright test`. prod-gates asserts the security gates that only exist
+      # on a BUILT artefact (the bootstrap password is generated, and /login
+      # refuses the published default) — neither is observable under `astro dev`,
+      # so this job is the only place they are covered.
+      - name: Run production-gate tests + e2e
+        run: npm run e2e
+        env:
+          AUTH_SECRET: ci-only-secret-do-not-reuse-in-production
+      # `test-results/`, not `playwright-report/`.
+      #
+      # The reporter is `list` (playwright.config.ts), which never writes an
+      # HTML report — so this step uploaded nothing on every failure it was
+      # meant to cover, and `gh run download` on a red run returned "no valid
+      # artifacts found". The traces and the error-context.md the failure log
+      # points at land in `test-results/`. Both paths are listed so this keeps
+      # working if an HTML reporter is added later.
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: warn
+          retention-days: 7

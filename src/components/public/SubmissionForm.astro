@@ -1,0 +1,414 @@
+---
+import type { ContentTypeDefinition } from '../../core/content-types';
+
+/**
+ * A form, rendered from a content type.
+ *
+ * This is the half of the form builder that a visitor sees. An operator
+ * defines the fields once in the admin; the inputs, the validation attributes,
+ * the honeypot and the anti-spam wiring all come from that definition, so
+ * there is no second place where a field can be forgotten, mis-typed, or left
+ * unvalidated.
+ *
+ * What it deliberately does NOT do is decide anything about security. The
+ * `required`, `maxlength` and `type` attributes here are a courtesy to the
+ * person filling the form in — the server validates the same definition again
+ * and does not care what the browser sent. Nothing about this markup is load
+ * bearing.
+ */
+interface Props {
+  def: ContentTypeDefinition;
+  /** Heading above the form. Defaults to the type's label. */
+  title?: string;
+  intro?: string;
+  submitLabel?: string;
+}
+
+const { def, title, intro, submitLabel } = Astro.props;
+
+/** The HTML input type that fits a field rule. */
+type InputType = 'number' | 'email' | 'url' | 'date' | 'text';
+function inputType(type: string): InputType {
+  switch (type) {
+    case 'number': return 'number';
+    case 'email': return 'email';
+    case 'url': return 'url';
+    case 'date': return 'date';
+    default: return 'text';
+  }
+}
+
+/** A field long enough to want a textarea rather than a line. */
+const isLong = (f: { rule: any }) => f.rule.type === 'string' && (f.rule.max ?? 0) > 200;
+
+/** Turn `first_name` into `First name` for a label nobody had to write. */
+const humanise = (name: string) =>
+  name.replace(/[_-]+/g, ' ').replace(/^./, (c) => c.toUpperCase());
+
+// Steps (C-22). A field with no `step` belongs to step 1, so a type defined
+// before steps existed renders exactly as it did.
+const stepTitles = def.steps ?? [];
+const totalSteps = Math.max(1, stepTitles.length || 1);
+const byStep = Array.from({ length: totalSteps }, (_, i) =>
+  def.fields.filter((f) => (f.step ?? 1) === i + 1));
+---
+
+<form
+  class="ab-form space-y-5"
+  id={`form-${def.name}`}
+  data-type={def.name}
+  data-captcha="forms"
+>
+  <div>
+    <h2 class="text-2xl font-semibold ab-ink">{title ?? def.label}</h2>
+    {intro && <p class="mt-2 text-sm ab-muted">{intro}</p>}
+  </div>
+
+  {/*
+    The honeypot. Hidden from people and from screen readers, filled in by
+    almost every automated submitter. Same field name as the contact form, so a
+    theme author who has seen one has seen both.
+  */}
+  <div class="ab-hidden" aria-hidden="true">
+    <label>Leave this empty
+      <input type="text" name="hp_url" tabindex="-1" autocomplete="off" />
+    </label>
+  </div>
+
+  {byStep.map((fields, si) => (
+    <fieldset class="ab-step space-y-5 border-0 p-0 m-0" data-step={si + 1} hidden={si > 0}>
+      {stepTitles[si] && (
+        <legend class="text-sm font-semibold ab-ink mb-1">
+          {stepTitles[si].title}
+          <span class="ab-muted font-normal"> — step {si + 1} of {totalSteps}</span>
+        </legend>
+      )}
+      {fields.map((f) => (
+    <div
+      class="ab-cond"
+      data-field={f.name}
+      data-show-field={f.showIf?.field}
+      data-show-equals={f.showIf ? String(f.showIf.equals) : undefined}
+      hidden={Boolean(f.showIf)}
+    >
+      <label class="block text-sm font-medium ab-ink mb-1" for={`f-${def.name}-${f.name}`}>
+        {humanise(f.name)}
+        {(f.rule as any).optional && <span class="ab-muted font-normal"> (optional)</span>}
+      </label>
+      {f.rule.type === 'file' ? (
+        <input
+          id={`f-${def.name}-${f.name}`}
+          name={f.name}
+          data-kind="file"
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp,application/pdf"
+          required={!(f.rule as any).optional}
+          class="ab-field w-full px-3 py-2 rounded-lg"
+        />
+      ) : f.rule.type === 'boolean' ? (
+        <input
+          id={`f-${def.name}-${f.name}`}
+          name={f.name}
+          type="checkbox"
+          class="h-4 w-4 rounded"
+        />
+      ) : f.rule.type === 'enum' ? (
+        <select
+          id={`f-${def.name}-${f.name}`}
+          name={f.name}
+          required={!(f.rule as any).optional}
+          class="ab-field w-full px-3 py-2 rounded-lg"
+        >
+          <option value="">Choose…</option>
+          {((f.rule as any).values ?? []).map((v: string) => <option value={v}>{v}</option>)}
+        </select>
+      ) : isLong(f) ? (
+        <textarea
+          id={`f-${def.name}-${f.name}`}
+          name={f.name}
+          rows="5"
+          required={!(f.rule as any).optional}
+          maxlength={(f.rule as any).max}
+          class="ab-field w-full px-3 py-2 rounded-lg"
+        />
+      ) : f.rule.type === 'array' ? (
+        <input
+          id={`f-${def.name}-${f.name}`}
+          name={f.name}
+          data-kind="array"
+          type="text"
+          required={!(f.rule as any).optional}
+          placeholder="comma, separated, values"
+          class="ab-field w-full px-3 py-2 rounded-lg"
+        />
+      ) : (
+        <input
+          id={`f-${def.name}-${f.name}`}
+          name={f.name}
+          type={inputType(f.rule.type)}
+          required={!(f.rule as any).optional}
+          maxlength={(f.rule as any).max}
+          minlength={f.rule.type === 'string' ? (f.rule as any).min : undefined}
+          class="ab-field w-full px-3 py-2 rounded-lg"
+        />
+      )}
+    </div>
+      ))}
+    </fieldset>
+  ))}
+
+  <div class="flex items-center gap-3">
+    {totalSteps > 1 && (
+      <button type="button" class="ab-step-back ab-field px-4 py-2.5 rounded-lg font-medium" hidden>
+        Back
+      </button>
+    )}
+    {totalSteps > 1 && (
+      <button type="button" class="ab-step-next ab-button px-5 py-2.5 rounded-lg font-medium">
+        Next
+      </button>
+    )}
+    <button type="submit" class="ab-button px-5 py-2.5 rounded-lg font-medium" hidden={totalSteps > 1}>
+      {submitLabel ?? 'Send'}
+    </button>
+    <span class="ab-form-status text-sm ab-muted" role="status" aria-live="polite"></span>
+  </div>
+
+  <p class="ab-form-error text-sm m-0" role="alert"></p>
+</form>
+
+<style>
+  /* Scoped, so it is hashed into the CSP rather than dropped as a style
+     attribute would be. See THEME_DEVELOPMENT.md — `style="…"` is silently
+     removed in production by the hash-based policy. */
+  .ab-hidden { display: none; }
+  .ab-field {
+    border: 1px solid var(--ab-border, #d1d5db);
+    background: var(--ab-surface, #fff);
+    color: var(--ab-ink, #111827);
+  }
+  .ab-field:focus-visible { outline: 2px solid var(--ab-accent, #2563eb); outline-offset: 1px; }
+  .ab-button {
+    background: var(--ab-accent, #2563eb);
+    color: var(--ab-on-accent, #fff);
+  }
+  .ab-button[disabled] { opacity: .55; }
+  .ab-form-error:not(:empty) { color: var(--ab-danger, #b91c1c); }
+</style>
+
+<script>
+  (() => {
+    for (const form of document.querySelectorAll('form.ab-form[data-type]')) {
+      const el = form as HTMLFormElement;
+      const type = el.dataset.type!;
+      const status = el.querySelector('.ab-form-status') as HTMLElement;
+      const error = el.querySelector('.ab-form-error') as HTMLElement;
+      const button = el.querySelector('button[type="submit"]') as HTMLButtonElement;
+
+      const csrf = () =>
+        document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+        || (document.cookie.match(/(?:^|;\s*)astrobaas_csrf=([^;]*)/)?.[1] ?? '');
+
+      // ─── conditional fields (C-22/C-125) ───────────────────────────
+      //
+      // `hidden` on the wrapper, not a class: the hash-based CSP drops a style
+      // attribute, and a scoped class would need the data-astro-cid the
+      // compiler puts on markup it saw — which is fine here, but `hidden` is
+      // the attribute that also removes the field from the accessibility tree,
+      // which is what "not shown" should mean for somebody using a screen
+      // reader.
+      //
+      // This is PRESENTATION. The server re-evaluates the same conditions in
+      // schemaForSubmission and drops the values of fields it decides are
+      // hidden, so nothing here is load bearing — see the note on `showIf`.
+      const conditionals = [...el.querySelectorAll('.ab-cond[data-show-field]')] as HTMLElement[];
+
+      const currentValue = (name: string): string => {
+        const nodes = el.querySelectorAll(`[name="${CSS.escape(name)}"]`);
+        for (const n of nodes) {
+          const input = n as HTMLInputElement;
+          if (input.type === 'checkbox') return String(input.checked);
+          if (input.type === 'radio') { if (input.checked) return input.value; continue; }
+          return input.value;
+        }
+        return '';
+      };
+
+      const applyConditions = () => {
+        // Re-run until nothing changes, so a chain (a reveals b, b reveals c)
+        // settles in one pass rather than one keystroke per link. Bounded by
+        // the number of conditions, which is bounded by the field count.
+        for (let pass = 0; pass < conditionals.length + 1; pass += 1) {
+          let changed = false;
+          for (const wrap of conditionals) {
+            const want = wrap.dataset.showEquals ?? '';
+            const on = currentValue(wrap.dataset.showField!) === want;
+            if (wrap.hidden === !on) continue;
+            wrap.hidden = !on;
+            changed = true;
+            // A hidden field must not block submission through the browser's
+            // own validity check either — `required` on a hidden input makes
+            // Chrome refuse to submit with "not focusable".
+            for (const n of wrap.querySelectorAll('[name]')) {
+              const input = n as HTMLInputElement;
+              if (on) { if (input.dataset.wasRequired === '1') input.required = true; }
+              else if (input.required) { input.dataset.wasRequired = '1'; input.required = false; }
+            }
+          }
+          if (!changed) break;
+        }
+      };
+      if (conditionals.length) {
+        el.addEventListener('input', applyConditions);
+        el.addEventListener('change', applyConditions);
+        applyConditions();
+      }
+
+      // ─── steps (C-22) ──────────────────────────────────────────────────
+      const steps = [...el.querySelectorAll('.ab-step')] as HTMLElement[];
+      const back = el.querySelector('.ab-step-back') as HTMLButtonElement | null;
+      const next = el.querySelector('.ab-step-next') as HTMLButtonElement | null;
+      const submit = el.querySelector('button[type="submit"]') as HTMLButtonElement;
+      let step = 0;
+
+      const showStep = () => {
+        steps.forEach((s, i) => { s.hidden = i !== step; });
+        if (back) back.hidden = step === 0;
+        const last = step === steps.length - 1;
+        if (next) next.hidden = last;
+        submit.hidden = !last;
+      };
+      if (steps.length > 1) {
+        showStep();
+        next?.addEventListener('click', () => {
+          // Only the CURRENT step's inputs are checked, and only the visible
+          // ones: reportValidity on the whole form would complain about a field
+          // three steps away that the visitor has not reached.
+          const here = steps[step];
+          for (const n of here.querySelectorAll('[name]')) {
+            const input = n as HTMLInputElement;
+            const wrap = input.closest('.ab-cond') as HTMLElement | null;
+            if (wrap?.hidden) continue;
+            if (!input.reportValidity()) return;
+          }
+          if (step < steps.length - 1) { step += 1; showStep(); }
+        });
+        back?.addEventListener('click', () => {
+          if (step > 0) { step -= 1; showStep(); }
+        });
+      }
+
+      el.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        error.textContent = '';
+        status.textContent = 'Sending…';
+        button.disabled = true;
+
+        const fd = new FormData(el);
+        const payload: Record<string, unknown> = {};
+        // A field whose condition is not met is not an answer. The server drops
+        // it too (schemaForSubmission), so this is belt-and-braces — but a
+        // payload that carries an answer to a question the visitor was never
+        // shown is misleading in the network tab as well as in the record.
+        const hiddenNames = new Set<string>();
+        for (const wrap of el.querySelectorAll('.ab-cond[data-show-field]')) {
+          if (!(wrap as HTMLElement).hidden) continue;
+          for (const n of wrap.querySelectorAll('[name]')) hiddenNames.add((n as HTMLInputElement).name);
+        }
+        for (const [k, v] of fd.entries()) {
+          // A File is uploaded separately below and replaced by its id.
+          if (v instanceof File) continue;
+          if (hiddenNames.has(k)) continue;
+          payload[k] = v;
+        }
+        // Checkboxes are absent from FormData when unticked, which a boolean
+        // field needs to see as `false` rather than as "not answered".
+        for (const box of el.querySelectorAll('input[type="checkbox"][name]')) {
+          const b = box as HTMLInputElement;
+          if (b.name !== 'hp_url' && !hiddenNames.has(b.name)) payload[b.name] = b.checked;
+        }
+        // A List field is offered as a comma-separated text input; the server's
+        // array rule rejects a raw string, so split it here. Without this a
+        // required List field made the form impossible to submit.
+        for (const input of el.querySelectorAll('input[data-kind="array"][name]')) {
+          const i = input as HTMLInputElement;
+          if (hiddenNames.has(i.name)) continue;
+          payload[i.name] = i.value.split(',').map((x) => x.trim()).filter(Boolean);
+        }
+
+        // FILES FIRST, and separately (C-23).
+        //
+        // The record is JSON, so a file cannot travel inside it. Each one is
+        // POSTed to /api/forms/<type>/upload, which answers with an id and
+        // never a URL, and the id is what the record carries. Uploading before
+        // the record means a rejected file is reported while the visitor is
+        // still looking at the form rather than after their answers are stored.
+        try {
+          for (const node of el.querySelectorAll('input[data-kind="file"][name]')) {
+            const input = node as HTMLInputElement;
+            if (hiddenNames.has(input.name)) continue;
+            const chosen = input.files?.[0];
+            if (!chosen) continue;
+            const fileForm = new FormData();
+            fileForm.append('file', chosen);
+            // The anti-spam fields travel with the upload too — a bot that
+            // posts the form posts the file, and catching it here saves the
+            // disk write.
+            const powInput = el.querySelector('input[name="pow_token"]') as HTMLInputElement | null;
+            if (powInput) fileForm.append('pow_token', powInput.value);
+            const up = await fetch(`/api/forms/${encodeURIComponent(type)}/upload`, {
+              method: 'POST',
+              headers: { Accept: 'application/json', 'X-CSRF-Token': decodeURIComponent(csrf()) },
+              body: fileForm,
+            });
+            const upJson = await up.json().catch(() => null);
+            if (!up.ok || !upJson?.data?.id) {
+              error.textContent = upJson?.error?.message || 'That file could not be accepted.';
+              status.textContent = '';
+              button.disabled = false;
+              return;
+            }
+            payload[input.name] = upJson.data.id;
+          }
+        } catch {
+          error.textContent = 'Could not upload the file. Please try again.';
+          status.textContent = '';
+          button.disabled = false;
+          return;
+        }
+
+        try {
+          const res = await fetch(`/api/content/${encodeURIComponent(type)}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              'X-CSRF-Token': decodeURIComponent(csrf()),
+            },
+            body: JSON.stringify(payload),
+          });
+          const json = await res.json().catch(() => null);
+          if (!res.ok) {
+            // Field-level messages when the server gave them, so somebody who
+            // mistyped an email is told which box to fix.
+            const details = json?.error?.details;
+            error.textContent = details && typeof details === 'object'
+              ? Object.values(details).join(' ')
+              : (json?.error?.message || json?.message || 'That did not go through.');
+            status.textContent = '';
+            return;
+          }
+          el.reset();
+          if (conditionals.length) applyConditions();
+          if (steps.length > 1) { step = 0; showStep(); }
+          status.textContent = json?.message || 'Thank you — that has been sent.';
+        } catch {
+          error.textContent = 'Could not reach the server. Please try again.';
+          status.textContent = '';
+        } finally {
+          button.disabled = false;
+        }
+      });
+    }
+  })();
+</script>

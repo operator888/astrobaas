@@ -1,0 +1,63 @@
+name: PR checklist
+
+# Every box in the pull request template must be ticked before the PR can
+# merge. The boxes are the contributor's own statement that they ran the
+# checks; CI proves the code, this proves they looked.
+#
+# `pull_request_target`, not `pull_request`: the workflow then comes from the
+# BASE branch, so a fork cannot edit this file to make its own PR pass. Nothing
+# here checks out or runs the contributor's code — it reads the description out
+# of the event payload and nothing else — which is what makes that trigger safe
+# to use here.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: pr-checklist-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  checklist:
+    name: Checklist complete
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every box ticked
+        env:
+          # Through the environment, never inlined into the script: a PR
+          # description is attacker-controlled text.
+          BODY: ${{ github.event.pull_request.body }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "Draft PR — the checklist is not enforced until it is ready for review."
+            exit 0
+          fi
+
+          # HTML comments hold the template's guidance, and an unticked box
+          # inside one is not the contributor's to tick.
+          body="$(printf '%s' "$BODY" | perl -0777 -pe 's/<!--.*?-->//gs')"
+
+          unticked="$(printf '%s' "$body" | grep -nE '^[[:space:]]*- \[ \]' || true)"
+          ticked="$(printf '%s' "$body" | grep -cE '^[[:space:]]*- \[[xX]\]' || true)"
+
+          if [ -z "$unticked" ] && [ "$ticked" -eq 0 ]; then
+            echo "::error::This PR's description has no checklist. Open it with the repository's"
+            echo "::error::pull request template and tick the boxes: the checklist is how you"
+            echo "::error::state which checks you ran, and the CLA box is how the bot knows to ask."
+            exit 1
+          fi
+
+          if [ -n "$unticked" ]; then
+            echo "::error::Some checklist boxes are still unticked. Tick them in the PR"
+            echo "::error::description — or say in the PR why one does not apply and we will"
+            echo "::error::look together. Nothing here is a formality."
+            printf '%s\n' "$unticked" | while IFS= read -r line; do
+              echo "::error::  $(printf '%s' "$line" | sed -E 's/^[0-9]+:[[:space:]]*- \[ \][[:space:]]*//')"
+            done
+            exit 1
+          fi
+
+          echo "All $ticked checklist boxes are ticked."

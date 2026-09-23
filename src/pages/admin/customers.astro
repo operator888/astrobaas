@@ -1,0 +1,89 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { LocalDB } from '../../lib/localdb';
+import { foldForSearch } from '../../lib/text-search';
+import { canOpenAdminPage } from '../../lib/admin-access';
+import { formatMoney } from '../../lib/money-format';
+
+await LocalDB.init();
+const user = Astro.locals.user;
+// Same rule the middleware enforces, asked the same way — a second, hand-written
+// role test here is how the two drift apart.
+if (!canOpenAdminPage('/admin/customers', user?.role)) {
+  return Astro.redirect('/admin');
+}
+
+const t = Astro.locals.t;
+const customers = (await LocalDB.getCustomers()).sort((a, b) => b.created_at.localeCompare(a.created_at));
+const orders = await LocalDB.getOrders();
+// The hardcoded el-GR here was one of five, and disagreed with the sale
+// email's formatMoney — the screen and the receipt stated the same total two
+// ways. The locale now follows the staff member reading it.
+const adminLocale = Astro.locals.uiLocale ?? undefined;
+const money = (cents: number) => formatMoney(cents, { locale: adminLocale });
+const byCustomer = new Map<string, { count: number; total: number }>();
+for (const o of orders) {
+  if (!o.customer_id) continue;
+  const cur = byCustomer.get(o.customer_id) ?? { count: 0, total: 0 };
+  cur.count += 1;
+  cur.total += o.status === 'completed' ? o.total_cents : 0;
+  byCustomer.set(o.customer_id, cur);
+}
+---
+
+<AdminLayout title={t('admin.customers.title')}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="mb-8">
+      <h1 class="text-3xl font-bold text-gray-900">{t('admin.customers.title')}</h1>
+      <p class="text-gray-600 mt-2">{t('admin.customers.count', undefined, { count: customers.length })}</p>
+    </div>
+
+    <div class="mb-4">
+      <input id="filter" type="search" placeholder={t('admin.customers.filterPlaceholder')}
+        class="w-full md:w-96 px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+    </div>
+
+    <div class="bg-white rounded-lg border border-gray-200 overflow-x-auto">
+      <table class="min-w-full divide-y divide-gray-200 text-sm">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">{t('admin.customers.colName')}</th>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">{t('admin.customers.colEmail')}</th>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">{t('admin.customers.colPhone')}</th>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">{t('admin.customers.colLocation')}</th>
+            <th class="px-4 py-3 text-right font-medium text-gray-500">{t('admin.customers.colOrders')}</th>
+            <th class="px-4 py-3 text-right font-medium text-gray-500">{t('admin.customers.colLifetimeValue')}</th>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">{t('admin.customers.colSince')}</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          {customers.map((c) => {
+            const stats = byCustomer.get(c.id) ?? { count: 0, total: 0 };
+            return (
+              <tr class="customer-row hover:bg-gray-50" data-name={foldForSearch(`${c.name ?? ''} ${c.email} ${c.phone ?? ''}`)}>
+                <td class="px-4 py-2 font-medium text-gray-900">{c.name || '—'}</td>
+                <td class="px-4 py-2"><a href={`mailto:${c.email}`} class="text-blue-600 hover:underline">{c.email}</a></td>
+                <td class="px-4 py-2 text-gray-600">{c.phone || '—'}</td>
+                <td class="px-4 py-2 text-gray-600">{[c.city, c.country].filter(Boolean).join(', ') || '—'}</td>
+                <td class="px-4 py-2 text-right">{stats.count}</td>
+                <td class="px-4 py-2 text-right">{money(stats.total)}</td>
+                <td class="px-4 py-2 text-gray-500">{new Date(c.created_at).toLocaleDateString()}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { foldForSearch as fold } from '../../lib/text-search';
+  document.getElementById('filter').addEventListener('input', (e) => {
+    const q = fold(e.target.value);
+    document.querySelectorAll('.customer-row').forEach((r) => {
+      r.style.display = r.dataset.name.includes(q) ? '' : 'none';
+    });
+  });
+</script>

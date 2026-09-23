@@ -1,0 +1,169 @@
+---
+/**
+ * The homepage.
+ *
+ * By default this is the stock marketing page (`DefaultHome`). Set the
+ * `home_page_slug` setting to a published Page's slug and that Page becomes the
+ * site's front door instead — which is the thing every CMS is expected to do
+ * and the reason Pages exist at all: without it, an owner can build a homepage
+ * in the editor and then has no way to actually put it at `/`.
+ *
+ * ## Why the fallback is unconditional
+ *
+ * If the setting names a slug that has been renamed, unpublished or deleted,
+ * this renders the default homepage rather than a 404 or an error. A typo in a
+ * settings field must not be able to take a live site's front page down — and
+ * the failure is visible (the owner sees the stock page) rather than silent.
+ *
+ * ## Why `visibleOne` still applies
+ *
+ * A draft named as the home page stays invisible to the public and renders for
+ * staff, exactly as it would at its own URL. Designating a page does not
+ * publish it.
+ */
+import PublicLayout from '../layouts/PublicLayout.astro';
+import { resolveActiveTheme } from '../lib/theme-runtime';
+import { getSiteSettings } from '../lib/site';
+import { prepareCards } from '../lib/post-cards';
+import { visibleContent, visibleOne } from '../lib/visibility';
+import { articlesOnly, isPage } from '../lib/post-kind';
+import { LocalDB } from '../lib/localdb';
+import { buildPageView } from '../lib/page-view';
+import { jsonForScript } from '../lib/json-in-html';
+import { personNode, organizationNode, webSiteNode, structuredData } from '../lib/structured-data';
+import { mediaBaseFor } from '../lib/media-base';
+import { filterByLocale, recordLocale } from '../lib/i18n';
+import { comparePostsForListing } from '../core/post-query';
+
+await LocalDB.init();
+
+const settings = await LocalDB.getSettings();
+const homeSlug = String(settings.find((s) => s.key === 'home_page_slug')?.value ?? '').trim();
+
+let homePage = null;
+if (homeSlug) {
+  const all = await LocalDB.getPosts();
+  const candidate = all.find((p) => isPage(p) && p.slug === homeSlug);
+  if (candidate && visibleOne(candidate, Astro.locals.user)) {
+    homePage = candidate;
+    // The designated home page names ONE record, but `/de` must not serve the
+    // English one: that is the duplicate the canonical rule downstream then has
+    // to paper over. If a translation of it exists in the reader's locale, that
+    // is the home page for this request. If none does, the English record is
+    // still served — a front door in the wrong language beats no front door —
+    // and `buildPageView` canonicalises it to `/`, where it genuinely lives.
+    const translated = all.find(
+      (p) => isPage(p)
+        && p.id !== candidate.id
+        && p.translation_of === candidate.id
+        && recordLocale(p) === Astro.locals.locale
+        && visibleOne(p, Astro.locals.user),
+    );
+    if (translated) homePage = translated;
+  }
+}
+
+// The canonical for the home page is the origin itself. The same content is
+// also reachable at `/{slug}`; pointing both at `/` is what stops them
+// competing with each other in search results.
+/*
+ * Both branches render through the theme.
+ *
+ * The front door is the page a theme is judged by, and it used to be the one
+ * page a theme could not touch: index.astro imported DefaultHome directly and
+ * the designated-Page branch carried its own inline <article>. Activating a
+ * theme changed the blog and left the home page in the stock look — the
+ * half-applied feel this slot pass exists to end.
+ */
+const { slots } = await resolveActiveTheme();
+const Home = slots.Home as any;
+const PageArticle = slots.PageArticle as any;
+
+const site = await getSiteSettings({ astroSite: Astro.site, requestUrl: Astro.url, locale: Astro.locals.locale });
+
+// Recent articles for themes whose home leads with content (magazines do; the
+// stock marketing page ignores them). Capped small: this is a hero, not an
+// archive.
+const allUsers = await LocalDB.getUsers();
+const allCategories = await LocalDB.getCategories();
+// Filtered by locale BEFORE the slice, not after. Taking the six newest posts
+// and then dropping the ones in the wrong language leaves a German front page
+// with two cards on a site that publishes mostly in English — or none at all.
+// This is the same filter `/blog` applies; the home page ignoring it was why
+// `/de` served English content under a German URL.
+const recent = filterByLocale(
+  // noindex means "this is not for finding". /blog, the sitemap, the feed and
+  // relatedPosts all honour it; the front page did not, so a post an author
+  // hid was still the LEAD item on the site's most visited page.
+  articlesOnly(visibleContent(await LocalDB.getPosts(), null)).filter((p) => !p.noindex),
+  Astro.locals.locale,
+)
+  // The shared comparator, so the front page honours a pin exactly as the
+  // archive does. A hand-rolled sort here was the last one in the tree.
+  .sort((a, b) => comparePostsForListing(a, b))
+  .slice(0, 6);
+const recentCards = prepareCards(recent, {
+  users: allUsers,
+  categories: allCategories,
+  byline: { siteAuthorName: site.siteAuthorName, siteAuthorUrl: site.siteAuthorUrl, siteTitle: site.siteTitle },
+});
+
+const view = homePage
+  ? await buildPageView(homePage, {
+      astroSite: Astro.site,
+      requestUrl: Astro.url,
+      canonicalPath: '/',
+      isHome: true,
+      locale: Astro.locals.locale,
+    })
+  : null;
+
+// The front door is where the site declares WHAT IT IS. Every other page's
+// structured data references this Organization by @id instead of repeating
+// it — which is also what stops the site name and logo from disagreeing
+// between pages. Emitted on BOTH branches: whether the home page is a
+// designated CMS Page or the stock view, it is still the same site.
+const mediaBase = await mediaBaseFor(Astro.request);
+const sdCtx = { origin: site.siteUrl ?? null, mediaBase, siteTitle: site.siteTitle };
+const siteNodes = [
+  organizationNode(sdCtx),
+  // The human. Referenced by @id from every article's author, so a byline is
+  // ONE entity with one identity rather than a name repeated per post that a
+  // search engine has to guess is the same person.
+  personNode({
+    ...sdCtx,
+    authorName: site.siteAuthorName,
+    authorUrl: site.siteAuthorUrl,
+    jobTitle: site.siteAuthorTitle,
+    sameAs: site.siteAuthorProfiles,
+  }),
+  // Only claim a search endpoint that exists. `/blog?q=` is the on-site
+  // search this app actually serves; promising one that 404s is a penalty.
+  webSiteNode({ ...sdCtx, tagline: site.siteTagline, searchPath: '/blog?q=' }),
+];
+const homeJsonLd = structuredData([
+  ...siteNodes,
+  ...(view?.jsonLd?.['@graph'] as Record<string, unknown>[] | undefined ?? []),
+]);
+---
+
+{view && homePage ? (
+  <PublicLayout title={view.title} description={view.description} sidebarContext="home" noindex={homePage.noindex} canonical={view.canonical}>
+    <Fragment slot="head">
+      {homeJsonLd && <script type="application/ld+json" set:html={jsonForScript(homeJsonLd)} />}
+    </Fragment>
+    <PageArticle post={homePage} contentHtml={view.bodyHtml} isHome={true} />
+  </PublicLayout>
+) : (
+  <PublicLayout>
+    <Fragment slot="head">
+      {homeJsonLd && <script type="application/ld+json" set:html={jsonForScript(homeJsonLd)} />}
+    </Fragment>
+    <Home
+      siteTitle={site.siteTitle}
+      siteTagline={site.siteTagline}
+      posts={recentCards}
+      locale={Astro.locals.locale}
+    />
+  </PublicLayout>
+)}

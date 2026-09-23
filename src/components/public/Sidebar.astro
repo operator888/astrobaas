@@ -1,0 +1,14 @@
+---
+/**
+ * DEFAULT `Sidebar` slot — renders nothing.
+ *
+ * The stock design has no sidebar, so the default is empty. The slot exists so a
+ * theme can add one without forking the layouts: override `Sidebar` and it
+ * appears beside the archive, post, or home content (see `context`).
+ */
+import type { SidebarProps } from '../../core/theme-slots';
+
+// Referenced so the contract is visible to authors reading this file.
+const { context } = Astro.props as SidebarProps;
+void context;
+---

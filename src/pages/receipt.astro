@@ -1,0 +1,162 @@
+---
+/**
+ * `/receipt?token=…` — the buyer's own printable record of a purchase (C-39).
+ *
+ * A route rather than a CMS Page, for the same reason `/cookies` is: the
+ * document has to be true about ONE order at the moment it is read.
+ *
+ * What it deliberately is not, and why, is written at the top of
+ * `lib/commerce/receipt.ts`. In one line: a retail invoice in Greece is issued
+ * through myDATA and carries a MARK, so a page that called itself one and had
+ * never been transmitted would be a liability. This says what it is instead.
+ *
+ * ## Three refusals, one message
+ *
+ * A bad token, an expired token, an erased order and a cancelled order all
+ * produce the SAME page. Distinguishing them would confirm which order numbers
+ * exist — the order-number oracle `order-lookup.ts` was written to avoid — and
+ * in the erasure case it would confirm that a particular person asked to be
+ * erased, which is itself personal data.
+ *
+ * ## noindex, and why it is not enough on its own
+ *
+ * `noindex` is set, but the real protection is that the URL is unguessable:
+ * a crawler cannot reach this page without a signed token, and the token only
+ * ever travels in the buyer's own email. The header is belt-and-braces for the
+ * case where somebody pastes their link somewhere public.
+ */
+import PublicLayout from '../layouts/PublicLayout.astro';
+import PrintButton from '../components/public/PrintButton.astro';
+import { LocalDB } from '../lib/localdb';
+import { settingsMap, settingStr } from '../lib/settings-map';
+import { formatMoney } from '../lib/money-format';
+import { publicStrings } from '../lib/i18n/public-strings';
+import { readReceiptToken, receiptIsAvailable, receiptView } from '../lib/commerce/receipt';
+import type { Order } from '../core/models';
+
+await LocalDB.init();
+const rows = await LocalDB.getSettings();
+const settings = settingsMap(rows as { key: string; value: unknown }[]);
+
+const locale = String(Astro.locals?.locale ?? settingStr(settings['default_locale'], 'en'));
+const s = publicStrings(locale).receipt;
+
+const orderId = readReceiptToken(Astro.url.searchParams.get('token'));
+let order: Order | null = null;
+if (orderId) {
+  const all = await LocalDB.getOrders();
+  order = (all as Order[]).find((o) => String(o.id) === orderId) ?? null;
+}
+const ok = receiptIsAvailable(order);
+
+// A receipt is never cached by a shared cache: one URL, one person's purchase.
+Astro.response.headers.set('Cache-Control', 'no-store, private');
+Astro.response.headers.set('X-Robots-Tag', 'noindex, nofollow');
+if (!ok) Astro.response.status = 404;
+
+const view = ok && order
+  ? receiptView(order, (cents) => formatMoney(cents, { currency: order!.currency, locale }))
+  : null;
+
+const seller = settingStr(settings['trader_legal_name']) || settingStr(settings['site_title']);
+const sellerAddress = settingStr(settings['trader_address']);
+const sellerVat = settingStr(settings['trader_vat_number']);
+---
+
+<PublicLayout title={s.heading} description={s.heading} noindex sidebarContext="page">
+  <section class="py-12 bg-white">
+    <div class="max-w-2xl mx-auto px-4 sm:px-6">
+      {!view && (
+        <div class="space-y-3">
+          <h1 class="text-2xl font-bold text-gray-900">{s.unavailable}</h1>
+          <p class="text-gray-600">{s.unavailableNote}</p>
+        </div>
+      )}
+
+      {view && order && (
+        <article class="space-y-8">
+          <div class="flex flex-wrap items-center gap-3">
+            <PrintButton />
+            {/* The same receipt as a file. `download` rather than a new tab:
+                somebody who wants this wants it on disk, next to the invoice
+                folder, not open in a viewer they then have to save from. */}
+            <a
+              class="inline-flex items-center rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+              href={`/receipt.pdf?token=${encodeURIComponent(Astro.url.searchParams.get('token') ?? '')}`}
+              download
+            >{s.downloadPdf}</a>
+          </div>
+
+          <header class="border-b border-gray-200 pb-6">
+            <h1 class="text-2xl font-bold text-gray-900">{s.heading}</h1>
+            <p class="mt-1 text-sm text-gray-500">
+              {s.orderNo} <strong class="text-gray-900">{view.number}</strong>
+              {view.date && <span> · {s.date} {view.date}</span>}
+            </p>
+          </header>
+
+          <div class="grid gap-6 sm:grid-cols-2 text-sm">
+            <div>
+              <h2 class="font-semibold text-gray-900">{s.seller}</h2>
+              <p class="mt-1 text-gray-600 whitespace-pre-line">{seller}{sellerAddress ? `\n${sellerAddress}` : ''}{sellerVat ? `\nΑΦΜ / VAT: ${sellerVat}` : ''}</p>
+            </div>
+            <div>
+              <h2 class="font-semibold text-gray-900">{s.billedTo}</h2>
+              <p class="mt-1 text-gray-600 whitespace-pre-line">{order.name ?? ''}{order.address ? `\n${order.address}` : ''}</p>
+            </div>
+          </div>
+
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-gray-300 text-left text-gray-600">
+                <th class="py-2 font-medium">{s.item}</th>
+                <th class="py-2 font-medium text-right w-16">{s.qty}</th>
+                <th class="py-2 font-medium text-right w-20">{s.vatRate}</th>
+                <th class="py-2 font-medium text-right w-28">{s.lineTotal}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {view.lines.map((line) => (
+                <tr class="border-b border-gray-100 align-top">
+                  <td class="py-2 text-gray-900">
+                    {line.name}
+                    {line.options && <span class="block text-xs text-gray-500">{line.options}</span>}
+                  </td>
+                  <td class="py-2 text-right text-gray-600 tabular-nums">{line.qty}</td>
+                  <td class="py-2 text-right text-gray-600 tabular-nums">{line.vatRate ?? '—'}</td>
+                  <td class="py-2 text-right text-gray-900 tabular-nums">{line.total}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <div class="ml-auto max-w-xs space-y-1 text-sm">
+            {view.subtotal && (
+              <div class="flex justify-between"><span class="text-gray-600">{s.subtotal}</span><span class="tabular-nums">{view.subtotal}</span></div>
+            )}
+            {view.discount && (
+              <div class="flex justify-between"><span class="text-gray-600">{s.discount}</span><span class="tabular-nums">−{view.discount}</span></div>
+            )}
+            {view.shipping && (
+              <div class="flex justify-between"><span class="text-gray-600">{s.shipping}</span><span class="tabular-nums">{view.shipping}</span></div>
+            )}
+            {view.tax && (
+              <div class="flex justify-between"><span class="text-gray-600">{s.vat}</span><span class="tabular-nums">{view.tax}</span></div>
+            )}
+            <div class="flex justify-between border-t border-gray-300 pt-2 text-base font-semibold text-gray-900">
+              <span>{s.total}</span><span class="tabular-nums">{view.total}</span>
+            </div>
+          </div>
+
+          <div class="space-y-2 border-t border-gray-200 pt-6 text-xs text-gray-500">
+            {view.taxIncluded && <p>{s.vatIncluded}</p>}
+            {view.taxCoversShipping && <p>{s.vatWithShipping}</p>}
+            {view.paymentState === 'paid' && <p>{s.paidWith} {view.paymentMethod || '—'}</p>}
+            {view.paymentState === 'unpaid' && <p>{s.unpaid}</p>}
+            <p class="font-medium text-gray-700">{s.notInvoice}</p>
+          </div>
+        </article>
+      )}
+    </div>
+  </section>
+</PublicLayout>

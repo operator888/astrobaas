@@ -1,0 +1,185 @@
+name: Publish to npm
+
+# Publish `astrobaas` to the npm registry from a git tag.
+#
+# WHY FROM CI AND NOT A LAPTOP
+#
+# Publishing from a developer machine ships whatever happens to be in that
+# working tree — an uncommitted edit, a stale build, a dependency installed for
+# a debugging session. This job publishes only what is in the tagged commit, and
+# it publishes with PROVENANCE, which cryptographically ties the tarball on npm
+# to this repository, this workflow and this commit. For a package that handles
+# sessions, uploads and payment webhooks, "trust me, I built it correctly" is
+# not a supply-chain story.
+#
+# ONE-TIME SETUP
+#
+#   1. Create an npm account and enable 2FA on it.
+#   2. Create a GRANULAR ACCESS TOKEN on npm (Access Tokens -> Granular),
+#      read+write, and an expiry you will actually renew. It publishes TWO
+#      packages, `astrobaas` and `astrobaas-mcp`; before either exists it can
+#      only be scoped to "all packages" — narrow it to those two afterwards,
+#      or move to npm trusted publishing (OIDC), which needs no token at all.
+#   3. Add it to this repository as the secret NPM_TOKEN.
+#
+# HOW TO PUBLISH
+#
+#   npm version patch      # or minor / major — writes package.json and tags
+#   git push --follow-tags
+#
+# The tag push runs this. Nothing publishes on a normal commit to main.
+#
+# READ BEFORE THE FIRST RUN
+#
+# Publishing is close to irreversible: a version can only be unpublished within
+# 72 hours, and the NAME is taken permanently either way. Do the first publish
+# deliberately, after the repository is public — an npm package whose
+# `repository` field points at a private repo cannot be audited by anyone who
+# might otherwise trust it.
+#
+# See PUBLISHING.md for the dist-tag policy and the full checklist.
+
+on:
+  push:
+    tags: ['v*']
+  # Manual runs exist for the first publish and for re-running a failed one.
+  # `dry_run` defaults to TRUE so an accidental click cannot publish.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Pack and validate only — do not publish'
+        type: boolean
+        default: true
+      dist_tag:
+        description: 'npm dist-tag (alpha keeps it off `latest`)'
+        type: string
+        default: alpha
+
+permissions:
+  contents: read
+  # Required for provenance: the job exchanges this for a signing identity.
+  id-token: write
+
+jobs:
+  publish:
+    name: Build, verify, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The full gate. A broken build must never reach the registry, where it
+      # cannot be taken back — this is the one place where running the whole
+      # suite rather than a subset is unarguable.
+      - name: Build (type-check + bundle)
+        run: npm run build
+        env:
+          AUTH_SECRET: ci-only-secret-do-not-reuse-in-production
+      - name: Unit + smoke (lowdb)
+        run: npm test
+        env:
+          AUTH_SECRET: ci-only-secret-do-not-reuse-in-production
+      - name: Smoke (libSQL doc-blob)
+        run: npm run smoke:libsql
+        env:
+          AUTH_SECRET: ci-only-secret-do-not-reuse-in-production
+      - name: Smoke (relational)
+        run: npm run smoke:relational
+        env:
+          AUTH_SECRET: ci-only-secret-do-not-reuse-in-production
+      - name: Package build + external-import test
+        run: npm run test:pkg
+        env:
+          AUTH_SECRET: ci-only-secret-do-not-reuse-in-production
+      - name: Audit runtime dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      # A tag that disagrees with package.json means someone tagged by hand.
+      # Publishing then puts a version on npm that no tag points at, which is
+      # unfixable after the fact.
+      - name: Tag must match package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error title=Version mismatch::tag v$TAG vs package.json $PKG."
+            echo "Use \`npm version <patch|minor|major>\` — it writes both."
+            exit 1
+          fi
+          echo "tag and package.json agree on $PKG"
+
+      # `prepublishOnly` runs build:pkg, so this is the real artefact.
+      - name: Show what would ship
+        run: npm pack --dry-run
+
+      - name: Stage astrobaas-mcp
+        run: npm run build:mcp-pkg && npm pack --dry-run ./packages/astrobaas-mcp
+
+      - name: Publish (dry run)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: |
+          npm publish --dry-run --provenance --access public
+          npm publish --dry-run --provenance --access public ./packages/astrobaas-mcp
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Pre-1.0 goes out under a dist-tag, NOT `latest`. `npm install astrobaas`
+      # resolves `latest`, so publishing pre-alpha there hands it to everyone who
+      # types the obvious command. Opting in with `@alpha` is the difference
+      # between offering software and inflicting it.
+      - name: Publish
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+        run: npm publish --provenance --access public --tag "${DIST_TAG}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DIST_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.dist_tag || 'alpha' }}
+
+      # `astrobaas-mcp` is the SAME server as the `astrobaas-mcp` bin above,
+      # staged from bin/ by scripts/build-mcp-pkg.mjs — a package of its own
+      # because `npx astrobaas-mcp` resolves a package name, and an MCP client
+      # config runs on a machine with no AstroBaaS installed.
+      #
+      # It goes to `latest`, unlike the core, on purpose: npx resolves `latest`,
+      # so an `alpha`-only MCP package is exactly the 404 this package exists to
+      # fix. It is a zero-dependency HTTP client of the REST API; opting in to
+      # pre-release software happens when you install the SERVER, not the
+      # client an agent uses to talk to it.
+      #
+      # After the core, never before: a failure between the two leaves a core
+      # release with no matching client, which the next run fixes — the reverse
+      # would advertise a client for a server nobody can install.
+      - name: Publish astrobaas-mcp
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+        run: npm publish --provenance --access public --tag latest ./packages/astrobaas-mcp
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Publish"
+            echo ""
+            echo "- ref: \`${GITHUB_REF_NAME}\`"
+            echo "- version: \`$(node -p "require('./package.json').version")\`"
+            echo "- dist-tag: \`${DIST_TAG:-alpha}\`"
+            echo ""
+            echo "\`astrobaas-mcp\` goes to \`latest\` (npx resolves it). For \`astrobaas\`,"
+            echo "\`latest\` is NOT moved by this workflow. Promote a release with:"
+            echo ""
+            echo '```'
+            echo "npm dist-tag add astrobaas@<version> latest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DIST_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.dist_tag || 'alpha' }}

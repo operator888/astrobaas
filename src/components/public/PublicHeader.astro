@@ -1,0 +1,128 @@
+---
+import ThemeToggle from '../ThemeToggle.astro';
+import { LocalDB } from '../../lib/localdb';
+import type { HeaderProps } from '../../core/theme-slots';
+import LocaleSwitcher from './LocaleSwitcher.astro';
+import { routeHref } from '../../lib/locale-links';
+
+interface Props {
+  siteTitle?: string;
+}
+const { siteTitle = 'AstroBaaS', localeOptions } = Astro.props as HeaderProps;
+
+// The toggle only appears when the theme opts into 'auto'. A site pinned to
+// light or dark has nothing to switch, and offering a control that contradicts
+// the operator's choice is worse than offering none.
+let showThemeToggle = false;
+try {
+  const theme = await LocalDB.getActiveTheme();
+  showThemeToggle = theme?.settings?.colorScheme === 'auto';
+} catch { /* DB not ready — hide it rather than fail the header */ }
+
+// Every nav link carries the locale the reader is already in. Built ONCE here
+// rather than inline per link, because the desktop and mobile menus repeat the
+// same four routes and the two drifting apart is how half a nav ends up
+// dropping the reader back into the default language.
+const loc = Astro.locals.locale;
+const nav = {
+  home: routeHref('/', loc),
+  blog: routeHref('/blog', loc),
+  about: routeHref('/about', loc),
+  contact: routeHref('/contact', loc),
+};
+---
+
+<header class="ab-site-header bg-white shadow-sm border-b border-gray-200">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="flex justify-between items-center h-16">
+      <!-- Logo -->
+      <div class="flex items-center">
+        <a href={nav.home} class="flex items-center space-x-2">
+          <svg class="w-8 h-8 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+            <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          <span class="text-xl font-bold text-gray-900">{siteTitle}</span>
+        </a>
+      </div>
+      
+      <!-- Navigation -->
+      <nav class="no-print hidden md:flex space-x-8">
+        <a href={nav.home} class="text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-sm font-medium transition-colors duration-200">
+          Home
+        </a>
+        <a href={nav.blog} class="text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-sm font-medium transition-colors duration-200">
+          Blog
+        </a>
+        <a href={nav.about} class="text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-sm font-medium transition-colors duration-200">
+          About
+        </a>
+        <a href={nav.contact} class="text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-sm font-medium transition-colors duration-200">
+          Contact
+        </a>
+      </nav>
+      
+      <!-- CTA Button -->
+      <div class="flex items-center space-x-4">
+        <LocaleSwitcher options={localeOptions} />
+        {showThemeToggle && <ThemeToggle />}
+        <a href="/admin" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200">
+          Admin
+        </a>
+        
+        <!-- Mobile menu button -->
+        <button id="mobile-menu-toggle" class="md:hidden p-2 rounded-md text-gray-700 hover:text-blue-600 hover:bg-gray-100">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    
+    <!-- Mobile Navigation -->
+    <div id="mobile-menu" class="hidden md:hidden pb-4">
+      <div class="space-y-1">
+        <a href={nav.home} class="block text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-base font-medium">
+          Home
+        </a>
+        <a href={nav.blog} class="block text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-base font-medium">
+          Blog
+        </a>
+        <a href={nav.about} class="block text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-base font-medium">
+          About
+        </a>
+        <a href={nav.contact} class="block text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-base font-medium">
+          Contact
+        </a>
+      </div>
+    </div>
+  </div>
+</header>
+
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
+    const mobileMenu = document.getElementById('mobile-menu');
+    
+    if (mobileMenuToggle && mobileMenu) {
+      mobileMenuToggle.addEventListener('click', () => {
+        mobileMenu.classList.toggle('hidden');
+      });
+    }
+  });
+</script>
+
+<style>
+  /* The headerStyle token finally does something. `layout.headerStyle` was
+     deleted by migration v3 precisely because it was config with no consumer;
+     this is the consumer. */
+  .ab-site-header { border-bottom-width: var(--header-border, 1px); }
+  .ab-site-header > div > div {
+    padding-top: var(--header-pad, 0);
+    padding-bottom: var(--header-pad, 0);
+    flex-direction: var(--header-direction, row);
+    justify-content: var(--header-align, space-between);
+    gap: var(--space-2);
+    height: auto;
+    min-height: 4rem;
+  }
+</style>

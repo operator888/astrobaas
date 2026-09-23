@@ -1,0 +1,446 @@
+---
+// @ts-nocheck
+import PublicLayout from '../../layouts/PublicLayout.astro';
+import { LocalDB } from '../../lib/localdb';
+import { filterByLocale, localePath } from '../../lib/i18n';
+import { postHref } from '../../lib/locale-links';
+import { prepareCards } from '../../lib/post-cards';
+import { comparePostsForListing } from '../../core/post-query';
+import { emailChannelActive } from '../../lib/email';
+import { countWords, plainText } from '../../lib/html-text';
+import { articlesOnly } from '../../lib/post-kind';
+import { resolveActiveTheme } from '../../lib/theme-runtime';
+import { resolveByline } from '../../lib/byline';
+import { getSiteSettings } from '../../lib/site';
+import { rankBy, POST_WEIGHTS } from '../../lib/search/rank';
+import { jsonForScript } from '../../lib/json-in-html';
+import { resolveSiteUrl } from '../../lib/site-url';
+import { trailForArchive, breadcrumbListJsonLd } from '../../lib/breadcrumbs';
+import { collectionPageNode, structuredData } from '../../lib/structured-data';
+import { expanderFromSetting } from '../../lib/search/expander';
+import { settingsMap } from '../../lib/settings-map';
+import { pluginManager, PLUGIN_HOOKS } from '../../lib/plugin-system';
+import type { TermExpander } from '../../lib/search/rank';
+
+// Load posts from database
+await LocalDB.init();
+const allPosts = await LocalDB.getPosts();
+const allCategories = await LocalDB.getCategories();
+const allUsers = await LocalDB.getUsers();
+// One byline context for the whole list — resolving site settings per row would
+// hit the settings table once per post.
+const siteForByline = await getSiteSettings({ astroSite: Astro.site, requestUrl: Astro.url, locale: Astro.locals.locale });
+const bylineCtx = {
+  siteAuthorName: siteForByline.siteAuthorName,
+  siteAuthorUrl: siteForByline.siteAuthorUrl,
+  siteTitle: siteForByline.siteTitle,
+};
+
+const ppp = await LocalDB.getSetting('posts_per_page');
+const postsPerPage = Math.min(100, Math.max(1, Number(ppp?.value) || 10));
+
+// Real server-side category filtering + pagination from the URL.
+const sp = Astro.url.searchParams;
+const activeCategorySlug = (sp.get('category') || '').trim();
+// The home page's WebSite node advertises /blog?q= as this site's search
+// endpoint. That claim has to be TRUE — a sitelinks searchbox pointing at a
+// target that ignores the query is exactly the invalid claim the structured
+// data was careful not to make. Same matcher the API search uses, so the two
+// agree about accents and case.
+const searchQuery = (sp.get('q') || '').trim().slice(0, 120);
+const requestedPage = Math.max(1, parseInt(sp.get('page') || '1', 10) || 1);
+const activeCategory = allCategories.find(c => c.slug === activeCategorySlug);
+
+// Serve the language this request is for: /de/blog shows German posts. On a
+// single-locale install this is a no-op (every post counts as the default).
+// A Page ("About") is not an article and must not appear in the archive.
+let filteredPosts = filterByLocale(
+  articlesOnly(allPosts.filter(post => post.status === 'published')),
+  Astro.locals.locale,
+);
+if (activeCategory) {
+  filteredPosts = filteredPosts.filter(post => post.category_id === activeCategory.id);
+}
+// A post hidden with `noindex` is out of the sitemap and the feed; listing it
+// in the archive's structured data would hand a crawler the URL through the
+// one door still open. It stays out of the listing entirely — an author who
+// hid a post did not mean "hide it from search but keep linking to it".
+filteredPosts = filteredPosts.filter(post => !post.noindex);
+
+// Newest-first BEFORE ranking, never after. Sorting by date afterwards threw
+// away the relevance order rankBy had just computed, so /blog?q= matched
+// correctly and then presented the results in publication order — the post
+// whose TITLE is the query ranked last, and with ten per page it could fall off
+// page one while a weaker older match took the featured card.
+//
+// This is exactly the order /api/search uses (search.ts:29-33) and for the
+// stated reason: ranking is STABLE, so two equally-relevant posts come back
+// with the newer one first. Two surfaces of one site returning different orders
+// for the same query is the drift lib/search/rank.ts exists to end.
+// comparePostsForListing, so a pinned post leads the archive as it leads the
+// front page. It falls back to exactly this date order when nothing is pinned
+// and nothing carries a manual position, which is every existing site.
+filteredPosts.sort((a, b) => comparePostsForListing(a, b));
+
+// Core fills the seam with the operator's synonym table; a plugin can replace
+// or extend it through the same hook (that is how the paid index-based
+// expansion arrives).
+// Read only when there IS a query — a listing page with no search should not
+// pay for a settings read it will not use.
+const searchSettings = searchQuery ? settingsMap(await LocalDB.getSettings()) : null;
+const searchExpand = searchSettings
+  ? pluginManager.applyFilters(
+      PLUGIN_HOOKS.SEARCH_EXPAND,
+      expanderFromSetting(searchSettings.search_synonyms),
+      { query: searchQuery, settings: searchSettings },
+    ) as TermExpander | null
+  : null;
+
+if (searchQuery) {
+  // The SAME scorer /api/search uses. This route was left on the boolean
+  // substring matcher while the API moved to rankBy — and it is the endpoint
+  // the home page ADVERTISES as the site's search (the structured-data
+  // SearchAction points at `/blog?q=`), so a reader arriving through Google's
+  // sitelinks box got the worse of the two: no ranking, and nothing for a
+  // two-word query typed in the other order. Markup is stripped for the same
+  // reason the API strips it — otherwise ?q=div matches HTML nobody wrote.
+  filteredPosts = rankBy(
+    filteredPosts,
+    searchQuery,
+    (post) => [
+      { text: post.title, weight: POST_WEIGHTS.title },
+      { text: post.excerpt, weight: POST_WEIGHTS.excerpt },
+      { text: plainText(post.content), weight: POST_WEIGHTS.body },
+    ],
+    // The SAME expander /api/search uses. The archive and the API answering one
+    // query differently is what lib/search/rank.ts exists to end, and a synonym
+    // that worked on one and not the other would be exactly that.
+    { expand: searchExpand ?? undefined },
+  ).map((r) => r.item);
+}
+
+const totalPosts = filteredPosts.length;
+const totalPages = Math.max(1, Math.ceil(totalPosts / postsPerPage));
+const currentPage = Math.min(requestedPage, totalPages);
+const pageStart = (currentPage - 1) * postsPerPage;
+const publishedPosts = filteredPosts.slice(pageStart, pageStart + postsPerPage);
+
+// Build a /blog URL that preserves the active category across pages.
+/**
+ * Every URL this archive emits, in the visitor's own locale.
+ *
+ * Localised HERE rather than at each consumer: the canonical was wrapped in
+ * localePath and the CollectionPage entity URL and the pagination links were
+ * not, so one document declared /de/blog as its address while the JSON-LD
+ * inside it said /blog and the "next page" link sent the reader out of German
+ * entirely. One function, three consumers, one answer.
+ */
+// Hoisted out of pageHref: the pagination links and the CATEGORY FILTER build
+// URLs for the same route, and the filter was left on a hardcoded `/blog` while
+// pagination localised correctly — so on /de/blog every category chip dropped
+// the reader back into English.
+const blogBase = localePath('/blog', Astro.locals.locale);
+
+const pageHref = (p: number) => {
+  const params = new URLSearchParams();
+  if (activeCategorySlug) params.set('category', activeCategorySlug);
+  if (searchQuery) params.set('q', searchQuery);
+  if (p > 1) params.set('page', String(p));
+  const qs = params.toString();
+  return qs ? `${blogBase}?${qs}` : blogBase;
+};
+
+// prepareCards, not a local copy. The private one here returned the STRING
+// "3 min read" while lib/post-cards.ts returns the NUMBER 3 — and both are
+// handed to the SAME theme PostCard slot, whose contract
+// (PostCardData.readTime) is a number. So marquee's card, which renders
+// `{post.readTime} min`, printed "3 min read min" on the archive and "3 min"
+// on the home page, from one field, on one site.
+const posts = prepareCards(publishedPosts, {
+  users: allUsers,
+  categories: allCategories,
+  byline: bylineCtx,
+});
+
+// Category filter links (slug-keyed so the active state survives navigation).
+// The active theme may replace how a post looks in a listing.
+const { slots } = await resolveActiveTheme();
+const PostCard = slots.PostCard as any;
+
+const categoryLinks = [{ name: 'All', slug: '' }, ...allCategories.map(cat => ({ name: cat.name, slug: cat.slug }))];
+
+// The archive had no structured data at all — a listing page that told
+// crawlers nothing about what it lists. Trail and CollectionPage are built
+// from the SAME data the page renders, and the trail is passed to the layout
+// so the visible row and the BreadcrumbList are one array.
+const archiveSettings = await LocalDB.getSettings();
+const archiveMap = {};
+archiveSettings.forEach((x) => (archiveMap[x.key] = x.value));
+const archiveOrigin = resolveSiteUrl({
+  setting: archiveMap.site_url,
+  astroSite: Astro.site,
+  requestUrl: Astro.url,
+});
+const trail = trailForArchive({
+  locale: Astro.locals.locale,
+  categoryName: activeCategory?.name,
+});
+// The declared URL must be the URL the reader is on. Built from the SAME
+// helper the pagination links use, so a filtered or paged view never claims
+// the bare /blog entity — two ItemLists claiming one URL means whichever
+// Google fetched last silently overwrites the other.
+const archivePath = pageHref(currentPage);
+// The canonical must AGREE with the entity URL in the same document. The
+// layout builds canonicals from the pathname only (deliberately: ?utm_source
+// must never declare itself canonical), which on /blog?page=2 said `/blog`
+// while the CollectionPage said `/blog?page=2`. The route knows which URL
+// this actually is, so the route supplies it.
+// localePath for the same reason page-view.ts uses it: this route supplies its
+// own canonical, so the layout's fix does not reach it, and /de/blog would
+// otherwise declare /blog as its real address while its hreflang said /de/blog.
+// pageHref already carries the locale, so this must NOT wrap it again — doing
+// so produced /de/de/blog. One place localises, everywhere else consumes.
+const archiveCanonical = archiveOrigin ? `${archiveOrigin}${archivePath}` : undefined;
+const archiveJsonLd = structuredData([
+  collectionPageNode({
+    title: activeCategory ? `${activeCategory.name} · Blog` : 'Blog',
+    description: 'Latest articles, tutorials, and insights.',
+    path: archivePath,
+    // Positions and URLs only: repeating each post's whole BlogPosting here
+    // would duplicate what its own page already declares.
+    // `posts`, not publishedPosts: the cards render titles through the
+    // post_title plugin filter, and a structured name that disagrees with the
+    // visible one is the mismatch this module exists to prevent.
+    items: posts.map((p) => ({ title: p.title, path: localePath(`/blog/${p.slug}`, Astro.locals.locale) })),
+  }, { origin: archiveOrigin, siteTitle: siteForByline.siteTitle }),
+  breadcrumbListJsonLd(trail, archiveOrigin),
+]);
+// Read once here, not inside the markup: `.astro` frontmatter compiles into the
+// per-render function, so a call in the template body would run on every
+// evaluation of the branch rather than once per request.
+const mailChannelActive = emailChannelActive();
+
+---
+
+<PublicLayout
+  title="Blog"
+  description="Latest articles, tutorials, and insights about modern web development and content management."
+  sidebarContext="archive"
+  breadcrumbs={trail}
+  canonical={archiveCanonical}
+>
+  <Fragment slot="head">
+    {archiveJsonLd && <script type="application/ld+json" set:html={jsonForScript(archiveJsonLd)} />}
+  </Fragment>
+  <!-- Hero Section -->
+  <section class="bg-gradient-to-br from-gray-50 to-blue-50 py-16">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center">
+        {/*
+          A search says so.
+
+          This route has ranked, server-side search on `?q=` — and rendered a
+          page headed "Our Blog" with a silently shortened list, so a reader who
+          searched could not tell a query had been applied, how many matched, or
+          how to get back. `/blog?q=` is also what this site advertises to
+          Google as its SearchAction; a results page that does not look like one
+          is a poor thing to point a search engine at.
+        */}
+        <h1 class="text-4xl md:text-5xl font-bold text-gray-900 mb-4">
+          {searchQuery ? 'Search results' : 'Our Blog'}
+        </h1>
+        {searchQuery ? (
+          <p class="text-xl text-gray-600 max-w-2xl mx-auto">
+            {totalPosts === 0
+              ? <span>Nothing matched <strong class="text-gray-900">“{searchQuery}”</strong>.</span>
+              : <span>{totalPosts} {totalPosts === 1 ? 'result' : 'results'} for <strong class="text-gray-900">“{searchQuery}”</strong>.</span>}
+            {' '}
+            <a href={blogBase} class="text-blue-600 hover:underline whitespace-nowrap">Clear search</a>
+          </p>
+        ) : (
+          <p class="text-xl text-gray-600 max-w-2xl mx-auto">
+            Insights, tutorials, and best practices for modern web development and content management.
+          </p>
+        )}
+      </div>
+    </div>
+  </section>
+
+  <!-- Blog Content -->
+  <section class="py-16 bg-white">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <!-- Category Filter -->
+      <div class="flex flex-wrap justify-center gap-2 mb-12">
+        {categoryLinks.map((category) => (
+          <a
+            href={category.slug ? `${blogBase}?category=${category.slug}` : blogBase}
+            class={`px-4 py-2 rounded-full text-sm font-medium transition-colors duration-200 ${
+              category.slug === activeCategorySlug
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            {category.name}
+          </a>
+        ))}
+      </div>
+
+      <!-- Featured Post -->
+      {posts.length > 0 && (
+        <div class="mb-16">
+          <div class="bg-white rounded-2xl shadow-lg overflow-hidden border border-gray-200 hover:shadow-xl transition-shadow duration-300">
+            <div class="md:flex">
+              <div class="md:w-1/2">
+                <img 
+                  src={posts[0].image} 
+                  alt={posts[0].title}
+                  class="w-full h-64 md:h-full object-cover"
+                />
+              </div>
+              <div class="md:w-1/2 p-8 flex flex-col justify-center">
+                <div class="flex items-center mb-4">
+                  <span class="bg-blue-100 text-blue-800 text-xs font-semibold px-2.5 py-0.5 rounded-full">
+                    Featured
+                  </span>
+                  <span class="ml-3 text-sm text-gray-500">{posts[0].category}</span>
+                </div>
+                <h2 class="text-2xl md:text-3xl font-bold text-gray-900 mb-4 leading-tight">
+                  {posts[0].title}
+                </h2>
+                <p class="text-gray-600 mb-6 leading-relaxed">
+                  {posts[0].excerpt}
+                </p>
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center space-x-4">
+                    <div class="flex items-center space-x-2">
+                      <div class="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center">
+                        <span class="text-white text-sm font-medium">
+                          {posts[0].author.split(' ').map(n => n[0]).join('')}
+                        </span>
+                      </div>
+                      <span class="text-sm text-gray-700">{posts[0].author}</span>
+                    </div>
+                    <span class="text-sm text-gray-500">{posts[0].date}</span>
+                    <span class="text-sm text-gray-500">{posts[0].readTime} min read</span>
+                  </div>
+                  <a 
+                    href={postHref(`/blog/${posts[0].slug}`, posts[0])}
+                    class="inline-flex items-center text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    Read More
+                    <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/>
+                    </svg>
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <!-- Blog Grid -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+        {posts.slice(1).map((post) => (
+          <PostCard post={post} />
+        ))}
+      </div>
+
+      <!-- Pagination -->
+      {totalPages > 1 && (
+        <nav class="flex items-center justify-center gap-3 mt-12" aria-label="Pagination">
+          {currentPage > 1 ? (
+            <a href={pageHref(currentPage - 1)} class="inline-flex items-center px-4 py-2 border border-gray-300 text-gray-700 font-medium rounded-lg hover:bg-gray-50 transition-colors duration-200">
+              ← Previous
+            </a>
+          ) : (
+            <span class="inline-flex items-center px-4 py-2 border border-gray-200 text-gray-300 font-medium rounded-lg cursor-not-allowed">← Previous</span>
+          )}
+          <span class="text-sm text-gray-600">Page {currentPage} of {totalPages}</span>
+          {currentPage < totalPages ? (
+            <a href={pageHref(currentPage + 1)} class="inline-flex items-center px-4 py-2 border border-gray-300 text-gray-700 font-medium rounded-lg hover:bg-gray-50 transition-colors duration-200">
+              Next →
+            </a>
+          ) : (
+            <span class="inline-flex items-center px-4 py-2 border border-gray-200 text-gray-300 font-medium rounded-lg cursor-not-allowed">Next →</span>
+          )}
+        </nav>
+      )}
+    </div>
+  </section>
+
+  <!-- Newsletter Section — only when a signup can actually be honoured.
+       /api/newsletter refuses when no mail channel is configured, because the
+       double opt-in confirmation is undeliverable and the address could never
+       join the list. Rendering the form anyway invited the visitor to type
+       their address and receive an error for it. -->
+  {mailChannelActive && (
+  <section class="py-16 bg-gray-50">
+    <div class="max-w-4xl mx-auto text-center px-4 sm:px-6 lg:px-8">
+      <h2 class="text-3xl font-bold text-gray-900 mb-4">
+        Stay Updated
+      </h2>
+      <p class="text-xl text-gray-600 mb-8">
+        Get the latest articles and tutorials delivered to your inbox.
+      </p>
+      <form class="flex flex-col sm:flex-row gap-4 max-w-md mx-auto" id="newsletter-form" data-captcha="newsletter">
+        <div class="hidden" aria-hidden="true">
+          <input type="text" name="hp_url" tabindex="-1" autocomplete="off" />
+        </div>
+        <input
+          type="email"
+          name="email"
+          required
+          placeholder="Enter your email"
+          class="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        />
+        <button
+          type="submit"
+          class="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors duration-200"
+        >
+          Subscribe
+        </button>
+      </form>
+      <p data-newsletter-status class="text-sm mt-3 text-center text-gray-600"></p>
+      <script>
+        // @ts-nocheck
+        document.addEventListener('DOMContentLoaded', () => {
+          const form = document.getElementById('newsletter-form');
+          if (!form) return;
+          const status = form.parentElement?.querySelector('[data-newsletter-status]');
+          const csrf = document.querySelector('meta[name="csrf-token"]')?.content || '';
+          form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fd = new FormData(form);
+            const email = (fd.get('email') || '').toString().trim();
+            const btn = form.querySelector('button[type="submit"]');
+            if (btn) btn.disabled = true;
+            try {
+              const res = await fetch('/api/newsletter', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+                body: JSON.stringify({ email, hp_url: (fd.get('hp_url') || '').toString(), pow_token: (fd.get('pow_token') || '').toString() || undefined }),
+              });
+              const json = await res.json().catch(() => null);
+              if (!res.ok || !json || json.success === false) {
+                throw new Error((json && json.error && json.error.message) || 'Subscription failed.');
+              }
+              form.reset();
+              // Double opt-in: NOTHING is stored until they open the link. Saying
+              // "thanks for subscribing" left them believing they were on the
+              // list, so the confirmation email looked like spam and went
+              // unopened — and the signup silently came to nothing.
+              if (status) { status.textContent = 'Almost there — open the link we just emailed you.'; status.className = 'text-sm mt-3 text-center text-green-600'; }
+            } catch (err) {
+              if (status) { status.textContent = (err && err.message) ? err.message : 'Something went wrong.'; status.className = 'text-sm mt-3 text-center text-red-600'; }
+            } finally {
+              if (btn) btn.disabled = false;
+            }
+          });
+        });
+      </script>
+    </div>
+  </section>
+  )}
+<script is:inline src="/captcha.js" defer></script>
+</PublicLayout>

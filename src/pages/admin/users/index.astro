@@ -1,0 +1,646 @@
+---
+import AdminLayout from '../../../layouts/AdminLayout.astro';
+import { LocalDB } from '../../../lib/localdb';
+import { toPublicUser } from '../../../lib/auth';
+import { ROLES } from '../../../core/models';
+import {
+  CAPABILITIES, CAPABILITY_LABELS, ALL_ROLES, EDITABLE_ROLES,
+  ROLE_OVERRIDES_SETTING, normaliseOverrides, effectiveCapabilities,
+} from '../../../lib/capabilities';
+
+await LocalDB.init();
+const rawUsers = await LocalDB.getUsers();
+const users = rawUsers.map(u => {
+  const safe = toPublicUser(u);
+  return {
+    ...safe,
+    lastLogin: safe.last_login || '—',
+    postsCount: safe.posts_count ?? 0,
+  };
+});
+const totalUsers = users.length;
+const activeUsers = users.filter(u => u.status === 'active').length;
+const adminUsers = users.filter(u => u.role === 'admin').length;
+const inactiveUsers = users.filter(u => u.status !== 'active').length;
+
+const t = Astro.locals.t;
+
+// The capability matrix (C-138). Admin-only, and rendered from the same table
+// the predicates read, so a capability added there appears here by
+// construction rather than by somebody remembering.
+const viewerIsAdmin = Astro.locals.user?.role === 'admin';
+const capOverrides = normaliseOverrides((await LocalDB.getSetting(ROLE_OVERRIDES_SETTING))?.value);
+const capRows = ALL_ROLES.map((role) => ({
+  role,
+  editable: (EDITABLE_ROLES as readonly string[]).includes(role),
+  effective: effectiveCapabilities(role, capOverrides),
+}));
+
+/**
+ * Role and status LABELS are translated; the values behind them are not.
+ *
+ * The role list is rendered from the ROLES union, so a role added there without
+ * a catalogue entry would otherwise render its raw message key. Fall back to
+ * the capitalised value instead — that is what this screen showed before it was
+ * translated, and it is still readable.
+ */
+const capitalise = (v: string) => v.charAt(0).toUpperCase() + v.slice(1);
+const labelled = (key: string, fallback: string) => {
+  const text = t(key);
+  return text === key ? fallback : text;
+};
+const roleLabel = (r: string) => labelled(`admin.users.role.${r}`, capitalise(r));
+const statusLabel = (v: string) => labelled(`admin.users.status.${v}`, capitalise(v));
+---
+
+<AdminLayout title={t('admin.users.title')}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-8">
+      <div>
+        <h1 class="text-3xl font-bold text-gray-900">{t('admin.users.title')}</h1>
+        <p class="text-gray-600 mt-2">{t('admin.users.subtitle')}</p>
+      </div>
+      <button id="add-user-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors duration-200 flex items-center">
+        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>
+        </svg>
+        {t('admin.users.addUser')}
+      </button>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+      <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div class="flex items-center">
+          <div class="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center mr-3">
+            <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197m13.5-9a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z"/>
+            </svg>
+          </div>
+          <div>
+            <p class="text-sm font-medium text-gray-500">{t('admin.users.statTotal')}</p>
+            <p class="text-2xl font-bold text-gray-900">{totalUsers}</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div class="flex items-center">
+          <div class="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center mr-3">
+            <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+          </div>
+          <div>
+            <p class="text-sm font-medium text-gray-500">{t('admin.users.statActive')}</p>
+            <p class="text-2xl font-bold text-gray-900">{activeUsers}</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div class="flex items-center">
+          <div class="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center mr-3">
+            <svg class="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+            </svg>
+          </div>
+          <div>
+            <p class="text-sm font-medium text-gray-500">{t('admin.users.statAdmins')}</p>
+            <p class="text-2xl font-bold text-gray-900">{adminUsers}</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div class="flex items-center">
+          <div class="w-8 h-8 bg-yellow-100 rounded-lg flex items-center justify-center mr-3">
+            <svg class="w-5 h-5 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/>
+            </svg>
+          </div>
+          <div>
+            <p class="text-sm font-medium text-gray-500">{t('admin.users.statInactive')}</p>
+            <p class="text-2xl font-bold text-gray-900">{inactiveUsers}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filters and Search -->
+    <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between space-y-4 md:space-y-0">
+        <!-- Search -->
+        <div class="relative flex-1 max-w-md">
+          <input 
+            type="text" 
+            id="search-users" 
+            placeholder={t('admin.users.searchPlaceholder')} 
+            class="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <svg class="w-5 h-5 text-gray-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+        </div>
+
+        <!-- Filters -->
+        <div class="flex items-center space-x-4">
+          <select id="role-filter" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+            <option value="">{t('admin.users.allRoles')}</option>
+            {/* Rendered from ROLES so a role added to the union shows up here
+                instead of being invisible in the filter. */}
+            {ROLES.map((r) => (
+              <option value={r}>{roleLabel(r)}</option>
+            ))}
+          </select>
+          
+          <select id="status-filter" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+            <option value="">{t('admin.users.allStatuses')}</option>
+            <option value="active">{t('admin.users.status.active')}</option>
+            <option value="inactive">{t('admin.users.status.inactive')}</option>
+          </select>
+
+          <button id="bulk-actions-btn" class="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors duration-200 disabled:opacity-50" disabled>
+            {t('admin.users.bulkActions')}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Users Table -->
+    <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-gray-200">
+          <thead class="bg-gray-50">
+            <tr>
+              <th class="px-6 py-3 text-left">
+                <input type="checkbox" id="select-all" aria-label={t('admin.users.selectAll')} class="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+              </th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.users.colUser')}</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.users.colRole')}</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.users.colStatus')}</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.users.colPosts')}</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.users.colLastLogin')}</th>
+              <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.users.colActions')}</th>
+            </tr>
+          </thead>
+          <tbody id="users-tbody" class="bg-white divide-y divide-gray-200">
+            {users.map((user) => (
+              <tr class="hover:bg-gray-50 user-row" data-user-id={user.id} data-name={user.name} data-email={user.email} data-role={user.role} data-status={user.status}>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <input type="checkbox" class="user-checkbox rounded border-gray-300 text-blue-600 focus:ring-blue-500" aria-label={t('admin.users.selectUser', { name: user.name || user.email })} value={user.id} />
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <div class="flex items-center">
+                    {user.avatar ? (
+                      <img class="h-10 w-10 rounded-full" src={user.avatar} alt={user.name} />
+                    ) : (
+                      <div class="h-10 w-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-medium">
+                        {(user.name || user.email || '?')[0].toUpperCase()}
+                      </div>
+                    )}
+                    <div class="ml-4">
+                      <div class="text-sm font-medium text-gray-900">{user.name}</div>
+                      <div class="text-sm text-gray-500">{user.email}</div>
+                    </div>
+                  </div>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <span class={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                    user.role === 'admin' ? 'bg-red-100 text-red-800' :
+                    user.role === 'editor' ? 'bg-blue-100 text-blue-800' :
+                    user.role === 'author' ? 'bg-green-100 text-green-800' :
+                    'bg-gray-100 text-gray-800'
+                  }`}>
+                    {roleLabel(user.role)}
+                  </span>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <span class={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                    user.status === 'active' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                  }`}>
+                    {statusLabel(user.status)}
+                  </span>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{user.postsCount}</td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{user.lastLogin}</td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                  <div class="flex items-center space-x-2">
+                    <button class="text-blue-600 hover:text-blue-900 edit-user" data-user-id={user.id}>{t('admin.users.edit')}</button>
+                    <button class="text-green-600 hover:text-green-900 reset-password" data-user-id={user.id}>{t('admin.users.resetPassword')}</button>
+                    <button class="text-red-600 hover:text-red-900 delete-user" data-user-id={user.id}>{t('admin.users.delete')}</button>
+                    {/* Only where a switch is actually possible (C-141): an
+                        admin viewer, a non-admin target, and not yourself. A
+                        button that always 403s teaches people to ignore
+                        buttons. The server enforces all three regardless. */}
+                    {viewerIsAdmin && user.role !== 'admin' && user.id !== Astro.locals.user?.id && (
+                      <button class="text-amber-700 hover:text-amber-900 switch-user" data-user-id={user.id}>
+                        Act as
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add/Edit User Modal -->
+  <div id="user-modal" class="fixed inset-0 bg-black bg-opacity-50 z-50 hidden">
+    <div class="flex items-center justify-center min-h-screen p-4">
+      <div class="bg-white rounded-lg max-w-md w-full">
+        <div class="flex items-center justify-between p-6 border-b border-gray-200">
+          <h2 id="modal-title" class="text-xl font-semibold text-gray-900">{t('admin.users.modalAddTitle')}</h2>
+          <button id="close-modal" aria-label={t('admin.users.closeModal')} title={t('admin.users.closeModal')} class="text-gray-400 hover:text-gray-600">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+        <form id="user-form" class="p-6 space-y-4">
+          <input type="hidden" id="user-id" />
+          
+          <div>
+            <label for="user-name" class="block text-sm font-medium text-gray-700 mb-2">{t('admin.users.fieldName')}</label>
+            <input type="text" id="user-name" required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          </div>
+          
+          <div>
+            <label for="user-email" class="block text-sm font-medium text-gray-700 mb-2">{t('admin.users.fieldEmail')}</label>
+            <input type="email" id="user-email" required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          </div>
+          
+          <div>
+            <label for="user-role" class="block text-sm font-medium text-gray-700 mb-2">{t('admin.users.fieldRole')}</label>
+            <select id="user-role" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+              {/* THE select that actually assigns a role. Rendered from ROLES:
+                  a role missing here cannot be granted at all, however well the
+                  rest of the system understands it. */}
+              {ROLES.map((r) => (
+                <option value={r}>{r.charAt(0).toUpperCase() + r.slice(1)}</option>
+              ))}
+            </select>
+          </div>
+          
+          <div>
+            <label for="user-status" class="block text-sm font-medium text-gray-700 mb-2">{t('admin.users.fieldStatus')}</label>
+            <select id="user-status" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+              <option value="active">{t('admin.users.status.active')}</option>
+              <option value="inactive">{t('admin.users.status.inactive')}</option>
+            </select>
+          </div>
+
+          <div id="password-field">
+            <label for="user-password" class="block text-sm font-medium text-gray-700 mb-2">{t('admin.users.fieldPassword')}</label>
+            <input type="password" id="user-password" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          </div>
+          
+          <div class="flex justify-end space-x-3 pt-4">
+            <button type="button" id="cancel-btn" class="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50">{t('admin.users.cancel')}</button>
+            <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">{t('admin.users.saveUser')}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    {viewerIsAdmin && (
+      <div class="mt-10 bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <h2 class="text-lg font-semibold text-gray-900 mb-1">What each role may do</h2>
+        <p class="text-sm text-gray-600 mb-4 max-w-3xl">
+          The shipped grants, and your changes to them. <strong>Admin is fixed</strong> — an
+          admin who switched off their own last capability would be locked out of this screen,
+          and there is no command to repair it from outside.
+          These are the five built-in roles; adding new role <em>names</em> is not part of this,
+          because a name the rest of the app has never heard silently answers “no” everywhere and
+          produces a role that can sign in and do nothing.
+        </p>
+        <div id="caps-notice" class="hidden mb-3"></div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-gray-500 border-b border-gray-200">
+                <th class="py-2 pr-4 font-medium">Capability</th>
+                {capRows.map((r) => (
+                  <th class="py-2 px-3 font-medium text-center">
+                    {r.role}
+                    {!r.editable && <span class="block text-xs font-normal text-gray-400">fixed</span>}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody id="caps-body" class="divide-y divide-gray-100">
+              {CAPABILITIES.map((cap) => (
+                <tr>
+                  <td class="py-2 pr-4 text-gray-700">{CAPABILITY_LABELS[cap]}</td>
+                  {capRows.map((r) => (
+                    <td class="py-2 px-3 text-center">
+                      <input
+                        type="checkbox"
+                        class="caps-box rounded border-gray-300"
+                        data-role={r.role}
+                        data-cap={cap}
+                        checked={r.effective.includes(cap)}
+                        disabled={!r.editable}
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div class="flex items-center gap-3 mt-4">
+          <button id="caps-save" type="button"
+            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+            Save capabilities
+          </button>
+          <span class="text-xs text-gray-400">Every change is written to the audit log.</span>
+        </div>
+      </div>
+    )}
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../../lib/apiClient';
+  import { flash as sharedFlash } from '../../../lib/admin-ui';
+
+  /**
+   * The capability matrix (C-138).
+   *
+   * Sends the WHOLE table, not a patch: a partial write can express a grant but
+   * not a revocation, and the matrix edits the whole thing anyway. The server
+   * drops anything equal to the built-in grant, so what gets stored is only the
+   * real differences — a table full of entries that change nothing hides the
+   * ones that do.
+   */
+  const capsSave = document.getElementById('caps-save');
+  if (capsSave) {
+    capsSave.addEventListener('click', async () => {
+      const notice = document.getElementById('caps-notice');
+      const overrides = {};
+      for (const box of document.querySelectorAll('.caps-box')) {
+        if (box.disabled) continue;
+        overrides[box.dataset.role] ??= {};
+        overrides[box.dataset.role][box.dataset.cap] = box.checked;
+      }
+      const res = await api.put('/api/roles/capabilities', { overrides });
+      if (!res.ok) { sharedFlash(notice, `Could not save: ${res.error}`, 'error'); return; }
+      sharedFlash(notice, 'Saved. Changes apply to the next request each user makes.');
+    });
+  }
+
+  class UserManager {
+    constructor() {
+      this.selectedUsers = new Set();
+      this.editingUser = null;
+      this.init();
+    }
+    
+    init() {
+      // Modal events
+      document.getElementById('add-user-btn').addEventListener('click', () => this.openModal());
+      document.getElementById('close-modal').addEventListener('click', () => this.closeModal());
+      document.getElementById('cancel-btn').addEventListener('click', () => this.closeModal());
+      document.getElementById('user-form').addEventListener('submit', (e) => this.handleSubmit(e));
+      
+      // Table events
+      document.getElementById('users-tbody').addEventListener('click', (e) => this.handleTableClick(e));
+      
+      // Search and filters
+      document.getElementById('search-users').addEventListener('input', (e) => this.handleSearch(e));
+      document.getElementById('role-filter').addEventListener('change', () => this.handleFilter());
+      document.getElementById('status-filter').addEventListener('change', () => this.handleFilter());
+      
+      // Select all
+      document.getElementById('select-all').addEventListener('change', (e) => this.handleSelectAll(e));
+
+      // Bulk delete
+      document.getElementById('bulk-actions-btn').addEventListener('click', () => this.bulkDelete());
+      
+      // Individual checkboxes
+      document.querySelectorAll('.user-checkbox').forEach(checkbox => {
+        checkbox.addEventListener('change', () => this.updateBulkActions());
+      });
+    }
+    
+    openModal(user = null) {
+      this.editingUser = user;
+      const modal = document.getElementById('user-modal');
+      const title = document.getElementById('modal-title');
+      const form = document.getElementById('user-form');
+      
+      if (user) {
+        title.textContent = window.t('admin.users.modalEditTitle');
+        document.getElementById('user-id').value = user.id;
+        document.getElementById('user-name').value = user.name;
+        document.getElementById('user-email').value = user.email;
+        document.getElementById('user-role').value = user.role;
+        document.getElementById('user-status').value = user.status || 'active';
+        document.getElementById('password-field').style.display = 'none';
+      } else {
+        title.textContent = window.t('admin.users.modalAddTitle');
+        form.reset();
+        document.getElementById('user-status').value = 'active';
+        document.getElementById('password-field').style.display = 'block';
+      }
+      
+      modal.classList.remove('hidden');
+    }
+    
+    closeModal() {
+      document.getElementById('user-modal').classList.add('hidden');
+      this.editingUser = null;
+    }
+    
+    async handleSubmit(e) {
+      e.preventDefault();
+      const payload = {
+        name: document.getElementById('user-name').value.trim(),
+        email: document.getElementById('user-email').value.trim(),
+        role: document.getElementById('user-role').value,
+        status: document.getElementById('user-status').value,
+      };
+      const password = document.getElementById('user-password').value;
+      if (password) payload.password = password;
+
+      let res;
+      if (this.editingUser) {
+        res = await api.post('/api/users/update', { id: this.editingUser.id, ...payload });
+      } else {
+        if (!payload.password) {
+          return this.showNotification(window.t('admin.users.passwordRequired'), 'error');
+        }
+        res = await api.post('/api/users/create', payload);
+      }
+      if (!res.ok) return this.showNotification(window.t('admin.users.saveFailed', { error: res.error }), 'error');
+      this.showNotification(window.t(this.editingUser ? 'admin.users.userUpdated' : 'admin.users.userCreated'), 'success');
+      this.closeModal();
+      setTimeout(() => window.location.reload(), 300);
+    }
+
+    async handleTableClick(e) {
+      const editBtn = e.target.closest('.edit-user');
+      const deleteBtn = e.target.closest('.delete-user');
+      const resetBtn = e.target.closest('.reset-password');
+
+      if (editBtn) {
+        const row = editBtn.closest('.user-row');
+        const d = row.dataset;
+        this.openModal({ id: d.userId, name: d.name, email: d.email, role: d.role, status: d.status });
+      } else if (deleteBtn) {
+        const userId = deleteBtn.dataset.userId;
+        if (!confirm(window.t('admin.users.confirmDelete'))) return;
+        const res = await api.post('/api/users/delete', { id: userId });
+        if (!res.ok) return this.showNotification(window.t('admin.users.deleteFailed', { error: res.error }), 'error');
+        this.showNotification(window.t('admin.users.userDeleted'), 'success');
+        deleteBtn.closest('.user-row')?.remove();
+      } else if (resetBtn) {
+        const userId = resetBtn.dataset.userId;
+        const newPwd = prompt(window.t('admin.users.promptNewPassword'));
+        if (!newPwd) return;
+        if (newPwd.length < 8) return this.showNotification(window.t('admin.users.passwordTooShort'), 'error');
+        const res = await api.post('/api/users/update', { id: userId, password: newPwd });
+        if (!res.ok) return this.showNotification(window.t('admin.users.resetFailed', { error: res.error }), 'error');
+        this.showNotification(window.t('admin.users.passwordUpdated'), 'success');
+      }
+    }
+    
+    handleSearch(e) {
+      const query = e.target.value.toLowerCase();
+      const rows = document.querySelectorAll('.user-row');
+      
+      rows.forEach(row => {
+        const name = row.querySelector('.text-gray-900').textContent.toLowerCase();
+        const email = row.querySelector('.text-gray-500').textContent.toLowerCase();
+        
+        if (name.includes(query) || email.includes(query)) {
+          row.style.display = '';
+        } else {
+          row.style.display = 'none';
+        }
+      });
+    }
+    
+    handleFilter() {
+      const roleFilter = document.getElementById('role-filter').value;
+      const statusFilter = document.getElementById('status-filter').value;
+      const rows = document.querySelectorAll('.user-row');
+      
+      rows.forEach(row => {
+        // Match the row's data-* VALUES, never the badge text. The badges are
+        // translated labels — in Greek the `admin` badge reads Διαχειριστής —
+        // so comparing their text to an <option value> matches nothing.
+        const role = row.dataset.role || '';
+        const status = row.dataset.status || '';
+
+        const roleMatch = !roleFilter || role === roleFilter;
+        const statusMatch = !statusFilter || status === statusFilter;
+        
+        if (roleMatch && statusMatch) {
+          row.style.display = '';
+        } else {
+          row.style.display = 'none';
+        }
+      });
+    }
+    
+    handleSelectAll(e) {
+      const checkboxes = document.querySelectorAll('.user-checkbox');
+      checkboxes.forEach(checkbox => {
+        checkbox.checked = e.target.checked;
+      });
+      this.updateBulkActions();
+    }
+    
+    updateBulkActions() {
+      const checkedBoxes = document.querySelectorAll('.user-checkbox:checked');
+      const bulkBtn = document.getElementById('bulk-actions-btn');
+
+      bulkBtn.disabled = checkedBoxes.length === 0;
+      bulkBtn.textContent = checkedBoxes.length > 0
+        ? window.t('admin.users.deleteSelected', { count: checkedBoxes.length })
+        : window.t('admin.users.bulkActions');
+    }
+
+    async bulkDelete() {
+      const ids = Array.from(document.querySelectorAll('.user-checkbox:checked')).map((c) => c.value);
+      if (!ids.length) return;
+      if (!confirm(window.t('admin.users.confirmBulkDelete', { count: ids.length }))) return;
+      let ok = 0;
+      let failed = 0;
+      for (const id of ids) {
+        const res = await api.post('/api/users/delete', { id });
+        if (res.ok) ok++;
+        else failed++;
+      }
+      // window.t has no plural support, so both forms are phrased to read
+      // correctly for any count rather than agreeing with one.
+      this.showNotification(
+        failed
+          ? window.t('admin.users.bulkDeletedWithFailures', { count: ok, failed })
+          : window.t('admin.users.bulkDeleted', { count: ok }),
+        failed ? 'error' : 'success',
+      );
+      setTimeout(() => window.location.reload(), 400);
+    }
+    
+    showNotification(message, type = 'info') {
+      const notification = document.createElement('div');
+      notification.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 ${
+        type === 'success' ? 'bg-green-500 text-white' : 
+        type === 'error' ? 'bg-red-500 text-white' : 
+        'bg-blue-500 text-white'
+      }`;
+      notification.textContent = message;
+      
+      document.body.appendChild(notification);
+      
+      setTimeout(() => {
+        notification.remove();
+      }, 3000);
+    }
+  }
+  
+  // Initialize user manager
+  document.addEventListener('DOMContentLoaded', () => {
+    new UserManager();
+  });
+</script>
+</AdminLayout>
+
+<script>
+  /**
+   * "Act as" (C-141).
+   *
+   * A confirm() rather than a modal: this changes who the next click is, and
+   * the one-line summary of what is about to happen is the whole safeguard
+   * worth having here. The banner that follows is the persistent one.
+   */
+  document.addEventListener('click', async (event) => {
+    const button = (event.target as HTMLElement | null)?.closest('.switch-user') as HTMLButtonElement | null;
+    if (!button) return;
+    const row = button.closest('.user-row') as HTMLElement | null;
+    const who = row?.dataset.name || row?.dataset.email || 'this user';
+    if (!confirm(`Act as ${who}? Everything you do will be recorded as them until you switch back.`)) return;
+    button.disabled = true;
+    const csrf = decodeURIComponent((document.cookie.match(/(?:^|; )astrobaas_csrf=([^;]*)/) ?? [])[1] ?? '');
+    const res = await fetch('/api/users/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+      body: JSON.stringify({ user_id: button.dataset.userId }),
+    });
+    const json = await res.json().catch(() => null);
+    button.disabled = false;
+    if (!res.ok) {
+      alert(json?.message || json?.error?.message || 'Could not switch to that user.');
+      return;
+    }
+    window.location.href = '/admin';
+  });
+</script>

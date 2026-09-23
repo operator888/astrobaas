@@ -1,0 +1,627 @@
+---
+/**
+ * `/admin/insights` — the in-dashboard report (C-107).
+ *
+ * ## Two halves, and the screen says which is which
+ *
+ * **Traffic is totals.** `post.views` is a running counter; nothing anywhere
+ * records when a view happened. So this half ranks and groups, and states in
+ * words that it has no time axis. Every way of drawing one from what exists —
+ * spreading the total across days, using `publish_date`, dividing 404 hits by
+ * their first/last bounds — invents a history that did not happen. See the
+ * header of `lib/insights.ts`.
+ *
+ * **Outcomes are real series.** Orders, messages and subscribers each carry a
+ * per-event `created_at`, so a day-by-day chart of those is traceable to
+ * recorded facts, one row at a time.
+ *
+ * ## Why the charts are SVG
+ *
+ * Not a stylistic choice. The production CSP has no `'unsafe-inline'` for
+ * styles, so `style="width:62%"` on a `<div>` is dropped silently — right under
+ * `astro dev`, wrong in production, no console message either way. `width` on a
+ * `<rect>` is a presentation ATTRIBUTE, which the CSP does not govern, so the
+ * same number survives. No script, no library, nothing to hydrate.
+ */
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { canOpenAdminPage } from '../../lib/admin-access';
+import { canReadCommerce } from '../../lib/auth';
+import { LocalDB } from '../../lib/localdb';
+import { isCommerceEnabled } from '../../lib/commerce-service';
+import { articlesOnly, isPage, isArticle } from '../../lib/post-kind';
+import { recordLocale, isMultilingual, locales } from '../../lib/i18n';
+import { daySeries, topBy, groupTotals, sumBy, barWidths } from '../../lib/insights';
+import { MAX_TRACKED_PATHS } from '../../lib/legacy/not-found-log';
+import { scanInternalLinks, collectExternalLinks } from '../../lib/link-check';
+import { scanBrokenMedia, unreferencedMedia } from '../../lib/media-check';
+import { imagesMissingAlt } from '../../lib/image-dimensions';
+import { externalCheckState, pendingCount } from '../../lib/link-check-external';
+import { resolveSiteUrl } from '../../lib/site-url';
+import { reservedSlugs } from '../../lib/reserved-slugs';
+import { formatMoney } from '../../lib/money-format';
+
+const user = Astro.locals.user;
+if (!canOpenAdminPage('/admin/insights', user?.role)) {
+  return Astro.redirect('/admin');
+}
+
+await LocalDB.init();
+
+const WINDOW_DAYS = 30;
+const now = Date.now();
+
+const posts = await LocalDB.getPosts();
+const settingsList = await LocalDB.getSettings();
+const map0: Record<string, unknown> = {};
+for (const s of settingsList) map0[s.key] = s.value;
+const categories = await LocalDB.getCategories();
+const articles = articlesOnly(posts);
+const categoryName = new Map(categories.map((c) => [c.id, c.name]));
+
+// ── Traffic: totals and rankings only ──────────────────────────────────────
+const totalViews = sumBy(articles, (p) => p.views);
+const readArticles = articles.filter((p) => (Number(p.views) || 0) > 0).length;
+
+const topPosts = topBy(
+  articles,
+  (p) => Number(p.views) || 0,
+  (p, v) => ({
+    id: p.id,
+    label: p.title || p.slug,
+    value: v,
+    href: `/admin/posts/${p.id}/edit`,
+    detail: p.category_id ? categoryName.get(p.category_id) : undefined,
+  }),
+  10,
+);
+
+const byCategory = groupTotals(
+  articles,
+  (p) => (p.category_id && categoryName.has(p.category_id)
+    ? { id: p.category_id, label: categoryName.get(p.category_id)! }
+    : null),
+  (p) => Number(p.views) || 0,
+);
+
+const multilingual = isMultilingual();
+const byLocale = multilingual
+  ? groupTotals(articles, (p) => { const l = recordLocale(p); return { id: l, label: l.toUpperCase() }; }, (p) => Number(p.views) || 0)
+  : [];
+
+// ── Dead URLs, weighted by what they cost ──────────────────────────────────
+const notFound = await LocalDB.getNotFound();
+const paidDead = topBy(
+  notFound,
+  (r) => Number(r.paid_hits) || 0,
+  (r, v) => ({ id: r.path, label: r.path, value: v, detail: `${r.hits} total · last seen ${String(r.last_seen ?? '').slice(0, 10)}` }),
+  10,
+);
+const deadTotal = sumBy(notFound, (r) => r.hits);
+const deadPaid = sumBy(notFound, (r) => r.paid_hits);
+
+// ── Outcomes: genuine per-event timestamps ─────────────────────────────────
+const showCommerce = canReadCommerce(user?.role) && await isCommerceEnabled();
+const orders = showCommerce ? await LocalDB.getOrders() : [];
+// Paid only, the same rule the dashboard applies. Counting unpaid orders as
+// revenue overstates the takings, and a report that flatters is one nobody can
+// plan from — so the rule is reused rather than re-decided here.
+const paidOrders = orders.filter((o) => (o.payment_status ?? 'unpaid') === 'paid');
+const orderSeries = daySeries(paidOrders, (o) => o.created_at, (o) => Number(o.total_cents) || 0, { days: WINDOW_DAYS, now });
+
+const messages = await LocalDB.getMessages();
+const messageSeries = daySeries(messages, (m) => m.created_at, null, { days: WINDOW_DAYS, now, cap: 5000 });
+
+const subscribers = await LocalDB.getSubscribers();
+const subscriberSeries = daySeries(subscribers, (s) => s.created_at, null, { days: WINDOW_DAYS, now });
+
+// ── Broken links ───────────────────────────────────────────────────────────
+// Internal links are RESOLVED against the database, not fetched: instant,
+// exact, and incapable of a false positive. Outbound links are a separate,
+// opt-in, network activity — see lib/link-check-external.ts.
+const siteUrlSetting = await LocalDB.getSetting('site_url');
+const linkOrigin = resolveSiteUrl({
+  setting: siteUrlSetting?.value,
+  astroSite: Astro.site,
+  requestUrl: Astro.url,
+});
+// The REAL matcher the middleware uses, not a set of exact strings: rules can
+// be prefix or wildcard patterns, and every one a set would miss is a working
+// link reported as broken.
+const { ensureRedirectsLoaded, matchRedirect } = await import('../../lib/legacy/redirect-store');
+await ensureRedirectsLoaded().catch(() => {});
+const mediaFiles = await LocalDB.getMedia().catch(() => []);
+// The same idea one level down: a reference that stops resolving does not
+// announce itself. A deleted file leaves an <img> in every post that used it,
+// and nothing logs a 404 for a file — the request WAS answered. Resolved
+// against the library, never fetched, and scoped to /uploads/ so a theme asset
+// in public/ is not reported as missing. Reuses the media read above.
+const brokenMedia = scanBrokenMedia(posts, mediaFiles);
+const unusedMedia = unreferencedMedia(posts, mediaFiles);
+
+const brokenInternal = scanInternalLinks(posts, {
+  origin: linkOrigin,
+  targets: {
+    articleSlugs: new Set(posts.filter((p) => isArticle(p) && p.status === 'published').map((p) => p.slug)),
+    pageSlugs: new Set(posts.filter((p) => isPage(p) && p.status === 'published').map((p) => p.slug)),
+    // The reserved list IS the set of first path segments served by a route
+    // file — the same list `tests/reserved-slugs.test.mjs` keeps in sync with
+    // src/pages/, so this cannot drift from the routes that actually exist.
+    builtinRoutes: new Set(reservedSlugs()),
+    redirected: (p: string) => { try { return !!matchRedirect(p); } catch { return false; } },
+    mediaPaths: new Set(mediaFiles.map((m: { url?: string }) => String(m.url ?? '')).filter(Boolean)),
+  },
+});
+
+// ── Images nobody described ────────────────────────────────────────────────
+// Counted on the STORED content, before the render pipeline fills alt in from
+// the media library — so this reports what an author has to fix, not what the
+// site papers over. An <img alt=""> is never listed: an empty alt is correct
+// markup for a decorative image, and a report that flags correct markup teaches
+// its reader to ignore it.
+const missingAlt = posts
+  .filter((p) => p.status === 'published')
+  .map((p) => ({ post: p, srcs: imagesMissingAlt(p.content ?? '') }))
+  .filter((r) => r.srcs.length > 0)
+  .sort((a, b) => (b.srcs.length - a.srcs.length) || String(a.post.title).localeCompare(String(b.post.title)));
+const missingAltTotal = missingAlt.reduce((n, r) => n + r.srcs.length, 0);
+const undescribedFiles = mediaFiles.filter(
+  (m: { mime_type?: string; alt_text?: string }) =>
+    String(m.mime_type ?? '').startsWith('image/') && !String(m.alt_text ?? '').trim(),
+).length;
+
+const externalLinks = collectExternalLinks(posts, linkOrigin);
+const externalUrls = [...externalLinks.keys()];
+const linkCheckOn = (() => {
+  const v = map0.link_check_external;
+  return v === true || v === 'true' || v === '1';
+})();
+const extState = externalCheckState();
+const extBroken = extState.results
+  .filter((r) => r.verdict === 'broken')
+  .map((r) => ({ ...r, found: externalLinks.get(r.url) ?? [] }))
+  .filter((r) => r.found.length > 0);
+const extPending = pendingCount(externalUrls);
+
+// The hardcoded el-GR here was one of five, and disagreed with the sale
+// email's formatMoney — the screen and the receipt stated the same total two
+// ways. The locale now follows the staff member reading it.
+const adminLocale = Astro.locals.uiLocale ?? undefined;
+const money = (cents: number) => formatMoney(cents, { locale: adminLocale });
+const num = (n: number) => n.toLocaleString('en-US');
+
+const SERIES = [
+  ...(showCommerce ? [{ key: 'orders', title: 'Paid orders', series: orderSeries, money: true }] : []),
+  { key: 'messages', title: 'Contact submissions', series: messageSeries, money: false },
+  { key: 'subscribers', title: 'Newsletter signups', series: subscriberSeries, money: false },
+];
+
+/** Rows → bar widths, in the same order. */
+function widths(rows: { value: number }[]) {
+  return barWidths(rows.map((r) => r.value), 100);
+}
+const topWidths = widths(topPosts);
+const catWidths = widths(byCategory);
+const localeWidths = widths(byLocale);
+const deadWidths = widths(paidDead);
+---
+
+<AdminLayout title="Insights">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
+
+    <header>
+      <h1 class="text-2xl font-semibold text-gray-900">Insights</h1>
+      <p class="mt-1 text-sm text-gray-600 max-w-2xl">
+        Everything here is counted from what this site actually recorded. Where a number
+        cannot be derived from a recorded fact, it is not shown — which is why traffic has
+        no chart over time and outcomes do.
+      </p>
+    </header>
+
+    <!-- ───────────────────────── Traffic ───────────────────────── -->
+    <section class="space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Reading</h2>
+        <p class="mt-1 text-sm text-gray-600 max-w-2xl">
+          Totals since counting began — <strong>not</strong> a period. Views are stored as a
+          running counter per article with no record of when each one happened, so
+          &ldquo;this week versus last&rdquo; is a question this data cannot answer. Anything
+          claiming otherwise would be drawn from a number nobody wrote down.
+        </p>
+      </div>
+
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-4">
+        <div class="bg-white border border-gray-200 rounded-lg p-4">
+          <div class="text-2xl font-semibold text-gray-900">{num(totalViews)}</div>
+          <div class="text-xs text-gray-500 mt-1">views, all articles</div>
+        </div>
+        <div class="bg-white border border-gray-200 rounded-lg p-4">
+          <div class="text-2xl font-semibold text-gray-900">{num(readArticles)}</div>
+          <div class="text-xs text-gray-500 mt-1">of {num(articles.length)} articles have been read</div>
+        </div>
+        <div class="bg-white border border-gray-200 rounded-lg p-4">
+          <div class="text-2xl font-semibold text-gray-900">
+            {readArticles > 0 ? num(Math.round(totalViews / readArticles)) : '—'}
+          </div>
+          <div class="text-xs text-gray-500 mt-1">average, among those read</div>
+        </div>
+      </div>
+
+      {topPosts.length === 0 ? (
+        <p class="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
+          No article has been read yet. Views are counted for anonymous visitors and API-key
+          callers only — signed-in staff and known crawlers are excluded — so a site that has
+          only ever been opened by its own editors correctly shows nothing here.
+        </p>
+      ) : (
+        <div class="bg-white border border-gray-200 rounded-lg p-5">
+          <h3 class="text-sm font-semibold text-gray-900 mb-3">Most read</h3>
+          <ul class="space-y-2.5">
+            {topPosts.map((r, i) => (
+              <li>
+                <div class="flex items-baseline justify-between gap-4 text-sm">
+                  <a href={r.href} class="text-blue-600 hover:underline truncate">{r.label}</a>
+                  <span class="text-gray-900 tabular-nums whitespace-nowrap">{num(r.value)}</span>
+                </div>
+                <svg viewBox="0 0 100 3" preserveAspectRatio="none" class="w-full h-1.5 mt-1" role="presentation">
+                  <rect x="0" y="0" width="100" height="3" rx="1.5" fill="#f1f5f9" />
+                  <rect x="0" y="0" width={topWidths[i]} height="3" rx="1.5" fill="#2563eb" />
+                </svg>
+                {r.detail && <div class="text-xs text-gray-500 mt-0.5">{r.detail}</div>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {byCategory.length > 0 && (
+        <div class="bg-white border border-gray-200 rounded-lg p-5">
+          <h3 class="text-sm font-semibold text-gray-900 mb-3">Views by category</h3>
+          <ul class="space-y-2.5">
+            {byCategory.map((r, i) => (
+              <li>
+                <div class="flex items-baseline justify-between gap-4 text-sm">
+                  <span class="text-gray-700 truncate">{r.label}</span>
+                  <span class="text-gray-900 tabular-nums whitespace-nowrap">{num(r.value)}</span>
+                </div>
+                <svg viewBox="0 0 100 3" preserveAspectRatio="none" class="w-full h-1.5 mt-1" role="presentation">
+                  <rect x="0" y="0" width="100" height="3" rx="1.5" fill="#f1f5f9" />
+                  <rect x="0" y="0" width={catWidths[i]} height="3" rx="1.5" fill="#0d9488" />
+                </svg>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {byLocale.length > 0 && (
+        <div class="bg-white border border-gray-200 rounded-lg p-5">
+          <h3 class="text-sm font-semibold text-gray-900 mb-3">Views by language</h3>
+          <p class="text-xs text-gray-500 mb-3">
+            Configured: {locales().join(', ')}. A language with no row has had no reads.
+          </p>
+          <ul class="space-y-2.5">
+            {byLocale.map((r, i) => (
+              <li>
+                <div class="flex items-baseline justify-between gap-4 text-sm">
+                  <span class="text-gray-700">{r.label}</span>
+                  <span class="text-gray-900 tabular-nums">{num(r.value)}</span>
+                </div>
+                <svg viewBox="0 0 100 3" preserveAspectRatio="none" class="w-full h-1.5 mt-1" role="presentation">
+                  <rect x="0" y="0" width="100" height="3" rx="1.5" fill="#f1f5f9" />
+                  <rect x="0" y="0" width={localeWidths[i]} height="3" rx="1.5" fill="#7c3aed" />
+                </svg>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+
+    <!-- ─────────────────────── Broken links ─────────────────────── -->
+    <section class="space-y-4">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Broken links in your content</h2>
+        <p class="mt-1 text-sm text-gray-600 max-w-2xl">
+          Links inside published posts and pages that lead nowhere. Internal ones are resolved
+          against this database rather than fetched, so the answer is exact and instant — and a
+          link a redirect rule rescues is never listed, because it works.
+        </p>
+      </div>
+
+      {brokenInternal.length === 0 ? (
+        <p class="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
+          Every internal link in published content resolves.
+        </p>
+      ) : (
+        <div class="bg-white border border-gray-200 rounded-lg p-5">
+          <h3 class="text-sm font-semibold text-gray-900 mb-3">
+            {brokenInternal.length} internal link{brokenInternal.length === 1 ? '' : 's'} lead nowhere
+          </h3>
+          <ul class="divide-y divide-gray-100">
+            {brokenInternal.map((b) => (
+              <li class="py-2.5 flex items-baseline justify-between gap-4 text-sm">
+                <div class="min-w-0">
+                  <span class="font-mono text-xs text-red-700">{b.href}</span>
+                  {b.text && <span class="text-gray-500"> — “{b.text}”</span>}
+                </div>
+                <a href={`/admin/posts/${b.postId}/edit`} class="text-blue-600 hover:underline whitespace-nowrap">
+                  {b.postTitle}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {missingAltTotal > 0 && (
+        <div class="bg-white border border-gray-200 rounded-lg p-5">
+          <h3 class="text-sm font-semibold text-gray-900 mb-1">
+            {missingAltTotal} image{missingAltTotal === 1 ? '' : 's'} with no description
+          </h3>
+          <p class="text-xs text-gray-500 mb-3">
+            An image with no <span class="font-mono">alt</span> is invisible to a screen reader and to
+            an image search. An explicitly empty one is not listed — that is how you mark a picture as
+            decorative, and it is correct.
+            {undescribedFiles > 0 && (
+              <> {undescribedFiles} file{undescribedFiles === 1 ? '' : 's'} in the library
+              {undescribedFiles === 1 ? ' has' : ' have'} no description either; adding it there fills
+              these in automatically. <a href="/admin/media" class="text-blue-600 hover:underline">Media library</a>.</>
+            )}
+          </p>
+          <ul class="divide-y divide-gray-100">
+            {missingAlt.slice(0, 10).map((r) => (
+              <li class="py-2 flex items-baseline justify-between gap-4 text-sm">
+                <a href={`/admin/posts/${r.post.id}/edit`} class="text-blue-600 hover:underline truncate">
+                  {r.post.title || r.post.slug}
+                </a>
+                <span class="text-gray-500 tabular-nums whitespace-nowrap">{r.srcs.length}</span>
+              </li>
+            ))}
+          </ul>
+          {missingAlt.length > 10 && (
+            <p class="text-xs text-gray-400 mt-2">…and {missingAlt.length - 10} more.</p>
+          )}
+        </div>
+      )}
+
+      {!linkCheckOn ? (
+        <p class="text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
+          <strong class="text-gray-900">Outbound links are not being checked.</strong>
+          {' '}{externalUrls.length > 0
+            ? `Your content links out to ${externalUrls.length} address${externalUrls.length === 1 ? '' : 'es'}. `
+            : 'Your content has no outbound links yet. '}
+          Checking them means this server making requests to other people's sites, so it is off
+          until you turn it on under <a href="/admin/settings#set-reading" class="text-blue-600 hover:underline">Reading</a>.
+        </p>
+      ) : (
+        <div class="bg-white border border-gray-200 rounded-lg p-5 space-y-3">
+          <div class="flex items-baseline justify-between gap-4">
+            <h3 class="text-sm font-semibold text-gray-900">Outbound links</h3>
+            <span class="text-xs text-gray-500">
+              {externalUrls.length - extPending} of {externalUrls.length} checked
+              {extPending > 0 && ' · the rest are queued'}
+            </span>
+          </div>
+
+          {extBroken.length === 0 ? (
+            <p class="text-sm text-gray-500">
+              {extState.checked === 0
+                ? 'Nothing checked yet. The sweep looks at a few links a minute, one per site, so it takes a while on a large catalogue.'
+                : 'No outbound link has answered 404 or 410.'}
+            </p>
+          ) : (
+            <ul class="divide-y divide-gray-100">
+              {extBroken.map((r) => (
+                <li class="py-2.5 text-sm">
+                  <div class="flex items-baseline justify-between gap-4">
+                    <span class="font-mono text-xs text-red-700 truncate">{r.url}</span>
+                    <span class="text-red-700 whitespace-nowrap">{r.status}</span>
+                  </div>
+                  <div class="text-xs text-gray-500 mt-0.5">
+                    in {r.found.map((f) => f.postTitle).join(', ')}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <p class="text-xs text-gray-500">
+            Only <strong>404</strong> and <strong>410</strong> are called broken. A site that
+            answers 403 to anything without a browser, rate-limits us, or times out is recorded as
+            unchecked rather than dead — sending you to fix a working link twice is how a report
+            like this stops being read.
+            {extState.startedAt && ' Results are held in memory and start again after a restart.'}
+          </p>
+        </div>
+      )}
+    </section>
+
+    <!-- ─────────────────────── Broken media ─────────────────────── -->
+    <section class="space-y-4">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Missing images</h2>
+        <p class="mt-1 text-sm text-gray-600 max-w-2xl">
+          Pictures in published content that the media library cannot answer for — usually a file
+          somebody deleted after it had been used. Resolved against the library, never fetched.
+          Only files under <span class="font-mono text-xs">/uploads/</span> are checked: an image
+          shipped with your theme is not in the library and is not missing.
+        </p>
+      </div>
+
+      {brokenMedia.length === 0 ? (
+        <p class="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
+          Every image in published content resolves to a file in the library.
+        </p>
+      ) : (
+        <div class="bg-white border border-gray-200 rounded-lg p-5">
+          <h3 class="text-sm font-semibold text-gray-900 mb-3">
+            {brokenMedia.length} missing image{brokenMedia.length === 1 ? '' : 's'}
+          </h3>
+          <ul class="divide-y divide-gray-100">
+            {brokenMedia.map((b) => (
+              <li class="py-2.5 flex items-baseline justify-between gap-4 text-sm">
+                <div class="min-w-0">
+                  <span class="font-mono text-xs text-red-700">{b.src}</span>
+                  {b.where === 'featured' && (
+                    <span class="ml-2 inline-block px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-xs">
+                      featured image
+                    </span>
+                  )}
+                </div>
+                <a href={`/admin/posts/${b.postId}/edit`} class="text-blue-600 hover:underline whitespace-nowrap">
+                  {b.postTitle}
+                </a>
+              </li>
+            ))}
+          </ul>
+          <p class="mt-3 text-xs text-gray-500">
+            A missing featured image is visible in four places the author never opens: the archive,
+            the card, the Open Graph tag and the feed.
+          </p>
+        </div>
+      )}
+
+      {unusedMedia.length > 0 && (
+        <details class="bg-white border border-gray-200 rounded-lg p-5">
+          <summary class="text-sm font-semibold text-gray-900 cursor-pointer">
+            {unusedMedia.length} file{unusedMedia.length === 1 ? '' : 's'} no published post links to
+          </summary>
+          <p class="mt-2 text-xs text-gray-500">
+            This reads post content only. A file can be perfectly in use from a settings value or a
+            theme — so this is “nothing links to these”, never “these are safe to delete”.
+          </p>
+          <ul class="mt-3 divide-y divide-gray-100">
+            {unusedMedia.slice(0, 50).map((m) => (
+              <li class="py-2 text-sm flex items-baseline justify-between gap-4">
+                <span class="truncate text-gray-700">{m.name}</span>
+                <span class="font-mono text-xs text-gray-400 whitespace-nowrap">{m.url}</span>
+              </li>
+            ))}
+          </ul>
+          {unusedMedia.length > 50 && (
+            <p class="mt-2 text-xs text-gray-500">
+              Showing the first 50 of {unusedMedia.length}. Manage them in
+              <a href="/admin/media" class="text-blue-600 hover:underline"> Media</a>.
+            </p>
+          )}
+        </details>
+      )}
+    </section>
+
+    <!-- ─────────────────── Dead URLs that cost money ─────────────────── -->
+    <section class="space-y-4">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Dead URLs people are paying to reach</h2>
+        <p class="mt-1 text-sm text-gray-600 max-w-2xl">
+          Requests that arrived with an ad or Shopping click parameter and hit a 404. Every one
+          is a click that was paid for and landed nowhere, so this list is ordered by cost
+          rather than by volume. Fix them at
+          <a href="/admin/redirects" class="text-blue-600 hover:underline">Redirects</a>.
+        </p>
+      </div>
+
+      <div class="grid grid-cols-2 gap-4">
+        <div class="bg-white border border-gray-200 rounded-lg p-4">
+          <div class="text-2xl font-semibold text-gray-900">{num(deadPaid)}</div>
+          <div class="text-xs text-gray-500 mt-1">paid clicks lost to 404s</div>
+        </div>
+        <div class="bg-white border border-gray-200 rounded-lg p-4">
+          <div class="text-2xl font-semibold text-gray-900">{num(deadTotal)}</div>
+          <div class="text-xs text-gray-500 mt-1">404 hits in total</div>
+        </div>
+      </div>
+
+      {paidDead.length === 0 ? (
+        <p class="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
+          No advertised URL has 404'd. {notFound.length > 0
+            ? `${notFound.length} dead path${notFound.length === 1 ? '' : 's'} were hit without an ad parameter — see Redirects.`
+            : 'Nothing has 404\'d at all.'}
+        </p>
+      ) : (
+        <div class="bg-white border border-gray-200 rounded-lg p-5">
+          <ul class="space-y-2.5">
+            {paidDead.map((r, i) => (
+              <li>
+                <div class="flex items-baseline justify-between gap-4 text-sm">
+                  <span class="font-mono text-xs text-gray-900 truncate">{r.label}</span>
+                  <span class="text-red-700 tabular-nums whitespace-nowrap">{num(r.value)} paid</span>
+                </div>
+                <svg viewBox="0 0 100 3" preserveAspectRatio="none" class="w-full h-1.5 mt-1" role="presentation">
+                  <rect x="0" y="0" width="100" height="3" rx="1.5" fill="#f1f5f9" />
+                  <rect x="0" y="0" width={deadWidths[i]} height="3" rx="1.5" fill="#dc2626" />
+                </svg>
+                <div class="text-xs text-gray-500 mt-0.5">{r.detail}</div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {notFound.length >= MAX_TRACKED_PATHS && (
+        <p class="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2">
+          The 404 log holds the {MAX_TRACKED_PATHS} most active paths and evicts the quietest.
+          Rarely-hit dead URLs may be missing from these totals.
+        </p>
+      )}
+    </section>
+
+    <!-- ───────────────── Outcomes: a real time axis ───────────────── -->
+    <section class="space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Last {WINDOW_DAYS} days</h2>
+        <p class="mt-1 text-sm text-gray-600 max-w-2xl">
+          These <em>can</em> be charted over time: each one is a row with its own timestamp, so
+          every column below is a count of things that happened on that day. A day with nothing
+          on it is a real zero, not a gap.
+        </p>
+      </div>
+
+      {SERIES.map(({ key, title, series, money: isMoney }) => (
+        <div class="bg-white border border-gray-200 rounded-lg p-5">
+          <div class="flex items-baseline justify-between gap-4 mb-3">
+            <h3 class="text-sm font-semibold text-gray-900">{title}</h3>
+            <div class="text-sm text-gray-900 tabular-nums">
+              {num(series.total)}
+              {isMoney && series.totalCents !== undefined && (
+                <span class="text-gray-500"> · {money(series.totalCents)}</span>
+              )}
+            </div>
+          </div>
+
+          {series.peak === 0 ? (
+            <p class="text-sm text-gray-500">Nothing in the last {WINDOW_DAYS} days.</p>
+          ) : (
+            <svg viewBox={`0 0 ${series.buckets.length * 4} 40`} preserveAspectRatio="none" class="w-full h-24" role="img" aria-label={`${title}, ${WINDOW_DAYS} days`}>
+              {series.buckets.map((b, i) => (
+                <rect
+                  x={i * 4 + 0.5}
+                  y={40 - Math.max(b.count > 0 ? 1 : 0, (b.count / series.peak) * 40)}
+                  width="3"
+                  height={Math.max(b.count > 0 ? 1 : 0, (b.count / series.peak) * 40)}
+                  rx="0.5"
+                  fill={key === 'orders' ? '#0d9488' : key === 'subscribers' ? '#7c3aed' : '#2563eb'}
+                >
+                  <title>{b.day}: {b.count}</title>
+                </rect>
+              ))}
+            </svg>
+          )}
+
+          <div class="flex justify-between text-xs text-gray-400 mt-1">
+            <span>{series.buckets[0]?.day}</span>
+            <span>peak {num(series.peak)}/day</span>
+            <span>{series.buckets[series.buckets.length - 1]?.day}</span>
+          </div>
+
+          {series.truncated && (
+            <p class="text-xs text-amber-800 mt-2">
+              This store keeps only its most recent rows and is at that limit, so the earliest
+              days above may be short.
+            </p>
+          )}
+        </div>
+      ))}
+    </section>
+
+  </div>
+</AdminLayout>

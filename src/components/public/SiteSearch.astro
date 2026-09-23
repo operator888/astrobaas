@@ -1,0 +1,86 @@
+---
+/**
+ * The site's search box.
+ *
+ * ## Why this exists
+ *
+ * `GET /api/products?search=` and `/blog?q=` both work, and both are well
+ * ranked. Nothing in this CMS ever put a box on screen for either — so a shop
+ * built on AstroBaaS shipped with no way for a customer to search unless
+ * somebody remembered to build one. A live shop launched that way and its owner
+ * reported it as a bug.
+ *
+ * Two smaller absurdities came with it, and this component is why they end:
+ *
+ *  - `/blog?q=` is advertised to Google as the site's `SearchAction` (see
+ *    `webSiteNode` on the home page, whose comment insists on "only claim a
+ *    search endpoint that exists"). It does exist. A reader could reach it only
+ *    by typing a query string into the address bar.
+ *  - The 404 page shipped the repository's only search form, pointing at
+ *    `/shop` — a route this CMS does not serve. The page for people who took a
+ *    wrong turn offered them a second wrong turn.
+ *
+ * ## Why it lives in PublicLayout, not in a Header
+ *
+ * The `Header` slot is overridable, and overriding it replaces the whole
+ * masthead. The two shipped themes each rewrote their nav, and the
+ * `astrobaas theme new` scaffold generates a header that already drops the
+ * locale switcher — so a search box put inside a Header is a search box that
+ * disappears the moment anyone themes the site. Declarative manifest themes
+ * cannot ship components at all, so they could never gain one.
+ *
+ * Rendering it from the layout, beside the Header slot rather than inside it,
+ * means every theme — including ones written after this — inherits a working
+ * search box, and a theme that genuinely wants it gone can hide `.ab-site-search`.
+ *
+ * ## No JavaScript
+ *
+ * A plain GET form. It works with scripting off, the browser's own history and
+ * autofill apply, and — the practical part — a `<script>` block in an `.astro`
+ * file is a separate module scope from this frontmatter, which is the single
+ * most repeated bug in this codebase. There is nothing here to get that wrong.
+ */
+import { routeHref } from '../../lib/locale-links';
+
+interface Props {
+  locale?: string;
+  /** The current query, when this renders on the results page itself. */
+  value?: string;
+}
+const { locale, value = '' } = Astro.props as Props;
+
+// Locale-aware, like every other link in the chrome. A search box that dropped
+// a Greek reader onto the English blog would be worse than none.
+const action = routeHref('/blog', locale);
+---
+
+<div class="ab-site-search no-print border-b border-gray-200 bg-white">
+  <form
+    role="search"
+    method="get"
+    action={action}
+    class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2 flex items-center gap-2"
+  >
+    {/*
+      A real <label>, visually hidden rather than absent. A placeholder is not a
+      label: it vanishes on focus, screen readers treat it inconsistently, and
+      the owner's report named "an input a shopper has to guess takes Enter" as
+      the thing to avoid. The submit button below is the other half of that —
+      the form must never depend on the reader knowing to press Enter.
+    */}
+    <label for="ab-site-search-q" class="sr-only">Search this site</label>
+    <input
+      id="ab-site-search-q"
+      type="search"
+      name="q"
+      value={value}
+      placeholder="Search…"
+      autocomplete="off"
+      class="flex-1 min-w-0 px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+    />
+    <button
+      type="submit"
+      class="px-3 py-1.5 rounded-md bg-gray-900 text-white text-sm font-medium hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+    >Search</button>
+  </form>
+</div>

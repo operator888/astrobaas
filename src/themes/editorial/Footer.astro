@@ -1,0 +1,32 @@
+---
+/**
+ * Editorial theme — `Footer` override.
+ *
+ * A colophon, not a link farm: the masthead repeated small, the year, and the
+ * social links set as plain words. Matches the Header's centred register.
+ */
+import type { FooterProps } from '../../core/theme-slots';
+
+const { siteTitle = 'AstroBaaS', social = {} } = Astro.props as FooterProps;
+const year = new Date().getFullYear();
+const links = [
+  social.twitter && { href: social.twitter, label: 'Twitter' },
+  social.github && { href: social.github, label: 'GitHub' },
+  social.linkedin && { href: social.linkedin, label: 'LinkedIn' },
+].filter(Boolean) as { href: string; label: string }[];
+---
+
+<footer class="no-print editorial-footer border-t border-gray-900 mt-16">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10 text-center">
+    <p class="font-serif text-xl text-gray-900 mb-2">{siteTitle}</p>
+    <p class="text-xs uppercase tracking-widest text-gray-500">
+      © {year}
+      {links.map((l) => (
+        <>
+          <span aria-hidden="true"> · </span>
+          <a href={l.href} class="hover:text-gray-900">{l.label}</a>
+        </>
+      ))}
+    </p>
+  </div>
+</footer>

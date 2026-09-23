@@ -1,0 +1,53 @@
+---
+import PublicLayout from '../../layouts/PublicLayout.astro';
+import SubmissionForm from '../../components/public/SubmissionForm.astro';
+import { LocalDB } from '../../lib/localdb';
+import { getContentType, contentTypeAcceptsPublicWrites } from '../../core/content-types';
+import { ensurePluginsBootstrapped } from '../../plugins';
+
+/**
+ * A working form for any content type that asked for submissions.
+ *
+ * This is what makes the builder a form builder rather than a schema editor:
+ * an operator defines the fields in the admin and their form is live at
+ * `/forms/<type>`, with the honeypot, the anti-spam check and the field
+ * validation already wired. No theme edit, no component to copy, no
+ * JavaScript to write — which is the thing a WordPress site owner is actually
+ * comparing against when they weigh up Contact Form 7.
+ *
+ * A theme that wants the form somewhere else imports the same
+ * `SubmissionForm` component; this page is the zero-work path, not the only
+ * one.
+ *
+ * A type that has not opted in 404s — the same 404 an unknown name gets, so
+ * this page cannot be used to enumerate what a site stores.
+ */
+export const prerender = false;
+
+const type = String(Astro.params.type || '');
+
+await LocalDB.init();
+await ensurePluginsBootstrapped();
+
+const def = getContentType(type);
+if (!def || !contentTypeAcceptsPublicWrites(def)) {
+  // A real 404, never a 200 with an apology on it: a soft 404 is indexed,
+  // linked and reported as a working page.
+  return new Response('Not found', { status: 404 });
+}
+---
+
+<PublicLayout title={def.label} description={`Send a ${def.label.toLowerCase()}.`}>
+  <section class="py-16">
+    <div class="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8">
+      <SubmissionForm def={def} />
+    </div>
+  </section>
+  {/*
+    The anti-spam widget. It reads data-captcha="forms" on the form, fetches a
+    challenge, solves it and injects the hidden pow_token — WITHOUT this the
+    'forms' surface the builder advertises does nothing, because no page served
+    the solver. Same include the contact and login pages use.
+  */}
+  <script is:inline src="/captcha.js" defer></script>
+</PublicLayout>

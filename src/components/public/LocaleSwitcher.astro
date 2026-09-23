@@ -1,0 +1,84 @@
+---
+/**
+ * Language switcher.
+ *
+ * ## Plain links, deliberately
+ *
+ * No `<select>`, no JavaScript. Three reasons, in order of weight:
+ *
+ * 1. **It has to be crawlable.** The reason this component exists is that the
+ *    sitemap and hreflang tags advertise `/de/...` URLs that nothing on the site
+ *    linked to. A dropdown that navigates on `change` is invisible to a crawler,
+ *    so it would leave that gap exactly where it was.
+ * 2. The CSP forbids inline handlers, so a control needs a hashed script — cost
+ *    with no benefit here.
+ * 3. It works before hydration and without JS at all.
+ *
+ * ## It says which links are real translations
+ *
+ * `switcherOptions` already computes `translated` per entry — an audit found the
+ * flag being computed and then thrown away, so a reader was offered "Ελληνικά"
+ * with no way to tell whether it led to this article in Greek or to the Greek
+ * home page. Marking the second case is the whole reason the flag exists.
+ *
+ * ## Renders nothing on a single-language site
+ *
+ * `switcherOptions` returns `[]` unless the install actually has two or more
+ * locales configured, so this can be placed unconditionally in the header and
+ * costs the majority of installs no markup.
+ */
+import type { Post } from '../../core/models';
+import { switcherOptions, type LocaleOption } from '../../lib/locale-links';
+
+interface Props {
+  /**
+   * Entries the route already worked out, for a page that renders a record.
+   * When given, nothing here is recomputed — the route is the only place that
+   * knows which record is on screen and what its translations are.
+   */
+  options?: LocaleOption[];
+  /** Unprefixed path being read. Defaults to the request path with any prefix stripped. */
+  path?: string;
+  /** The record on screen, when this page is one. Omit on static routes. */
+  post?: Post | null;
+  all?: readonly Post[];
+  pathFor?: (p: Post) => string;
+  /** Extra classes for the wrapping nav, so themes can place it. */
+  class?: string;
+}
+
+const {
+  options: given, path, post = null, all, pathFor, class: extraClass = '',
+} = Astro.props as Props;
+
+const options = given ?? switcherOptions({
+  path: path ?? Astro.url.pathname,
+  current: Astro.locals.locale,
+  post,
+  all,
+  pathFor,
+});
+---
+
+{options.length > 1 && (
+  <nav class={`no-print flex items-center gap-2 text-xs ${extraClass}`} aria-label="Language">
+    {options.map((opt) => (
+      opt.current ? (
+        <span class="font-medium text-gray-900" aria-current="true" lang={opt.locale}>{opt.label}</span>
+      ) : (
+        <a
+          href={opt.href}
+          hreflang={opt.locale}
+          lang={opt.locale}
+          class="text-gray-500 hover:text-blue-600 transition-colors duration-200"
+          title={opt.translated ? undefined : `Not translated — goes to the ${opt.label} home page`}
+        >{opt.label}{!opt.translated && <span aria-hidden="true" class="ml-0.5 text-gray-400">*</span>}</a>
+      )
+    ))}
+    {options.some((o) => !o.translated) && (
+      <span class="text-gray-400">
+        <span aria-hidden="true">*</span> not translated
+      </span>
+    )}
+  </nav>
+)}

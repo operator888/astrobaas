@@ -1,0 +1,66 @@
+---
+/**
+ * Turning an embed facade into a real frame, once the reader asks (C-44).
+ *
+ * ## Why the frame is built here and never stored
+ *
+ * The stored placeholder carries a provider id and a video/place id, both
+ * validated by the sanitizer against that provider's own shape. The URL is
+ * assembled from the pair — here and in `renderEmbedFacades` — so nothing in
+ * content ever names a URL. That is what allows embeds at all on a site whose
+ * CSP has no third-party `script-src`: the worst an attacker with write access
+ * to post HTML can express is a different YouTube video.
+ *
+ * The check is repeated on this side even though the server already did it,
+ * because this markup also reaches a headless storefront that renders the HTML
+ * itself, where the server-side half is somebody else's code.
+ *
+ * ## Nothing is remembered
+ *
+ * A click loads that one frame. It does not write a cookie, it does not grant
+ * consent for anything else, and the next article starts closed again. An
+ * operator who wants "load all videos automatically for readers who accepted
+ * marketing cookies" has a consent banner for that; silently widening one
+ * click into a standing permission is the behaviour a facade exists to refuse.
+ */
+---
+
+<script>
+  import { getEmbedProvider, validEmbed } from '../../lib/embeds';
+
+  document.addEventListener('click', (event) => {
+    const button = (event.target as HTMLElement | null)?.closest('[data-embed-load]');
+    if (!button) return;
+    const facade = button.closest('.ab-embed-facade') as HTMLElement | null;
+    if (!facade) return;
+
+    const providerId = facade.dataset.embedProvider ?? '';
+    const id = facade.dataset.embedId ?? '';
+    if (!validEmbed(providerId, id)) return;
+    const provider = getEmbedProvider(providerId);
+    if (!provider) return;
+
+    const frame = document.createElement('iframe');
+    frame.src = provider.frameSrc(id);
+    frame.title = facade.dataset.embedTitle || `${provider.label} ${provider.kind}`;
+    frame.loading = 'lazy';
+    // NO `sandbox` attribute, deliberately. A cross-origin frame already has
+    // no access to this document — that is the same-origin policy, not
+    // something the sandbox adds. What a sandbox WOULD do here is take away the
+    // frame's access to its OWN origin unless `allow-same-origin` is granted
+    // back, and every one of these players needs that to work at all. So a
+    // sandbox would be a line that reads like hardening and only breaks video.
+    //
+    // `allow` is the opposite kind of list: it GRANTS the few permissions a
+    // player needs and, by naming them, withholds everything else — camera,
+    // microphone, geolocation, payment.
+    frame.setAttribute('allow', 'accelerometer; encrypted-media; gyroscope; picture-in-picture; fullscreen');
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.className = 'ab-embed-frame';
+
+    const box = facade.querySelector('.ab-embed-box');
+    if (!box) return;
+    box.replaceChildren(frame);
+    facade.classList.add('ab-embed-loaded');
+  });
+</script>

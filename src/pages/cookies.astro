@@ -1,0 +1,59 @@
+---
+/**
+ * `/cookies` — the public cookie declaration.
+ *
+ * A route rather than a CMS Page, deliberately. The legal templates create Pages
+ * whose content is a snapshot taken when the operator generated them; a cookie
+ * declaration has to be true on the day it is READ, not on the day it was
+ * written. Switching a provider off has to remove its rows without anyone
+ * remembering to go and edit a document.
+ *
+ * The privacy-policy template links here for exactly that reason.
+ */
+import PublicLayout from '../layouts/PublicLayout.astro';
+import CookieTable from '../components/public/CookieTable.astro';
+import { LocalDB } from '../lib/localdb';
+import { buildCookieDeclaration } from '../lib/cookie-declaration';
+import { routeHref } from '../lib/locale-links';
+
+await LocalDB.init();
+const settings = await LocalDB.getSettings();
+const declaration = buildCookieDeclaration(settings as { key: string; value: unknown }[]);
+---
+
+<PublicLayout
+  title="Cookies"
+  description="Every cookie this site sets, what it is for, and how long it lasts."
+  sidebarContext="page"
+>
+  <section class="py-16 bg-white">
+    <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+      <header>
+        <h1 class="text-3xl md:text-4xl font-bold text-gray-900">Cookies</h1>
+        <p class="mt-3 text-lg text-gray-600">
+          What this site stores in your browser, and why.
+        </p>
+      </header>
+
+      <CookieTable declaration={declaration} headingClass="text-xl font-semibold text-gray-900" />
+
+      <div class="border-t border-gray-200 pt-6 space-y-3 text-sm text-gray-600">
+        <p>
+          <strong class="text-gray-900">Changing your mind.</strong> Everything except the
+          “Necessary” row is optional and off until you allow it. You can change your answer at any
+          time from the cookie settings link in the footer; withdrawing is one click, the same as
+          giving.
+        </p>
+        <p>
+          <strong class="text-gray-900">Declining is not a downgrade.</strong> Nothing on this site
+          is withheld from you for saying no. The necessary cookies are the ones that make signing
+          in and submitting a form work at all — they carry no identity beyond this browser and
+          this site.
+        </p>
+        <p>
+          See also the <a href={routeHref('/legal', Astro.locals.locale)} class="text-blue-600 hover:underline">privacy policy</a>.
+        </p>
+      </div>
+    </div>
+  </section>
+</PublicLayout>

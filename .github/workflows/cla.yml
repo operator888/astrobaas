@@ -1,0 +1,163 @@
+name: CLA
+
+# Gate every pull request on a signed Contributor License Agreement.
+#
+# WHY THIS IS A GATE AND NOT A REMINDER
+#
+# AstroBaaS is GPL-3.0 with a planned paid module (see LICENSING.md). That model
+# works only while one person holds the copyright to the core. A single merged
+# contribution without a signed CLA ends the ability to dual-license, and it is
+# effectively impossible to unwind later — you would have to find the
+# contributor years afterwards and ask nicely, or rip the code out.
+#
+# So this job FAILS CLOSED. If it is misconfigured it blocks merges rather than
+# waving them through, because a blocked PR is an afternoon of annoyance and an
+# un-relicensable core is permanent.
+#
+# It does NOT gate people who already hold the copyright — see the `if:` on the
+# job. Until the setup below is done, that is the difference between "red on
+# every pull request the maintainer opens" and "red the day an outside
+# contribution arrives", and only the second one is a signal.
+#
+# ONE-TIME SETUP REQUIRED BEFORE THE REPOSITORY GOES PUBLIC
+#
+#   1. Create a PRIVATE repository to hold signatures, e.g.
+#      operator888/cla-signatures, with one empty commit.
+#   2. Create a classic Personal Access Token with `repo` scope that can write
+#      to it.
+#   3. Add that token to THIS repository as the secret PERSONAL_ACCESS_TOKEN
+#      (Settings -> Secrets and variables -> Actions).
+#
+# Signatures live in the separate repo on purpose: a signature is not a code
+# change and must never show up in this repository's history or diffs.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+# `pull_request_target` runs with a token that can write to this repository, so
+# it gets the narrowest permission set that still lets the bot comment on a PR
+# and record a signature. It deliberately never checks out PR code.
+permissions:
+  actions: write
+  contents: read
+  pull-requests: write
+  statuses: write
+
+# A second push while the bot is mid-comment produces duplicate comments.
+concurrency:
+  group: cla-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  cla:
+    name: Contributor License Agreement
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Two conditions, and the first one is a licensing statement rather than a
+    # convenience.
+    #
+    # 1. SKIP FOR EXISTING COPYRIGHT HOLDERS.
+    #
+    #    A CLA exists to obtain rights FROM SOMEBODY ELSE. The person who
+    #    already holds the copyright cannot grant rights to themselves, so
+    #    gating their own pull requests asks for a signature that would mean
+    #    nothing — and, while the signature store is unconfigured, fails every
+    #    one of them.
+    #
+    #    That matters beyond the annoyance: a check that is red on every PR is a
+    #    check people stop reading, and this one has exactly one job to do
+    #    correctly, once, on the day an outside contribution arrives.
+    #
+    #    `author_association` cannot be used for this. The repository lives on
+    #    a PERSONAL account, so the owner shows as `OWNER` today — but anyone
+    #    later given write access shows as `COLLABORATOR`, and if the project
+    #    ever moves to an organisation the owner becomes `MEMBER`, the same
+    #    association a future colleague would have, whose copyright is exactly
+    #    what the CLA is for. None of those says who holds the copyright. So
+    #    the list is explicit logins, and adding one to it is a LICENSING DECISION: it
+    #    asserts that person already holds copyright in this repository. It is
+    #    not the place to unblock someone in a hurry.
+    #
+    #    On a `pull_request_target` event `github.event.issue` is null, and on
+    #    an `issue_comment` event `github.event.pull_request` is null; an
+    #    expression on a null object yields '', so each line is inert for the
+    #    event it does not concern. Both read the PR AUTHOR, never the commenter
+    #    — otherwise anyone could sign on someone else's behalf by commenting.
+    #
+    # 2. Run on the signing comment or on pull request events — not on every
+    #    stray comment in an issue thread.
+    if: >-
+      github.event.pull_request.user.login != 'operator888' &&
+      github.event.issue.user.login != 'operator888' &&
+      (
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request != null &&
+         (contains(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA') ||
+          github.event.comment.body == 'recheck')) ||
+        github.event_name == 'pull_request_target'
+      )
+    steps:
+      # The `secrets` context is NOT available in a step-level `if:`, so the
+      # check has to happen inside the step, via env. Written as a guard rather
+      # than letting the action fail on its own, because its own failure mode is
+      # an opaque 404 from the signature repository.
+      - name: Fail legibly if the signature store is not configured
+        env:
+          PAT: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$PAT" ]; then
+            echo "::error title=CLA gate not configured::PERSONAL_ACCESS_TOKEN is not set."
+            echo ""
+            echo "This job intentionally fails closed. See the setup comment at"
+            echo "the top of .github/workflows/cla.yml — it needs a private"
+            echo "signature repository and a PAT that can write to it."
+            exit 1
+          fi
+          echo "Signature store configured."
+
+      # Pinned to the commit SHA of v2.6.1, not the tag. A tag can be moved; for
+      # a job that decides whether code may be merged, that matters.
+      - name: Check or record signature
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        with:
+          # The exact sentence a contributor comments to sign. Must match the
+          # phrase quoted in CLA.md and in the bot comment below.
+          custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
+          # Where the signature record lives (private, separate repository).
+          # The input says "organization" but takes any owner — here the
+          # personal account the project lives on.
+          remote-organization-name: operator888
+          remote-repository-name: cla-signatures
+          path-to-signatures: signatures/v1.json
+          branch: main
+          # What the contributor is agreeing to.
+          path-to-document: https://github.com/operator888/astrobaas/blob/main/CLA.md
+          custom-notsigned-prcomment: |
+            Thanks for the pull request.
+
+            Before it can be merged, please read the
+            [Contributor License Agreement](https://github.com/operator888/astrobaas/blob/main/CLA.md)
+            and sign it by posting **exactly** this as a new comment on this PR:
+
+            > I have read the CLA Document and I hereby sign the CLA
+
+            You sign once. Future pull requests are not gated again.
+
+            **You keep your copyright.** The CLA grants the maintainer the right
+            to also license your contribution commercially, which is what funds
+            the project; it takes nothing away from you. The
+            ["Why this exists"](https://github.com/operator888/astrobaas/blob/main/CLA.md#why-this-exists)
+            section explains the trade honestly, including the case for
+            refusing.
+          custom-allsigned-prcomment: |
+            All contributors have signed the CLA. Thank you.
+          # Bots have no copyright to grant, and the maintainer already holds
+          # it. Kept in step with the job-level `if:` above so the two cannot
+          # disagree about who needs to sign.
+          allowlist: operator888,dependabot[bot],renovate[bot],github-actions[bot]

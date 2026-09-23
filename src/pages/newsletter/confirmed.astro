@@ -1,0 +1,46 @@
+---
+import PublicLayout from '../../layouts/PublicLayout.astro';
+import { routeHref } from '../../lib/locale-links';
+
+/**
+ * Where a confirmation link lands.
+ *
+ * Deliberately links NOWHERE off-site. The URL the visitor arrived from carries
+ * a signed token containing their email address, and any outbound link could
+ * leak it in a Referer header.
+ */
+const ok = Astro.url.searchParams.get('ok') === '1';
+// The leave token the confirm route just minted for this address. Rendered as a
+// link rather than described in prose, because "you can unsubscribe at any
+// time" with no link is the promise that made this page dishonest.
+const leaveToken = Astro.url.searchParams.get('u');
+const leaveHref = ok && leaveToken && /^[A-Za-z0-9._-]{1,600}$/.test(leaveToken)
+  ? `/api/newsletter/unsubscribe?token=${encodeURIComponent(leaveToken)}`
+  : null;
+// A link that did not work is not an error page: nothing broke, and a 404 or a
+// 500 would be a lie. 200 with an honest explanation.
+const title = ok ? 'Subscription confirmed' : 'That link did not work';
+---
+
+<PublicLayout title={title} description="Newsletter subscription">
+  <meta slot="head" name="robots" content="noindex, nofollow" />
+  <section class="max-w-2xl mx-auto px-4 py-20 text-center">
+    <h1 class="text-3xl font-bold text-gray-900 mb-4">{title}</h1>
+    {ok ? (
+      <p class="text-gray-600">
+        You are on the list.{leaveHref && (
+          <> You can <a href={leaveHref} class="text-blue-600 hover:underline">leave again right now</a>,
+          and every email we send carries the same link.</>
+        )}
+      </p>
+    ) : (
+      <p class="text-gray-600">
+        Confirmation links expire after seven days. Nothing has been saved &mdash;
+        subscribe again from any page to get a fresh link.
+      </p>
+    )}
+    <p class="mt-8">
+      <a href={routeHref('/', Astro.locals.locale)} class="text-blue-600 hover:underline">Back to the site</a>
+    </p>
+  </section>
+</PublicLayout>

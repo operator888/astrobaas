@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#
+# Your own deployment's values, kept OUT of the repository.
+#
+#   cp deploy.local.sh.example deploy.local.sh   # deploy.local.sh is gitignored
+#   chmod +x deploy.local.sh
+#   ./deploy.local.sh
+#
+# It sets the two values deploy.sh asks for and then runs deploy.sh, so every
+# fix in deploy.sh and deploy/remote-activate.sh applies to your deploy too.
+# Do NOT copy deploy.sh itself and edit the values into it: a fork of the
+# script stops receiving those fixes, and the real host name ends up in a file
+# somebody eventually commits.
+#
+set -euo pipefail
+cd "$(dirname "$0")"
+
+# The ssh alias (~/.ssh/config) or user@host of the server.
+export DEPLOY_SSH_HOST="${DEPLOY_SSH_HOST:-my-server}"
+
+# The site slug: /var/www/<slug> on the server, and the systemd unit's name.
+export DEPLOY_SLUG="${DEPLOY_SLUG:-cms-example-com}"
+
+# Optional — deploy.sh reads the port from the unit, then shared/.env, then this.
+# export DEPLOY_PORT=3002
+
+exec ./deploy.sh "$@"

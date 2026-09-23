@@ -1,0 +1,1601 @@
+---
+import { summarizeBrands, brandKey } from '../../lib/commerce/brand';
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { LocalDB } from '../../lib/localdb';
+import { foldForSearch } from '../../lib/text-search';
+import { canOpenAdminPage } from '../../lib/admin-access';
+import { formatMoney } from '../../lib/money-format';
+import RichTextEditor from '../../components/admin/RichTextEditor.astro';
+import { mainImage } from '../../lib/product-fields';
+import { getProductFieldDefs } from '../../lib/commerce-service';
+
+await LocalDB.init();
+const user = Astro.locals.user;
+// One rule, asked — not re-implemented. A hand-written role test here is
+// how the page, the middleware and the sidebar drift apart.
+if (!canOpenAdminPage('/admin/products', user?.role)) {
+  return Astro.redirect('/admin');
+}
+
+const products = await LocalDB.getProducts();
+const brands = await LocalDB.getBrands();
+const categories = await LocalDB.getProductCategories();
+/**
+ * Brands actually in use, not rows in the brands table.
+ *
+ * The summary counted `brands.length` and printed "0 brands" on a catalogue of
+ * 436 products whose Brand column was populated and whose storefront rendered
+ * brand filters. Both numbers are "true": `brand` on a product is a free string,
+ * and an import that never created brand RECORDS leaves that table empty. But a
+ * heading that says zero next to a visibly populated column is read as a bug in
+ * the shop, not as a subtlety about two tables.
+ *
+ * So count what the operator can see. The union covers the case where some
+ * brands are curated records and others arrived only on products.
+ */
+/*
+ * Counted by IDENTITY, not by distinct string.
+ *
+ * The union above was a Set of RAW values, so `Rayban` and `RAYBAN` counted as
+ * two makers and a real shop's heading read "72 brands" over 62. Grouping by
+ * `brandKey` makes the heading agree with what /api/brands now serves and with
+ * what `?brand=` returns — three numbers that had no reason to differ and did.
+ */
+const brandSummaries = summarizeBrands(products);
+const brandNames = (() => {
+  const byKey = new Map<string, string>();
+  // Brands in use first: their spelling is what the catalogue actually says.
+  for (const b of brandSummaries) byKey.set(b.key, b.name);
+  // Curated records fill in makers with no products yet — a brand added ahead
+  // of its stock should still be offerable in the form.
+  for (const b of brands) {
+    const k = brandKey(b.name);
+    if (k && !byKey.has(k)) byKey.set(k, b.name);
+  }
+  return [...byKey.values()].sort((a, b) => a.localeCompare(b));
+})();
+const brandCount = brandNames.length;
+/*
+ * Spellings worth an operator's attention: a maker written more than one way.
+ *
+ * Shown because the screen that HIDES this is the screen that let 72 spellings
+ * accumulate unnoticed. The filter and the listing already treat them as one
+ * maker, so this is not a bug report — it is the tidy-up list.
+ */
+const brandVariants = brandSummaries
+  .filter((b) => b.spellings.length > 1)
+  .sort((a, b) => b.spellings.length - a.spellings.length || b.count - a.count);
+const active = products.filter((p) => p.status === 'active').length;
+const outOfStock = products.filter((p) => !p.in_stock).length;
+const onSale = products.filter((p) => p.on_sale).length;
+// The hardcoded el-GR here was one of five, and disagreed with the sale
+// email's formatMoney — the screen and the receipt stated the same total two
+// ways. The locale now follows the staff member reading it.
+// The merchant's declared fields. Loaded server-side so the form renders them
+// on first paint; the <script> below reads the same list back out of the DOM,
+// because frontmatter and the script are separate module scopes.
+const productFieldDefs = await getProductFieldDefs();
+const adminLocale = Astro.locals.uiLocale ?? undefined;
+const money = (cents: number) => formatMoney(cents, { locale: adminLocale });
+// Product images may be stored as paths served by the storefront (e.g.
+// /media/uploads/...). MEDIA_PUBLIC_BASE tells the admin where those resolve.
+const mediaBase = (import.meta.env.MEDIA_PUBLIC_BASE ?? process.env.MEDIA_PUBLIC_BASE ?? '').replace(/\/$/, '');
+const imgSrc = (src: string) => (/^https?:\/\//.test(src) ? src : mediaBase + src);
+
+/**
+ * Categories, flattened into display order with a depth for indentation.
+ *
+ * The form needs a hierarchy, not twenty loose slugs: on these shops the tree
+ * is Αντρικά / Γυναικεία / Παιδικά with Ηλίου / Οράσεως beneath, and a flat
+ * list gives a manager no way to tell a parent from a child.
+ *
+ * Two things this must survive, because product categories are user data:
+ *
+ *  - **A cycle.** `parent_slug` is a free-form string an operator can point
+ *    anywhere, including at the category itself. Walking it without a `seen`
+ *    set hangs the request that renders this page.
+ *  - **An orphan.** A `parent_slug` naming a category that was since deleted
+ *    means that branch is never reached from the root, and the category would
+ *    silently vanish from the form — leaving a product uncategorisable with no
+ *    error. Anything unvisited is appended at the top level instead.
+ */
+const categoryTree: { cat: (typeof categories)[number]; depth: number }[] = (() => {
+  const byParent = new Map<string, typeof categories>();
+  for (const c of categories) {
+    const key = c.parent_slug || '';
+    const list = byParent.get(key) ?? [];
+    list.push(c);
+    byParent.set(key, list);
+  }
+  for (const list of byParent.values()) {
+    list.sort((a, b) =>
+      (a.position ?? Number.MAX_SAFE_INTEGER) - (b.position ?? Number.MAX_SAFE_INTEGER) ||
+      a.name.localeCompare(b.name, 'el'));
+  }
+  const out: { cat: (typeof categories)[number]; depth: number }[] = [];
+  const seen = new Set<string>();
+  const walk = (parent: string, depth: number) => {
+    // Depth is bounded as well as cycle-guarded: a chain 50 deep is data
+    // corruption, and indenting it would wreck the layout regardless.
+    if (depth > 6) return;
+    for (const c of byParent.get(parent) ?? []) {
+      if (seen.has(c.slug)) continue;
+      seen.add(c.slug);
+      out.push({ cat: c, depth });
+      walk(c.slug, depth + 1);
+    }
+  };
+  walk('', 0);
+  for (const c of categories) if (!seen.has(c.slug)) out.push({ cat: c, depth: 0 });
+  return out;
+})();
+---
+
+<AdminLayout title="Products">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="mb-8 flex items-start justify-between gap-4 flex-wrap">
+      <div>
+        <h1 class="text-3xl font-bold text-gray-900">Products</h1>
+        <p class="text-gray-600 mt-2">Catalog: {products.length} products · {brandCount} brands · {categories.length} categories</p>
+      </div>
+      <button id="new-product" class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">+ New product</button>
+    </div>
+
+    {brandVariants.length > 0 && (
+      <details class="mb-8 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm">
+        <summary class="cursor-pointer font-medium text-amber-900">
+          {brandVariants.length === 1
+            ? '1 brand is spelled more than one way'
+            : `${brandVariants.length} brands are spelled more than one way`}
+        </summary>
+        <p class="mt-2 text-amber-800">
+          Shoppers are unaffected — filtering and the brands menu already treat these
+          as one maker. This is the tidy-up list: edit a product to change its spelling,
+          and pick from the Brand box's suggestions rather than typing.
+        </p>
+        <ul class="mt-3 space-y-1 text-amber-900">
+          {brandVariants.map((b) => (
+            <li>
+              <strong>{b.name}</strong>
+              <span class="text-amber-700"> — {b.count} products, written as </span>
+              {b.spellings.map((sp, i) => (
+                <span>{i > 0 ? ', ' : ''}<code class="bg-amber-100 px-1 rounded">{sp.name}</code> ({sp.count})</span>
+              ))}
+            </li>
+          ))}
+        </ul>
+      </details>
+    )}
+
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-6 mb-8">
+      <div class="bg-white rounded-lg border border-gray-200 p-6">
+        <div class="text-2xl font-bold text-gray-900">{products.length}</div>
+        <div class="text-sm text-gray-600">Total</div>
+      </div>
+      <div class="bg-white rounded-lg border border-gray-200 p-6">
+        <div class="text-2xl font-bold text-green-600">{active}</div>
+        <div class="text-sm text-gray-600">Active</div>
+      </div>
+      <div class="bg-white rounded-lg border border-gray-200 p-6">
+        <div class="text-2xl font-bold text-amber-600">{onSale}</div>
+        <div class="text-sm text-gray-600">On sale</div>
+      </div>
+      <div class="bg-white rounded-lg border border-gray-200 p-6">
+        <div class="text-2xl font-bold text-red-600">{outOfStock}</div>
+        <div class="text-sm text-gray-600">Out of stock</div>
+      </div>
+    </div>
+
+    <div class="mb-4">
+      <input id="filter" type="search" placeholder="Filter by name, SKU or brand…"
+        class="w-full md:w-96 px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+    </div>
+
+    <div class="bg-white rounded-lg border border-gray-200 overflow-x-auto">
+      <table class="min-w-full divide-y divide-gray-200 text-sm">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="px-4 py-3 text-left font-medium text-gray-500"></th>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">Name</th>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">Brand</th>
+            <th class="px-4 py-3 text-right font-medium text-gray-500">Price</th>
+            <th class="px-4 py-3 text-right font-medium text-gray-500">Stock</th>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">Status</th>
+            <th class="px-4 py-3 sticky right-0 bg-gray-50 border-l border-gray-200"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100" id="rows">
+          {products.map((p) => {
+          const thumb = mainImage(p.images);
+          return (
+            <tr class="product-row group hover:bg-gray-50" data-name={foldForSearch(`${p.name} ${p.sku ?? ''} ${p.brand ?? ''} ${p.gtin ?? ''} ${(p.tags ?? []).join(' ')}`)}>
+              {/*
+                The cell has to be wider than the padding plus the image, or the
+                image loses.
+
+                This was `w-14` with `px-4`: a 56px cell minus 32px of
+                horizontal padding leaves 24px of content box, so a `w-10` (40px)
+                thumbnail rendered at 24px — or narrower still on a squeezed
+                table — and every product picture became an unrecognisable
+                sliver. Measured in the browser rather than reasoned about: the
+                parent is `display: table-cell`, so `shrink-0` and every other
+                flex remedy does nothing here. It is arithmetic, not flexbox.
+
+                `w-20` (80px) leaves 48px, which fits 40px with room to spare.
+                `min-w-10` keeps the image at its intended size if the column is
+                ever squeezed again.
+              */}
+              <td class="px-4 py-2 w-20">
+                {/*
+                  mainImage, not images[0]. The gallery may lead with a video,
+                  and this cell is an <img> — pointing it at an mp4 produces a
+                  broken-image icon in the product list, which is the first
+                  screen anyone opens.
+                */}
+                {thumb && <img src={imgSrc(thumb.src)} alt="" class="h-10 w-10 min-w-10 object-contain rounded bg-gray-100" loading="lazy" />}
+              </td>
+              <td class="px-4 py-2">
+                <div class="font-medium text-gray-900">{p.name}</div>
+                <div class="text-xs text-gray-400">{p.slug}</div>
+              </td>
+              <td class="px-4 py-2 text-gray-600">{p.brand}</td>
+              <td class="px-4 py-2 text-right">
+                {p.on_sale && p.sale_price_cents != null ? (
+                  <span><s class="text-gray-400">{money(p.regular_price_cents ?? p.price_cents)}</s> <b>{money(p.price_cents)}</b></span>
+                ) : (
+                  money(p.price_cents)
+                )}
+              </td>
+              <td class="px-4 py-2 text-right">{p.stock ?? '—'}</td>
+              {/* One flex row, and each badge `whitespace-nowrap`: without it "in
+                  stock" broke across two lines inside its own pill and the row
+                  grew to three lines of chrome around one word. */}
+              <td class="px-4 py-2">
+                <div class="flex flex-wrap items-center gap-1">
+                  <span class={`px-2 py-0.5 rounded-full text-xs whitespace-nowrap ${p.in_stock ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-700'}`}>
+                    {p.in_stock ? 'in stock' : 'out'}
+                  </span>
+                  <span class="px-2 py-0.5 rounded-full text-xs whitespace-nowrap bg-gray-100 text-gray-600">{p.status}</span>
+                </div>
+              </td>
+              {/*
+                Pinned to the right edge with `sticky right-0`.
+
+                The table scrolls horizontally on a wide catalogue, and Delete
+                sat past the fold — on macOS, where the scrollbar is hidden
+                until you scroll, it simply looked cut off at "Delet". A
+                destructive action that you have to go looking for is the wrong
+                one to hide, so the column now travels with the viewport.
+
+                `bg-white` + the group-hover tint because a sticky cell paints
+                over what it scrolls across: without its own background the row
+                beneath shows through the text.
+              */}
+              <td class="px-4 py-2 text-right whitespace-nowrap sticky right-0 bg-white group-hover:bg-gray-50 border-l border-gray-100">
+                <button class="edit px-2.5 py-1 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-100 hover:border-gray-400" data-id={p.id}>Edit</button>
+                <button class="del ml-2 px-2.5 py-1 rounded-md border border-red-300 text-red-700 hover:bg-red-50 hover:border-red-400" data-id={p.id}>Delete</button>
+              </td>
+            </tr>
+          );})}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Edit / create dialog -->
+  {/*
+    `m-auto` is load-bearing. A native <dialog> centres itself through
+    `margin: auto` in the UA stylesheet, and Tailwind's preflight resets margin
+    to 0 on every element — so the dialog rendered as a 768px slab flush against
+    the top-left corner of a 2226px screen. Restoring the margin is the fix;
+    `max-h`/`overflow` keep a long form scrolling inside the dialog rather than
+    scrolling the page behind it.
+  */}
+  <dialog id="product-dialog" class="m-auto max-h-[90vh] rounded-xl p-0 w-full max-w-3xl backdrop:bg-black/40">
+    <form id="product-form" class="flex flex-col max-h-[85vh]">
+      <div class="px-6 pt-6">
+        <h2 class="text-lg font-semibold text-gray-900" id="dialog-title">Edit product</h2>
+        <input type="hidden" name="id" />
+        <nav class="mt-4 flex gap-1 border-b border-gray-200 overflow-x-auto" id="tab-bar">
+          <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-blue-600 text-blue-700 font-medium" data-tab="general">General</button>
+          <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="images">Images</button>
+          <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="variants">Variants</button>
+          <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="inventory">Inventory</button>
+          <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="shipping">Shipping</button>
+          <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="safety">Safety</button>
+          <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="advanced">Advanced</button>
+          {/* Only when the merchant declared fields. A permanently empty tab
+              teaches people the product has an unfinished feature in it. */}
+          {productFieldDefs.length > 0 && (
+            <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="custom">Details</button>
+          )}
+        </nav>
+      </div>
+
+      <div class="px-6 py-5 overflow-y-auto flex-1 space-y-4">
+        <!-- ---------------- General ---------------- -->
+        <section class="tab-panel grid grid-cols-2 gap-4" data-panel="general">
+          <label class="col-span-2 text-sm">Name
+            <input name="name" required class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="text-sm">SKU
+            <input name="sku" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="text-sm">GTIN / EAN / UPC
+            <input name="gtin" inputmode="numeric" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="text-sm">Brand
+            <input name="brand" list="brand-list" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+            {/*
+              Fed from brands IN USE, not from the brands table.
+
+              This datalist existed all along — the combobox was already here —
+              but it was built from `brands`, a table nothing populates. On a
+              shop that never hand-created Brand records it rendered zero
+              options, so the control degraded to a bare text input and every
+              operator typed the maker's name from memory. That is how one shop
+              reached 72 spellings for 62 brands WITH an autocomplete on screen.
+            */}
+            <datalist id="brand-list">{brandNames.map((n) => <option value={n} />)}</datalist>
+          </label>
+          <label class="text-sm">Status
+            <select name="status" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg">
+              <option value="active">active</option>
+              <option value="draft">draft</option>
+              <option value="archived">archived</option>
+            </select>
+          </label>
+          {/*
+            Categories. The data was already loaded on this page and used only
+            for a count in the subtitle — there was no control at all, so a
+            manager could not file a new product anywhere. The storefront builds
+            its entire menu from this tree, so an uncategorised product is
+            invisible to anyone browsing Αντρικά / Γυναικεία / Παιδικά / Ηλίου /
+            Οράσεως, however correct the rest of its record is.
+
+            Checkboxes rather than a <select multiple>: multi-select needs
+            ctrl/cmd-click to add a second value and silently replaces the
+            selection otherwise, which is precisely the "I saved and it lost my
+            other category" failure this is meant to end.
+          */}
+          <fieldset class="col-span-2 text-sm">
+            <legend class="text-gray-700">Categories</legend>
+            <div id="cat-list" class="mt-1 max-h-44 overflow-y-auto border border-gray-300 rounded-lg p-2 space-y-0.5">
+              {categoryTree.length === 0 ? (
+                <p class="text-gray-500 text-xs px-1 py-2">
+                  No product categories yet — create them under
+                  <a href="/admin/categories" class="text-blue-600 hover:underline"> Categories</a> first.
+                </p>
+              ) : categoryTree.map(({ cat, depth }) => (
+                <label
+                  class="flex items-center gap-2 py-0.5 px-1 rounded hover:bg-gray-50 cursor-pointer"
+                  style={`margin-left:${depth * 1.25}rem`}
+                >
+                  <input type="checkbox" name="categories" value={cat.slug} class="rounded border-gray-300" />
+                  <span>{cat.name}</span>
+                  <span class="text-gray-400 text-xs">{cat.slug}</span>
+                </label>
+              ))}
+            </div>
+            <p class="mt-1 text-xs text-gray-500">
+              A product with no category is reachable at /shop but appears in no menu category.
+            </p>
+          </fieldset>
+          {/*
+            `type="text"` with `inputmode="decimal"`, NOT `type="number"`.
+
+            Staff here type "159,00". A number input cannot represent that: the
+            browser sanitises an unparseable value to the empty string, so
+            `.value` is "" while the field visibly reads 159,00. For the REGULAR
+            price `required` then rejects the form with "Please fill out this
+            field" pointing at a field that is plainly filled in. For the SALE
+            price — which is optional, so nothing validates it — the value just
+            vanished: the sale was silently not saved.
+
+            inputmode="decimal" keeps the numeric keypad on a phone; the format
+            is enforced by parseMoney() below, which accepts a comma or a dot
+            and REFUSES anything ambiguous rather than guessing at a price.
+          */}
+          <label class="text-sm">Regular price (€)
+            <input name="price" type="text" inputmode="decimal" autocomplete="off" required
+                   placeholder="159,00" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+            <span class="text-xs text-gray-500">Comma or dot — 159,00 and 159.00 both work.</span>
+          </label>
+          <label class="text-sm">Sale price (€, empty = none)
+            <input name="sale_price" type="text" inputmode="decimal" autocomplete="off"
+                   placeholder="129,00" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+            <span class="text-xs text-gray-500">Leave empty for no sale.</span>
+          </label>
+          <label class="text-sm">Sale starts
+            <input name="sale_starts_at" type="date" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="text-sm">Sale ends
+            <input name="sale_ends_at" type="date" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="text-sm">Tax status
+            <select name="tax_status" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg">
+              <option value="taxable">Taxable</option>
+              <option value="shipping">Shipping only</option>
+              <option value="none">None</option>
+            </select>
+          </label>
+          <label class="text-sm">Tax class
+            <input name="tax_class" placeholder="standard" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="col-span-2 text-sm">Short description
+            <textarea name="short_description" rows="3" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg"></textarea>
+          </label>
+          <div class="col-span-2 text-sm">
+            <span class="block mb-1">Full description</span>
+            {/* The same editor the posts use. It brings the EMBED button, which
+                is the only way to put a video on a product without hand-writing
+                the placeholder markup — the media library stores images, not
+                video, so a product video is a YouTube or Vimeo facade. */}
+            <RichTextEditor name="description" id="product-description" />
+            <span class="text-xs text-gray-400">
+              HTML is sanitized server-side. Use the embed button for a YouTube or Vimeo
+              video — nothing is requested from them until a visitor clicks it.
+            </span>
+          </div>
+        </section>
+
+        <!-- ---------------- Product safety (GPSR) ---------------- -->
+        <section class="tab-panel hidden" data-panel="safety">
+          <p class="text-sm text-gray-500 mb-3">
+            Regulation (EU) 2023/988 requires an online listing to identify who made the
+            product, name someone inside the EU responsible for it when the maker is not,
+            let it be traced for a recall, and carry its warnings. These fields are shown
+            to the buyer before they purchase.
+          </p>
+          <div class="grid grid-cols-2 gap-4">
+            <label class="text-sm">Manufacturer
+              <input name="gpsr_manufacturer" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+              <span class="text-xs text-gray-400">Name and contact of the maker.</span>
+            </label>
+            <label class="text-sm">EU responsible person
+              <input name="gpsr_eu_responsible" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+              <span class="text-xs text-gray-400">Required when the manufacturer is outside the EU.</span>
+            </label>
+            <label class="col-span-2 text-sm">Traceability identifier
+              <input name="gpsr_identifier" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+              <span class="text-xs text-gray-400">Type, batch or serial — whatever identifies this unit in a recall.</span>
+            </label>
+            <label class="col-span-2 text-sm">Warnings and safety information
+              <textarea name="gpsr_warnings" rows="3" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg"></textarea>
+            </label>
+            <label class="col-span-2 text-sm">Care and use instructions
+              <textarea name="gpsr_instructions" rows="3" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg"></textarea>
+            </label>
+          </div>
+        </section>
+
+        <!-- ---------------- Images ---------------- -->
+        <section class="tab-panel hidden" data-panel="images">
+          <p class="text-sm text-gray-500 mb-3">
+            The first <strong>photo</strong> is the main image — it is what listings and
+            search results show. Use “Set as main” to promote another one.
+            MP4 and WebM video can go in the gallery too; a video is never the main
+            image, because a listing row shows a still. Each clip gets a
+            <strong>poster</strong> — the frame shown before it plays. It uses the
+            first photo unless you pick another one.
+          </p>
+          {/*
+            Upload from HERE.
+
+            There was no file input on this form at all, so attaching a photo
+            meant leaving the half-filled product, going to Media, uploading,
+            coming back and browsing. A shop owner reasonably read the "Add"
+            button beside a URL box as "add a picture" and reported it as
+            broken — it was not broken, it was the wrong control for the job
+            everyone actually has.
+          */}
+          <div class="flex flex-wrap items-center gap-2 mb-3">
+            <label class="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium cursor-pointer">
+              <span id="image-upload-label">Upload media</span>
+              {/*
+                Video is named explicitly rather than left to `video/*`.
+                `video/*` opens the file dialog on .mov and .mkv, which the
+                uploader then refuses — the operator picks a file, waits for it
+                to upload, and is told no. Listing the two that work means the
+                dialog never offers a file that cannot land.
+              */}
+              <input id="image-upload" type="file" accept="image/*,video/mp4,video/webm" multiple class="hidden" />
+            </label>
+            <button type="button" id="image-browse" class="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium">From library</button>
+            <span id="image-upload-status" class="text-sm text-gray-500"></span>
+          </div>
+          <div class="flex gap-2 mb-4">
+            <input id="image-url" type="url" placeholder="https://… or /uploads/2026/08/photo.jpg (or .mp4)"
+              class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+            <button type="button" id="image-add" class="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium">Add URL</button>
+          </div>
+          {/*
+            The picker renders HERE rather than through prompt().
+            A native prompt() is modal to the whole tab: when the media fetch
+            failed — which it did for every `manager`, because the read guard
+            omitted the role — the page froze behind a dialog listing nothing.
+            A blocking dialog in a failure path is the worst place for one.
+          */}
+          <div id="image-picker" class="hidden mb-4 border border-gray-200 rounded-lg p-3">
+            <div class="flex items-center justify-between gap-3 mb-2">
+              {/* A search box, because a shop with hundreds of photos cannot
+                  find one by scrolling a grid of thumbnails. /api/media/get
+                  returns the whole library with no query parameters, so the
+                  filter is applied here over everything it returned — which
+                  also means it searches images that are not currently drawn. */}
+              <input id="image-picker-search" type="search" placeholder="Search by file name…"
+                class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+              <span id="image-picker-count" class="text-xs text-gray-500 whitespace-nowrap"></span>
+              <button type="button" id="image-picker-close" class="text-sm text-gray-500 hover:text-gray-700">Close</button>
+            </div>
+            <p id="image-picker-msg" class="hidden text-sm rounded-lg px-3 py-2 mb-2"></p>
+            {/* Was max-h-56 — about two rows — which is why this read as "it
+                does not scroll". Taller, and resize-able by the operator. */}
+            <div id="image-picker-grid"
+              class="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-8 gap-2 max-h-[28rem] overflow-y-auto overscroll-contain resize-y"></div>
+          </div>
+          <div id="image-grid" class="grid grid-cols-2 sm:grid-cols-4 gap-3"></div>
+          <p id="image-empty" class="text-sm text-gray-400">No images yet.</p>
+        </section>
+
+        <!-- ---------------- Variants ---------------- -->
+        <section class="tab-panel hidden" data-panel="variants">
+          <p class="text-sm text-gray-500 mb-3">
+            One row per buyable combination — a frame in Black/52 and Tortoise/52 is two
+            variants, each with <strong>its own stock</strong>. Leave price or weight blank
+            to inherit from the product. A product with no variants is bought directly.
+          </p>
+          <div class="flex flex-wrap gap-2 mb-3">
+            <input id="variant-options" placeholder="Colour: Black, Size: 52"
+              class="flex-1 min-w-[16rem] px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+            <input id="variant-stock" type="number" min="0" placeholder="stock"
+              class="w-24 px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+            <button type="button" id="variant-add"
+              class="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium">Add</button>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm" id="variant-table">
+              <thead class="text-xs text-gray-500 uppercase">
+                <tr>
+                  <th class="text-left py-2">Options</th>
+                  <th class="text-left py-2">SKU</th>
+                  <th class="text-right py-2">Price (€)</th>
+                  <th class="text-right py-2">Stock</th>
+                  <th class="text-center py-2">On</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="variant-rows"></tbody>
+            </table>
+          </div>
+          <p id="variant-empty" class="text-sm text-gray-400 mt-2">
+            No variants — this product is bought directly.
+          </p>
+        </section>
+
+        <!-- ---------------- Inventory ---------------- -->
+        <section class="tab-panel hidden grid grid-cols-2 gap-4" data-panel="inventory">
+          <label class="text-sm">Stock (empty = untracked)
+            <input name="stock" type="number" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+            <span class="text-xs text-gray-400">Can go negative when backorders are allowed.</span>
+          </label>
+          <label class="text-sm">Low-stock warning at
+            <input name="low_stock_threshold" type="number" min="0" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="text-sm">Backorders
+            <select name="backorders" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg">
+              <option value="no">Do not allow</option>
+              <option value="notify">Allow, but notify staff</option>
+              <option value="yes">Allow</option>
+            </select>
+            <span class="text-xs text-gray-400">Allowing lets stock go below zero.</span>
+          </label>
+          <label class="text-sm flex items-center gap-2 mt-6">
+            <input name="sold_individually" type="checkbox" class="rounded border-gray-300" />
+            <span>Sold individually (max 1 per order)</span>
+          </label>
+        </section>
+
+        <!-- ---------------- Prescription (optical) ---------------- -->
+        <section class="grid grid-cols-1 md:grid-cols-2 gap-4 border-t pt-4">
+          <label class="text-sm flex items-center gap-2">
+            <input name="requires_prescription" type="checkbox" class="rounded border-gray-300" />
+            <span>Requires a prescription</span>
+          </label>
+          <label class="text-sm">
+            <span class="block mb-1">Prescription form</span>
+            <select name="prescription_type" class="w-full rounded border-gray-300">
+              <option value="spectacles">Spectacles (SPH / CYL / axis / ADD / PD)</option>
+              <option value="contacts">Contact lenses (adds base curve + diameter)</option>
+            </select>
+            <span class="text-xs text-gray-400">
+              Checkout refuses this product without a valid prescription.
+            </span>
+          </label>
+        </section>
+
+        <!-- ---------------- Shipping ---------------- -->
+        <section class="tab-panel hidden grid grid-cols-2 gap-4" data-panel="shipping">
+          <label class="text-sm">Weight (g)
+            <input name="weight_grams" type="number" min="0" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="text-sm">Shipping class
+            <input name="shipping_class" placeholder="bulky" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="text-sm">Length (mm)
+            <input name="length_mm" type="number" min="0" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="text-sm">Width (mm)
+            <input name="width_mm" type="number" min="0" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="text-sm">Height (mm)
+            <input name="height_mm" type="number" min="0" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+            <span class="text-xs text-gray-400">All three or none.</span>
+          </label>
+          <div class="text-sm space-y-2 mt-6">
+            <label class="flex items-center gap-2">
+              <input name="virtual" type="checkbox" class="rounded border-gray-300" />
+              <span>Virtual (not shipped)</span>
+            </label>
+            <label class="flex items-center gap-2">
+              <input name="downloadable" type="checkbox" class="rounded border-gray-300" />
+              <span>Downloadable</span>
+            </label>
+          </div>
+          <label class="col-span-2 text-sm">Downloads (one per line: <code>Name | https://url</code>)
+            <textarea name="downloads_text" rows="3" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs"></textarea>
+            <span class="text-xs text-gray-400">Only https and /media URLs are stored.</span>
+          </label>
+        </section>
+
+        <!-- ---------------- Advanced ---------------- -->
+        {productFieldDefs.length > 0 && (
+          <section class="tab-panel hidden grid grid-cols-2 gap-4" data-panel="custom">
+            {productFieldDefs.map((f) => (
+              <label class="text-sm">
+                {f.label ?? f.name}
+                {f.visibility !== 'public' && (
+                  <span class="ml-1 text-xs text-gray-400">(staff only)</span>
+                )}
+                {f.rule.type === 'enum' ? (
+                  <select data-custom-field={f.name} class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg">
+                    <option value="">—</option>
+                    {(f.rule.values ?? []).map((v) => <option value={v}>{v}</option>)}
+                  </select>
+                ) : f.rule.type === 'boolean' ? (
+                  <input data-custom-field={f.name} type="checkbox" class="mt-2 block" />
+                ) : (
+                  <input
+                    data-custom-field={f.name}
+                    type={f.rule.type === 'number' ? 'number' : f.rule.type === 'date' ? 'date' : 'text'}
+                    class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+                )}
+                {f.help && <span class="block text-xs text-gray-500 mt-1">{f.help}</span>}
+              </label>
+            ))}
+          </section>
+        )}
+        <section class="tab-panel hidden grid grid-cols-2 gap-4" data-panel="advanced">
+          <label class="text-sm">Catalog visibility
+            <select name="catalog_visibility" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg">
+              <option value="visible">Shop and search</option>
+              <option value="catalog">Shop only</option>
+              <option value="search">Search only</option>
+              <option value="hidden">Hidden</option>
+            </select>
+          </label>
+          <label class="text-sm">Sort position (empty = auto)
+            <input name="position" type="number" min="0" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="col-span-2 text-sm">Tags (comma separated)
+            <input name="tags_text" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="col-span-2 text-sm">Attributes (one per line: <code>Colour: Black, Tortoise</code>)
+            <textarea name="attributes_text" rows="3" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs"></textarea>
+          </label>
+          <label class="text-sm">Upsell product ids (comma separated)
+            <input name="upsell_text" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="text-sm">Cross-sell product ids (comma separated)
+            <input name="cross_sell_text" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          </label>
+          <label class="col-span-2 text-sm">Purchase note
+            <textarea name="purchase_note" rows="2" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg"></textarea>
+          </label>
+          <div class="col-span-2 text-sm flex gap-6">
+            <label class="flex items-center gap-2">
+              <input name="featured" type="checkbox" class="rounded border-gray-300" />
+              <span>Featured</span>
+            </label>
+            <label class="flex items-center gap-2">
+              <input name="reviews_enabled" type="checkbox" class="rounded border-gray-300" />
+              <span>Reviews enabled</span>
+            </label>
+          </div>
+        </section>
+      </div>
+
+      <div class="flex justify-end gap-3 px-6 py-4 border-t border-gray-200 bg-gray-50">
+        <button type="button" id="dialog-cancel" class="px-4 py-2 text-sm text-gray-600">Cancel</button>
+        <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium">Save</button>
+      </div>
+    </form>
+  </dialog>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { api, apiFetch } from '../../lib/apiClient';
+  import { foldForSearch as fold } from '../../lib/text-search';
+  import { loadEditorSurface } from '../../lib/editor-insert';
+
+  /**
+   * The GPSR fields, named ONCE so the load and the save cannot disagree.
+   *
+   * Two hand-written lists is how a field ends up saved and never shown, or
+   * shown and never saved — the shape this codebase keeps finding.
+   */
+  const GPSR_FIELDS = [
+    'gpsr_manufacturer', 'gpsr_eu_responsible', 'gpsr_identifier',
+    'gpsr_warnings', 'gpsr_instructions',
+  ];
+
+  const dialog = document.getElementById('product-dialog');
+  const form = document.getElementById('product-form');
+
+  /**
+   * Money text -> integer cents. `null` = empty. `NaN` = present but unusable.
+   *
+   * Three states, because the caller has to tell "no sale price" apart from
+   * "the operator typed something I cannot price", and the old one-liner
+   * (`parseFloat`) collapsed them: it returned null for both, so a mistyped
+   * sale price silently became no sale, and a mistyped regular price became 0
+   * via the `?? 0` at the call site.
+   *
+   * A comma is accepted as the decimal separator. A THOUSANDS separator is
+   * refused rather than interpreted: "1.159" is €1.159 to a Greek reader and
+   * €1,159 to an English one, and there is no way to tell from the string which
+   * was meant. Guessing wrong on a price is a mispriced product, so this asks
+   * instead — the field hint tells the operator what is accepted.
+   */
+  const MONEY_RE = /^\d{1,9}(?:[.,]\d{1,2})?$/;
+  const toCents = (v) => {
+    const s = String(v ?? '').trim().replace(/[\s\u00a0€]/g, '');
+    if (s === '') return null;
+    if (!MONEY_RE.test(s)) return NaN;
+    return Math.round(parseFloat(s.replace(',', '.')) * 100);
+  };
+  const intOrNull = (v) => (v === '' || v == null ? null : parseInt(v, 10));
+
+  /* ---------------- categories ----------------
+   * Read straight from the DOM, never via `form.elements.categories`: that
+   * returns a RadioNodeList for several same-named inputs but the ELEMENT
+   * itself when a shop happens to have exactly one category, and code written
+   * against the list shape then breaks only on those installs.
+   */
+  const catBoxes = () => Array.from(form.querySelectorAll('input[name="categories"]'));
+  const chosenCategories = () => catBoxes().filter((b) => b.checked).map((b) => b.value);
+  /** What the product being edited was filed under when the dialog opened. */
+  let loadedCategories = [];
+  const setCategories = (slugs) => {
+    const want = new Set(Array.isArray(slugs) ? slugs : []);
+    catBoxes().forEach((b) => { b.checked = want.has(b.value); });
+  };
+  const csv = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
+
+  /* ---------------- gallery ----------------
+   * Held in one ordered array whose FIRST PHOTO is the main image. A separate
+   * "featured image" field could disagree with the gallery; an ordered list
+   * cannot. Rendering is textContent/attribute-based — never innerHTML with a
+   * src in it — because these values come from the media library and the API.
+   *
+   * Entries may be video. `isVideoSrc` is the same extension rule the server
+   * applies in product-fields.ts, restated here rather than imported because
+   * this block runs in the browser and that module pulls in the whole product
+   * normaliser. Restating it means it can DRIFT, so a test asserts the two
+   * agree — see tests/video-media.test.mjs.
+   */
+  const isVideoSrc = (src) => /\.(mp4|webm)(?:[?#]|$)/i.test(String(src || ''));
+  /*
+   * The product's merchant-declared values.
+   *
+   * Held whole, not rebuilt from the inputs alone: a value whose DEFINITION was
+   * deleted has no input on this form, and rebuilding from inputs would delete
+   * it on the next save of an unrelated field.
+   */
+  let loadedCustom = {};
+
+  function readCustomFields() {
+    const out = { ...loadedCustom };
+    document.querySelectorAll('[data-custom-field]').forEach((el) => {
+      const name = el.dataset.customField;
+      if (el.type === 'checkbox') { out[name] = el.checked; return; }
+      const raw = el.value.trim();
+      if (raw === '') { delete out[name]; return; }
+      // A number input hands back a string; the server's rule says `number`,
+      // and sending "52" where a number is declared is a validation failure
+      // the operator cannot act on.
+      out[name] = el.type === 'number' ? Number(raw) : raw;
+    });
+    return out;
+  }
+
+  let images = [];
+
+  function renderImages() {
+    const grid = document.getElementById('image-grid');
+    const empty = document.getElementById('image-empty');
+    grid.textContent = '';
+    empty.hidden = images.length > 0;
+
+    images.forEach((img, i) => {
+      const card = document.createElement('div');
+      card.className = 'relative border rounded-lg overflow-hidden group ' +
+        (i === images.findIndex((m) => !isVideoSrc(m.src))
+          ? 'border-blue-500 ring-2 ring-blue-200'
+          : 'border-gray-200');
+
+      const video = isVideoSrc(img.src);
+      if (video) {
+        // muted + playsinline + no autoplay: this is a gallery tile, and a
+        // grid of six clips that start playing and talking over each other on
+        // page load is the worst thing an admin screen can do. `metadata`
+        // fetches enough to paint the first frame and stops there — `auto`
+        // would pull every clip in the gallery in full, every time the form
+        // opens.
+        const el = document.createElement('video');
+        el.src = img.src;
+        el.className = 'w-full h-24 object-cover bg-gray-900';
+        el.controls = true;
+        el.muted = true;
+        el.playsInline = true;
+        el.preload = 'metadata';
+        card.appendChild(el);
+      } else {
+        const thumb = document.createElement('img');
+        thumb.src = img.src;
+        thumb.alt = img.alt || '';
+        thumb.className = 'w-full h-24 object-cover bg-gray-50';
+        thumb.loading = 'lazy';
+        card.appendChild(thumb);
+      }
+
+      // "Main" marks the first PHOTO, matching what mainImage() on the server
+      // actually returns. Badging index 0 would have put it on a video, which
+      // is the one thing that entry can never be.
+      const mainIndex = images.findIndex((m) => !isVideoSrc(m.src));
+      if (video) {
+        const badge = document.createElement('span');
+        badge.className = 'absolute top-1 left-1 text-[10px] px-1.5 py-0.5 rounded bg-gray-900/80 text-white font-medium';
+        badge.textContent = 'Video';
+        card.appendChild(badge);
+      } else if (i === mainIndex) {
+        const badge = document.createElement('span');
+        badge.className = 'absolute top-1 left-1 text-[10px] px-1.5 py-0.5 rounded bg-blue-600 text-white font-medium';
+        badge.textContent = 'Main';
+        card.appendChild(badge);
+      }
+
+      /*
+       * POSTER — the still shown before a clip plays.
+       *
+       * A select over the photographs already in this gallery, not an upload
+       * and not a decoded frame: extracting one needs ffmpeg, which is a large
+       * native dependency to add so that one field can be filled in
+       * automatically, and frame zero of a product video is very often black.
+       *
+       * Leaving it on "First photo" is the common case and stores nothing —
+       * the reader falls back to the first photograph anyway, so the default
+       * costs no field and cannot go stale when the gallery is reordered.
+       */
+      if (video) {
+        const photos = images.filter((m) => !isVideoSrc(m.src));
+        const row = document.createElement('label');
+        row.className = 'flex items-center gap-1 px-1.5 py-1 border-t border-gray-200 text-[11px] text-gray-600';
+        const caption = document.createElement('span');
+        caption.textContent = 'Poster';
+        row.appendChild(caption);
+
+        const select = document.createElement('select');
+        select.className = 'flex-1 min-w-0 border border-gray-200 rounded px-1 py-0.5 text-[11px]';
+        const auto = document.createElement('option');
+        auto.value = '';
+        auto.textContent = photos.length ? 'First photo' : 'None available';
+        select.appendChild(auto);
+        for (const photo of photos) {
+          const opt = document.createElement('option');
+          opt.value = photo.src;
+          // The filename is what an editor recognises; the full path is noise
+          // in a 120px-wide control.
+          opt.textContent = photo.alt || photo.src.split('/').pop();
+          select.appendChild(opt);
+        }
+        // A poster pointing at a photo that has since been REMOVED would
+        // silently select nothing; falling back to "" makes the tile show the
+        // truth, which is that it is back on the automatic choice.
+        select.value = photos.some((m) => m.src === img.poster) ? img.poster : '';
+        select.disabled = photos.length === 0;
+        select.addEventListener('change', () => {
+          if (select.value) images[i].poster = select.value;
+          else delete images[i].poster;
+        });
+        row.appendChild(select);
+        card.appendChild(row);
+      }
+
+      const bar = document.createElement('div');
+      bar.className = 'flex divide-x border-t border-gray-200 text-[11px]';
+      // Not offered on a video, and not offered on the photo that is already
+      // main. A "Set as main" on a clip is a button whose promise the
+      // storefront cannot keep.
+      if (!video && i !== mainIndex) {
+        const mainBtn = document.createElement('button');
+        mainBtn.type = 'button';
+        mainBtn.className = 'flex-1 py-1 text-blue-700 hover:bg-blue-50';
+        mainBtn.textContent = 'Set as main';
+        mainBtn.addEventListener('click', () => {
+          const [picked] = images.splice(i, 1);
+          images = [picked, ...images];
+          renderImages();
+        });
+        bar.appendChild(mainBtn);
+      }
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'flex-1 py-1 text-red-600 hover:bg-red-50';
+      delBtn.textContent = 'Remove';
+      delBtn.addEventListener('click', () => {
+        images.splice(i, 1);
+        renderImages();
+      });
+      bar.appendChild(delBtn);
+      card.appendChild(bar);
+
+      grid.appendChild(card);
+    });
+  }
+
+  function addImage(src, opts) {
+    const clean = String(src || '').trim();
+    // Silence was the bug report. An empty box and a click produced nothing at
+    // all — no message, no image — which is indistinguishable from a broken
+    // button, and is exactly how it was described.
+    if (!clean) {
+      if (!opts || !opts.quiet) alert('Paste an image or video URL first, or use Upload media.');
+      return;
+    }
+    // Mirror the server rule so the operator learns immediately rather than
+    // having the value silently dropped on save.
+    if (!clean.startsWith('/') && !/^https?:\/\//i.test(clean)) {
+      return alert('Media must be a /media path or an http(s) URL.');
+    }
+    if (images.some((i) => i.src === clean)) return alert('That file is already attached.');
+    // `kind` is sent, and the server derives it again from the src and ignores
+    // what arrived — see normalizeImages. Sending it keeps this array the same
+    // shape the server hands back, so a save-then-reload does not silently
+    // reshape what is on screen.
+    const entry = { src: clean };
+    if (isVideoSrc(clean)) entry.kind = 'video';
+    images.push(entry);
+    renderImages();
+  }
+
+  document.getElementById('image-add').addEventListener('click', () => {
+    const el = document.getElementById('image-url');
+    addImage(el.value);
+    el.value = '';
+  });
+
+  /* ---------------- upload from this form ----------------
+   * Uploads through the same endpoint the Media library uses, then attaches
+   * each result to the product. Sequential rather than parallel: ten photos
+   * fired at once is a burst the per-IP rate limit is entitled to refuse, and
+   * a shop owner attaching a gallery would see half of them fail for no
+   * reason they could act on.
+   */
+  const uploadInput = document.getElementById('image-upload');
+  const uploadStatus = document.getElementById('image-upload-status');
+
+  uploadInput.addEventListener('change', async () => {
+    const files = Array.from(uploadInput.files || []);
+    if (!files.length) return;
+    uploadInput.disabled = true;
+
+    let added = 0;
+    const failed = [];
+    try {
+      for (let i = 0; i < files.length; i += 1) {
+        uploadStatus.textContent = `Uploading ${i + 1}/${files.length}…`;
+        const fd = new FormData();
+        fd.append('file', files[i]);
+        const res = await apiFetch('/api/media/upload', { method: 'POST', body: fd });
+        const url = res.ok ? (res.data && (res.data.url || res.data.path)) : null;
+        if (url) {
+          // quiet: a duplicate in a ten-file selection should not open ten
+          // dialogs the operator has to dismiss one at a time.
+          addImage(url, { quiet: true });
+          added += 1;
+        } else {
+          failed.push(`${files[i].name}: ${res.error || 'upload failed'}`);
+        }
+      }
+    } finally {
+      uploadInput.disabled = false;
+      // Clearing the value matters: without it, selecting the SAME file again
+      // fires no change event and looks like the button stopped working.
+      uploadInput.value = '';
+      uploadStatus.textContent = failed.length
+        ? `${added} added, ${failed.length} failed`
+        : (added ? `${added} added` : '');
+    }
+
+    if (failed.length) {
+      // Named, and not one dialog per file.
+      alert(`Some files could not be uploaded:\n\n${failed.join('\n')}`);
+    }
+  });
+
+  /* ---------------- media picker ----------------
+   * Inline, not prompt().
+   *
+   * The old picker did `res.ok ? res.data : []`, so a 403 became "the library
+   * is empty" — and then said so in a blocking alert(). Every `manager` hit
+   * that: the read guard omitted the role, so the fetch failed, and they were
+   * told to go and upload the images they had just uploaded, in a dialog that
+   * froze the tab.
+   *
+   * A failure now says what failed, in the page, and the tab keeps working.
+   */
+  const picker = document.getElementById('image-picker');
+  const pickerGrid = document.getElementById('image-picker-grid');
+  const pickerMsg = document.getElementById('image-picker-msg');
+
+  const pickerNote = (text, tone) => {
+    pickerMsg.textContent = text;
+    pickerMsg.className = tone === 'error'
+      ? 'text-sm rounded-lg px-3 py-2 mb-2 bg-red-50 text-red-700 border border-red-200'
+      : 'text-sm rounded-lg px-3 py-2 mb-2 bg-gray-50 text-gray-600 border border-gray-200';
+  };
+  const hidePickerNote = () => { pickerMsg.className = 'hidden'; };
+
+  document.getElementById('image-picker-close').addEventListener('click', () => {
+    picker.classList.add('hidden');
+  });
+
+  document.getElementById('image-browse').addEventListener('click', async () => {
+    picker.classList.remove('hidden');
+    pickerGrid.replaceChildren();
+    hidePickerNote();
+    pickerNote('Loading…');
+
+    const res = await api.get('/api/media/get');
+    if (!res.ok) {
+      // Say which failure it was. "Empty" and "you are not allowed" need
+      // different actions from the person reading it.
+      pickerNote(
+        res.status === 403
+          ? 'Your role cannot browse the media library. Ask an administrator, or paste a URL above.'
+          : (res.error || 'Could not load the media library. Paste a URL above instead.'),
+        'error',
+      );
+      return;
+    }
+
+    const items = (res.data || []).filter((m) => m && m.url);
+    if (!items.length) {
+      pickerNote('Nothing in the library yet — upload something with the button above.');
+      return;
+    }
+    hidePickerNote();
+    pickerItems = items;
+    renderPicker();
+    // Focus the search box, because with a large library that is the control
+    // the operator wants first, not the scrollbar.
+    pickerSearch.value = '';
+    pickerSearch.focus();
+  });
+
+  /*
+   * The picker renders from `pickerItems`, filtered by the search box.
+   *
+   * The filter runs over EVERYTHING the API returned, not over what is
+   * currently drawn — the old grid hard-capped at 120 with no search and no
+   * count, so a shop with more photos than that had images it simply could not
+   * reach from this screen and nothing telling it so.
+   */
+  let pickerItems = [];
+  const pickerSearch = document.getElementById('image-picker-search');
+  const pickerCount = document.getElementById('image-picker-count');
+  const RENDER_CAP = 300;
+
+  function renderPicker() {
+    // Search `original_name` FIRST — that is the name the person recognises.
+    //
+    // `filename` and `url` are the STORED name, which the uploader randomises
+    // (`a74bbfad551aabf7.webp`). Searching those matches nothing a human would
+    // ever type, so a search box over them is exactly as useful as no search
+    // box, which is how this was reported. `alt_text` is included because an
+    // operator who captioned an image will look for it by that caption.
+    const q = fold(pickerSearch.value || '');
+    const haystack = (m) => fold(`${m.original_name || ''} ${m.alt_text || ''} ${m.filename || ''}`);
+    const matches = q ? pickerItems.filter((m) => haystack(m).includes(q)) : pickerItems;
+
+    pickerGrid.replaceChildren();
+    for (const m of matches.slice(0, RENDER_CAP)) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'relative rounded border border-gray-200 hover:border-blue-500 overflow-hidden aspect-square bg-gray-50';
+      // The recognisable name, for the same reason the search uses it.
+      btn.title = m.original_name || m.filename || m.url;
+      if (isVideoSrc(m.url)) {
+        // A <video> with no controls inside a <button>: the tile is the click
+        // target, so controls here would eat the click that picks the file.
+        // The frame `preload="metadata"` paints is the thumbnail.
+        const el = document.createElement('video');
+        el.src = m.url;
+        el.muted = true;
+        el.playsInline = true;
+        el.preload = 'metadata';
+        el.className = 'h-full w-full object-contain bg-gray-900 pointer-events-none';
+        btn.appendChild(el);
+        const tag = document.createElement('span');
+        tag.className = 'absolute bottom-1 right-1 text-[9px] px-1 rounded bg-gray-900/80 text-white';
+        tag.textContent = 'Video';
+        btn.appendChild(tag);
+      } else {
+        const img = document.createElement('img');
+        img.src = m.url;
+        // Not empty: this is a picker, and a screen-reader user choosing
+        // between thirty thumbnails needs to know which one each is.
+        img.alt = m.alt_text || m.original_name || '';
+        img.loading = 'lazy';
+        img.className = 'h-full w-full object-contain';
+        btn.appendChild(img);
+      }
+      btn.addEventListener('click', () => {
+        addImage(m.url);
+        picker.classList.add('hidden');
+      });
+      pickerGrid.appendChild(btn);
+    }
+
+    // Say what is being shown. A silent cap is how someone concludes an image
+    // is missing when it is merely undrawn.
+    const shown = Math.min(matches.length, RENDER_CAP);
+    pickerCount.textContent = matches.length === pickerItems.length
+      ? (shown < matches.length ? `showing ${shown} of ${matches.length}` : `${matches.length} files`)
+      : `${matches.length} of ${pickerItems.length} match`;
+
+    if (!matches.length) {
+      pickerNote('Nothing matches that search.');
+    } else {
+      hidePickerNote();
+    }
+  }
+
+  pickerSearch.addEventListener('input', renderPicker);
+
+
+
+  /* ---------------- variants ----------------
+   * Held as an array with STABLE ids: an id that came back from the server is
+   * kept, because every historical order line references it. Only genuinely new
+   * rows get a blank id, which the server then fills in.
+   */
+  let variants = [];
+  /*
+   * The counts as they were when the dialog OPENED, sent back as `stock_base`
+   * beside each `stock`.
+   *
+   * Checkout keeps selling while this dialog is open, and the form sends every
+   * count on every save — so without these, fixing a typo in the description
+   * wrote back the stock the product had when the dialog opened and put every
+   * unit sold since back on sale. With them the server can tell a count the
+   * operator changed (written as typed) from one they left alone (taken from
+   * the database at save time). See readStockBases in lib/product-fields.ts.
+   * Keyed by variant id; a variant added in this dialog has none.
+   */
+  let loadedStock = null;
+  let loadedVariantStock = new Map();
+
+  const parseOptions = (text) => {
+    const out = {};
+    for (const part of String(text || '').split(',')) {
+      const i = part.indexOf(':');
+      if (i < 0) continue;
+      const k = part.slice(0, i).trim();
+      const v = part.slice(i + 1).trim();
+      if (k && v) out[k] = v;
+    }
+    return out;
+  };
+  const optionsText = (o) => Object.keys(o || {}).sort().map((k) => `${k}: ${o[k]}`).join(', ');
+
+  function renderVariants() {
+    const body = document.getElementById('variant-rows');
+    const empty = document.getElementById('variant-empty');
+    body.textContent = '';
+    empty.hidden = variants.length > 0;
+
+    variants.forEach((v, i) => {
+      const tr = document.createElement('tr');
+      tr.className = 'border-t border-gray-100';
+
+      const cell = (child) => {
+        const td = document.createElement('td');
+        td.className = 'py-1.5 pr-2';
+        td.appendChild(child);
+        return td;
+      };
+      const input = (value, type, cls, on) => {
+        const el = document.createElement('input');
+        el.type = type;
+        el.value = value ?? '';
+        el.className = `w-full px-2 py-1 border border-gray-200 rounded ${cls || ''}`;
+        el.addEventListener('input', () => on(el.value));
+        return el;
+      };
+
+      tr.appendChild(cell(input(optionsText(v.options), 'text', '', (val) => { v.options = parseOptions(val); })));
+      tr.appendChild(cell(input(v.sku, 'text', 'font-mono text-xs', (val) => { v.sku = val || undefined; })));
+      tr.appendChild(cell(input(
+        v.price_cents == null ? '' : (v.price_cents / 100).toFixed(2), 'number', 'text-right',
+        (val) => { v.price_cents = val === '' ? null : Math.round(parseFloat(val) * 100); },
+      )));
+      tr.appendChild(cell(input(
+        v.stock == null ? '' : v.stock, 'number', 'text-right',
+        (val) => { v.stock = val === '' ? null : parseInt(val, 10); },
+      )));
+
+      const onTd = document.createElement('td');
+      onTd.className = 'py-1.5 text-center';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = v.enabled !== false;
+      cb.className = 'rounded border-gray-300';
+      cb.addEventListener('change', () => { v.enabled = cb.checked; });
+      onTd.appendChild(cb);
+      tr.appendChild(onTd);
+
+      const delTd = document.createElement('td');
+      delTd.className = 'py-1.5 text-right';
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'text-red-600 hover:underline text-xs';
+      del.textContent = 'Remove';
+      del.addEventListener('click', () => { variants.splice(i, 1); renderVariants(); });
+      delTd.appendChild(del);
+      tr.appendChild(delTd);
+
+      body.appendChild(tr);
+    });
+  }
+
+  document.getElementById('variant-add').addEventListener('click', () => {
+    const optEl = document.getElementById('variant-options');
+    const stockEl = document.getElementById('variant-stock');
+    const options = parseOptions(optEl.value);
+    if (!Object.keys(options).length) {
+      return alert('Describe the variation, e.g. "Colour: Black, Size: 52".');
+    }
+    const combo = optionsText(options);
+    if (variants.some((v) => optionsText(v.options) === combo)) {
+      return alert('That combination already exists.');
+    }
+    variants.push({
+      options,
+      stock: stockEl.value === '' ? null : parseInt(stockEl.value, 10),
+      enabled: true,
+    });
+    optEl.value = '';
+    stockEl.value = '';
+    renderVariants();
+  });
+
+  /* ---------------- tabs ---------------- */
+  document.getElementById('tab-bar').addEventListener('click', (e) => {
+    const btn = e.target.closest('.tab-btn');
+    if (!btn) return;
+    document.querySelectorAll('.tab-btn').forEach((b) => {
+      const on = b === btn;
+      b.className = 'tab-btn px-3 py-2 text-sm border-b-2 ' +
+        (on ? 'border-blue-600 text-blue-700 font-medium' : 'border-transparent text-gray-500');
+    });
+    document.querySelectorAll('.tab-panel').forEach((p) => {
+      p.classList.toggle('hidden', p.dataset.panel !== btn.dataset.tab);
+    });
+  });
+  function showTab(name) {
+    document.querySelector(`.tab-btn[data-tab="${name}"]`)?.click();
+  }
+
+  /* ---------------- text <-> structured helpers ---------------- */
+  const attrsToText = (arr) => (arr || []).map((a) => `${a.name}: ${(a.values || []).join(', ')}`).join('\n');
+  const textToAttrs = (t) => String(t || '').split('\n').map((line) => {
+    const i = line.indexOf(':');
+    if (i < 0) return null;
+    const name = line.slice(0, i).trim();
+    const values = csv(line.slice(i + 1));
+    return name && values.length ? { name, values, visible: true } : null;
+  }).filter(Boolean);
+
+  const dlToText = (arr) => (arr || []).map((d) => `${d.name} | ${d.url}`).join('\n');
+  const textToDl = (t) => String(t || '').split('\n').map((line) => {
+    const i = line.lastIndexOf('|');
+    if (i < 0) return line.trim() ? { name: 'Download', url: line.trim() } : null;
+    const name = line.slice(0, i).trim() || 'Download';
+    const url = line.slice(i + 1).trim();
+    return url ? { name, url } : null;
+  }).filter(Boolean);
+
+  const dateOnly = (iso) => (iso ? String(iso).slice(0, 10) : '');
+
+  /* ---------------- open / populate ---------------- */
+  document.getElementById('filter').addEventListener('input', (e) => {
+    // Fold the query the same way the server folded data-name at render time.
+    // Folding only one side is the classic half-fix: it matches nothing.
+    const q = fold(e.target.value);
+    document.querySelectorAll('.product-row').forEach((r) => {
+      r.style.display = r.dataset.name.includes(q) ? '' : 'none';
+    });
+  });
+
+  document.getElementById('new-product').addEventListener('click', () => {
+    form.reset();
+    form.elements.id.value = '';
+    images = [];
+    loadedCustom = {};
+    document.querySelectorAll('[data-custom-field]').forEach((el) => {
+      if (el.type === 'checkbox') el.checked = false; else el.value = '';
+    });
+    renderImages();
+    variants = [];
+    renderVariants();
+    // Nothing was loaded, so nothing is a base — and a previous edit's bases
+    // must not follow the operator into a new product.
+    loadedStock = null;
+    loadedVariantStock = new Map();
+    // form.reset() unchecks the boxes; this keeps the MEMORY in step, so the
+    // "you are about to unfile this" guard below cannot fire on a new product
+    // using a previous edit's categories.
+    loadedCategories = [];
+    setCategories([]);
+    form.elements.reviews_enabled.checked = true;
+    document.getElementById('dialog-title').textContent = 'New product';
+    showTab('general');
+    dialog.showModal();
+  });
+  document.getElementById('dialog-cancel').addEventListener('click', () => dialog.close());
+
+  document.addEventListener('click', async (e) => {
+    const edit = e.target.closest('.edit');
+    const del = e.target.closest('.del');
+    if (edit) {
+      // Fetch the FULL product rather than reading a subset embedded in the
+      // DOM. The embedded blob carried 13 fields while this modal reads ~30, so
+      // saving without edits submitted `variants: []`, `images: []`,
+      // `attributes: []` and silently destroyed them. One source of truth also
+      // means adding a field here can never drift from what the row serialised.
+      const res = await api.get(`/api/products/${edit.dataset.id}`);
+      if (!res.ok) return alert(res.error || 'Could not load that product');
+      const p = res.data;
+      const f = form.elements;
+      form.reset();
+      f.id.value = p.id;
+      f.name.value = p.name ?? '';
+      f.sku.value = p.sku ?? '';
+      f.gtin.value = p.gtin ?? '';
+      f.brand.value = p.brand ?? '';
+      f.status.value = p.status;
+      f.price.value = ((p.regular_price_cents ?? p.price_cents) / 100).toFixed(2);
+      f.sale_price.value = p.sale_price_cents != null ? (p.sale_price_cents / 100).toFixed(2) : '';
+      f.sale_starts_at.value = dateOnly(p.sale_starts_at);
+      f.sale_ends_at.value = dateOnly(p.sale_ends_at);
+      f.tax_status.value = p.tax_status ?? 'taxable';
+      f.tax_class.value = p.tax_class ?? '';
+      f.short_description.value = p.short_description ?? '';
+      // Through the shared loader: the rich editor reads its textarea ONCE at
+      // construction, so setting the value alone would leave the surface the
+      // operator sees empty — and then save that emptiness over the product.
+      loadEditorSurface(f.description, p.description ?? '');
+      for (const k of GPSR_FIELDS) f[k].value = p[k] ?? '';
+
+      f.stock.value = p.stock ?? '';
+      loadedStock = p.stock ?? null;
+      f.low_stock_threshold.value = p.low_stock_threshold ?? '';
+      f.backorders.value = p.backorders ?? 'no';
+      f.sold_individually.checked = p.sold_individually === true;
+      f.requires_prescription.checked = p.requires_prescription === true;
+      f.prescription_type.value = p.prescription_type === 'contacts' ? 'contacts' : 'spectacles';
+
+      f.weight_grams.value = p.weight_grams ?? '';
+      f.shipping_class.value = p.shipping_class ?? '';
+      f.length_mm.value = p.dimensions_mm?.length_mm ?? '';
+      f.width_mm.value = p.dimensions_mm?.width_mm ?? '';
+      f.height_mm.value = p.dimensions_mm?.height_mm ?? '';
+      f.virtual.checked = p.virtual === true;
+      f.downloadable.checked = p.downloadable === true;
+      f.downloads_text.value = dlToText(p.downloads);
+
+      f.catalog_visibility.value = p.catalog_visibility ?? 'visible';
+      f.position.value = p.position ?? '';
+      f.tags_text.value = (p.tags || []).join(', ');
+      f.attributes_text.value = attrsToText(p.attributes);
+      f.upsell_text.value = (p.upsell_ids || []).join(', ');
+      f.cross_sell_text.value = (p.cross_sell_ids || []).join(', ');
+      f.purchase_note.value = p.purchase_note ?? '';
+      f.featured.checked = p.featured === true;
+      f.reviews_enabled.checked = p.reviews_enabled !== false;
+
+      // Pre-select what it is filed under, and remember it: an edit that leaves
+      // this untouched must save the same categories back, not an empty set.
+      loadedCategories = Array.isArray(p.categories) ? p.categories.slice() : [];
+      setCategories(loadedCategories);
+
+      // `kind` is carried back. Rebuilding the entry field-by-field is what
+      // makes this list a fixed shape rather than whatever the API happened to
+      // return — but every field the form must round-trip has to be NAMED
+      // here, and an omitted one is dropped on the next save without a word.
+      /*
+       * Merchant-declared values into their inputs.
+       *
+       * `loadedCustom` keeps the WHOLE bag, including keys whose definition was
+       * deleted. The save below merges the visible inputs back over it, so
+       * editing a product never destroys a value this form could not render —
+       * the same discipline `loadedCategories` uses two blocks up, and the
+       * failure it prevents is the one the e2e guard was written after.
+       */
+      loadedCustom = (p.custom && typeof p.custom === 'object') ? { ...p.custom } : {};
+      document.querySelectorAll('[data-custom-field]').forEach((el) => {
+        const v = loadedCustom[el.dataset.customField];
+        if (el.type === 'checkbox') el.checked = v === true;
+        else el.value = v === undefined || v === null ? '' : String(v);
+      });
+
+      // Rebuilt field by field rather than spread, so the form never round-trips
+      // a read-only projection back as a write. `poster` IS carried: it is the
+      // editor's own choice, and rebuilding without it would silently discard
+      // that choice the next time somebody fixed a typo — the same shape as the
+      // import path that stripped `kind` on every catalogue refresh.
+      //
+      // `mime_type`, `photos` and `videos` are deliberately NOT carried: they
+      // are derived on read and re-sending them would be a client asserting
+      // facts the media table owns.
+      images = Array.isArray(p.images)
+        ? p.images.map((i) => {
+            const entry = { src: i.src, alt: i.alt };
+            if (i.kind) entry.kind = i.kind;
+            if (i.poster) entry.poster = i.poster;
+            return entry;
+          })
+        : [];
+      renderImages();
+      // Ids are carried back verbatim — the server reuses them, and every
+      // historical order line points at them.
+      variants = Array.isArray(p.variants) ? p.variants.map((v) => ({ ...v })) : [];
+      // Captured from the COPY before the operator can type into it: the
+      // stock inputs write straight into these objects.
+      loadedVariantStock = new Map(variants.filter((v) => v.id).map((v) => [v.id, v.stock ?? null]));
+      renderVariants();
+
+      document.getElementById('dialog-title').textContent = 'Edit product';
+      showTab('general');
+      dialog.showModal();
+    } else if (del) {
+      if (!confirm('Delete this product?')) return;
+      const res = await api.delete(`/api/products/${del.dataset.id}`);
+      if (res.ok) location.reload();
+      else alert(res.error || 'Delete failed');
+    }
+  });
+
+  /* ---------------- save ---------------- */
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = form.elements;
+
+    // Money is validated BEFORE anything is sent. `?? 0` used to stand here, so
+    // an unparseable regular price became a product priced at zero, and an
+    // unparseable sale price became no sale at all — both silently.
+    const regular = toCents(f.price.value);
+    if (regular === null || Number.isNaN(regular)) {
+      alert('Enter a regular price, for example 159,00 or 159.00.\n\nThousands separators are not accepted — write 1159,00 rather than 1.159,00.');
+      showTab('general');
+      f.price.focus();
+      return;
+    }
+    const sale = toCents(f.sale_price.value);
+    if (Number.isNaN(sale)) {
+      alert('The sale price is not a price I can read.\n\nUse 129,00 or 129.00, or leave it empty for no sale.');
+      showTab('general');
+      f.sale_price.focus();
+      return;
+    }
+    const stock = f.stock.value === '' ? null : parseInt(f.stock.value, 10);
+
+    // Categories. Sent explicitly so a manager can file and re-file a product —
+    // the whole point of the control — but an edit that would empty a product
+    // that HAD categories asks first.
+    //
+    // The report this came from asked for the empty case to silently keep the
+    // existing categories. That is a safe default and a bad control: unchecking
+    // every box would appear to work and change nothing, which is the same
+    // silent no-op class of bug as the missing field itself, and it would leave
+    // no way to unfile a product at all. Confirming keeps the operation
+    // possible while making it impossible to do by accident.
+    const categories = chosenCategories();
+    const id = f.id.value;
+    if (id && categories.length === 0 && loadedCategories.length > 0) {
+      const ok = confirm(
+        `Remove "${f.name.value}" from all ${loadedCategories.length} of its categories?\n\n` +
+        'It stays in the shop and at /shop, but disappears from every menu category.',
+      );
+      if (!ok) { showTab('general'); return; }
+    }
+
+    const L = intOrNull(f.length_mm.value);
+    const W = intOrNull(f.width_mm.value);
+    const H = intOrNull(f.height_mm.value);
+
+    const body = {
+      name: f.name.value,
+      sku: f.sku.value || undefined,
+      gtin: f.gtin.value || undefined,
+      brand: f.brand.value || undefined,
+      status: f.status.value,
+      regular_price_cents: regular,
+      sale_price_cents: sale,
+      // on_sale / in_stock are derived server-side; sent for older clients only.
+      price_cents: sale != null && sale < regular ? sale : regular,
+      sale_starts_at: f.sale_starts_at.value || null,
+      sale_ends_at: f.sale_ends_at.value || null,
+      tax_status: f.tax_status.value,
+      tax_class: f.tax_class.value || undefined,
+      short_description: f.short_description.value || undefined,
+      description: f.description.value || undefined,
+      ...Object.fromEntries(GPSR_FIELDS.map((k) => [k, f[k].value.trim() || undefined])),
+
+      stock,
+      // Only on an edit: a new product loaded nothing to compare against.
+      ...(id ? { stock_base: loadedStock } : {}),
+      manage_stock: stock !== null,
+      low_stock_threshold: intOrNull(f.low_stock_threshold.value),
+      backorders: f.backorders.value,
+      sold_individually: f.sold_individually.checked,
+      requires_prescription: f.requires_prescription.checked,
+      prescription_type: f.prescription_type.value,
+
+      weight_grams: intOrNull(f.weight_grams.value),
+      dimensions_mm: L != null && W != null && H != null
+        ? { length_mm: L, width_mm: W, height_mm: H }
+        : null,
+      shipping_class: f.shipping_class.value || undefined,
+      virtual: f.virtual.checked,
+      requires_shipping: !f.virtual.checked,
+      downloadable: f.downloadable.checked,
+      downloads: textToDl(f.downloads_text.value),
+
+      images,
+      custom: readCustomFields(),
+      variants: id
+        ? variants.map((v) => (v.id && loadedVariantStock.has(v.id)
+          ? { ...v, stock_base: loadedVariantStock.get(v.id) }
+          : v))
+        : variants,
+      catalog_visibility: f.catalog_visibility.value,
+      position: f.position.value === '' ? undefined : parseInt(f.position.value, 10),
+      tags: csv(f.tags_text.value),
+      attributes: textToAttrs(f.attributes_text.value),
+      upsell_ids: csv(f.upsell_text.value),
+      cross_sell_ids: csv(f.cross_sell_text.value),
+      purchase_note: f.purchase_note.value || undefined,
+      featured: f.featured.checked,
+      reviews_enabled: f.reviews_enabled.checked,
+      categories,
+    };
+
+    const res = id ? await api.put(`/api/products/${id}`, body) : await api.post('/api/products', body);
+    if (res.ok) location.reload();
+    else alert(res.error || 'Save failed');
+  });
+</script>

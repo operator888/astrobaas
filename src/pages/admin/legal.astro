@@ -1,0 +1,136 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { LocalDB } from '../../lib/localdb';
+import { pagesOnly } from '../../lib/post-kind';
+import { resolveCommerceEnabled } from '../../lib/commerce-settings';
+import {
+  LEGAL_TEMPLATES, LEGAL_TEMPLATE_LOCALES, renderLegalTemplate,
+} from '../../lib/legal/templates';
+
+/**
+ * The legal-page library: every template × locale, with an Activate button.
+ *
+ * Server-rendered list, tiny client script for the activate calls. Activation
+ * creates a DRAFT — the screen keeps repeating that, because the one wrong
+ * outcome here is a generated legal text going public unread.
+ */
+await LocalDB.init();
+const rows = await LocalDB.getSettings();
+const map: Record<string, unknown> = {};
+for (const r of rows) map[r.key] = r.value;
+const commerceOn = resolveCommerceEnabled(map);
+
+const pages = pagesOnly(await LocalDB.getPosts()).filter((p) => p.status !== 'trashed');
+
+const templates = LEGAL_TEMPLATES
+  .filter((t) => commerceOn || !t.commerceOnly)
+  .map((t) => ({
+    id: t.id,
+    label: t.label,
+    locales: LEGAL_TEMPLATE_LOCALES.map((loc) => {
+      const rendered = renderLegalTemplate(t.id, loc, map)!;
+      const existing = pages.find((p) => p.slug === t.locales[loc].slug);
+      return {
+        locale: loc,
+        title: t.locales[loc].title,
+        slug: t.locales[loc].slug,
+        existing: existing ? { id: existing.id, status: existing.status } : null,
+        missingCount: rendered.missing.length,
+      };
+    }),
+  }));
+
+const t = Astro.locals.t;
+---
+
+<AdminLayout title={t('admin.chrome.legalPages')}>
+  <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="mb-6">
+      <h1 class="text-3xl font-bold text-gray-900">{t('admin.chrome.legalPages')}</h1>
+      <p class="text-gray-600 mt-2">
+        Ready-made starting texts for the pages the law expects. Activating one
+        creates a <strong>draft</strong> page in your language with your business
+        details filled in — review it, adapt it, then publish. These templates
+        are a head start, not legal advice.
+      </p>
+    </div>
+
+    <div id="legal-notice" class="hidden mb-4 px-3 py-2 rounded-md border text-sm"></div>
+
+    <div class="space-y-6">
+      {templates.map((tpl) => (
+        <div class="bg-white border border-gray-200 rounded-xl p-6">
+          <h2 class="text-lg font-semibold text-gray-900 mb-4">{tpl.label}</h2>
+          <div class="grid gap-3 sm:grid-cols-3">
+            {tpl.locales.map((loc) => (
+              <div class="border border-gray-100 rounded-lg p-4">
+                <p class="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">{loc.locale}</p>
+                <p class="text-sm font-medium text-gray-900 mb-0.5">{loc.title}</p>
+                <p class="text-xs text-gray-400 mb-3">/{loc.slug}</p>
+                {loc.existing ? (
+                  <a
+                    href={`/admin/posts/${loc.existing.id}/edit`}
+                    class="inline-block px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"
+                  >
+                    {loc.existing.status === 'published' ? 'Published — edit' : 'Draft — review'}
+                  </a>
+                ) : (
+                  <button
+                    type="button"
+                    class="legal-activate px-3 py-1.5 text-sm rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium"
+                    data-id={tpl.id}
+                    data-locale={loc.locale}
+                  >
+                    Activate
+                  </button>
+                )}
+                {loc.missingCount > 0 && !loc.existing && (
+                  <p class="text-xs text-amber-700 mt-2">
+                    {loc.missingCount} business detail{loc.missingCount === 1 ? '' : 's'} not set —
+                    will appear highlighted in the draft. <a href="/admin/settings#set-withdrawal" class="underline">Fill them in Settings</a>.
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+
+    <p class="text-sm text-gray-500 mt-6">
+      The statutory <a href="/legal/withdrawal" class="text-blue-600 hover:underline">right-of-withdrawal notice</a>
+      is generated from your settings separately and is always up to date — the
+      Returns template links to it rather than copying it.
+    </p>
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../lib/apiClient';
+
+  const notice = (msg, kind = 'success') => {
+    const n = document.getElementById('legal-notice');
+    n.textContent = msg;
+    n.className = 'mb-4 px-3 py-2 rounded-md border text-sm '
+      + (kind === 'success' ? 'bg-green-50 border-green-200 text-green-700' : 'bg-red-50 border-red-200 text-red-700');
+    n.classList.remove('hidden');
+  };
+
+  for (const btn of document.querySelectorAll('.legal-activate')) {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      const res = await api.post('/api/legal/templates', {
+        id: btn.dataset.id,
+        locale: btn.dataset.locale,
+      });
+      if (!res.ok) {
+        btn.disabled = false;
+        notice(`Could not activate: ${res.error}`, 'error');
+        return;
+      }
+      notice(res.message || 'Draft created.');
+      setTimeout(() => window.location.reload(), 900);
+    });
+  }
+</script>

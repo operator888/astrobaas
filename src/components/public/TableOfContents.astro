@@ -1,0 +1,67 @@
+---
+/**
+ * DEFAULT `TableOfContents` slot — the contents list for one article.
+ *
+ * ## Plain anchors, no script
+ *
+ * Same reasoning as the language switcher. A ToC is navigation, so it has to
+ * work before hydration and be followable by a crawler; and the CSP forbids
+ * inline handlers, so anything clever would need a hashed script for no gain.
+ * Smooth scrolling is `scroll-behavior` in the stylesheet, which is a stated
+ * preference rather than a behaviour this component owns.
+ *
+ * ## `<details>`, open on desktop only
+ *
+ * On a phone a contents list is the whole first screen, so the article itself
+ * starts below the fold — the exact reason readers say they dislike them. The
+ * native `<details>` element collapses it with no JavaScript at all; the
+ * stylesheet opens it at wider viewports.
+ *
+ * ## Indentation comes from `depth`, not from `level`
+ *
+ * An article that jumps h2 → h4 indents one step here, not two. See the note on
+ * `TocItem.depth` — rendering the arithmetic difference leaves a visible hole
+ * where the missing h3 would have been, which reads as a broken list.
+ */
+import type { TocItem } from '../../lib/toc';
+
+interface Props {
+  items: TocItem[];
+  /** Heading for the block. The route passes a localized string. */
+  label?: string;
+  class?: string;
+}
+
+const { items, label = 'Contents', class: extraClass = '' } = Astro.props as Props;
+
+/**
+ * Indentation is capped at the two steps the h2–h4 range can produce, and
+ * mapped to fixed utilities rather than composed as `pl-${n}`: Tailwind scans
+ * source text for class names, so a computed one is not in the stylesheet and
+ * the indent silently does nothing.
+ */
+const INDENT = ['', 'pl-4', 'pl-8'] as const;
+---
+
+{items.length > 0 && (
+  <details
+    class={`ab-toc no-print not-prose my-8 rounded-lg border border-gray-200 bg-gray-50 px-5 py-4 ${extraClass}`}
+    aria-label={label}
+  >
+    <summary class="cursor-pointer list-none font-semibold text-gray-900 marker:hidden">
+      {label}
+    </summary>
+    <nav class="mt-3">
+      <ol class="space-y-1.5 text-sm">
+        {items.map((item) => (
+          <li class={INDENT[Math.min(item.depth, INDENT.length - 1)]}>
+            <a
+              href={`#${item.id}`}
+              class="text-gray-600 hover:text-blue-600 hover:underline underline-offset-4 transition-colors duration-200"
+            >{item.text}</a>
+          </li>
+        ))}
+      </ol>
+    </nav>
+  </details>
+)}

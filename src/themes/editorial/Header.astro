@@ -1,0 +1,37 @@
+---
+/**
+ * Editorial theme — `Header` override.
+ *
+ * A centred masthead rather than the default's left-logo bar. Shows that a theme
+ * can replace site chrome outright while still receiving the same typed props.
+ */
+import type { HeaderProps } from '../../core/theme-slots';
+import LocaleSwitcher from '../../components/public/LocaleSwitcher.astro';
+import { routeHref } from '../../lib/locale-links';
+
+const { siteTitle = 'AstroBaaS', localeOptions } = Astro.props as HeaderProps;
+
+// Built through routeHref so the masthead keeps the reader in their language.
+// A theme that hardcodes these is the bug this shipped with.
+const loc = Astro.locals.locale;
+const nav = [
+  { href: routeHref('/', loc), label: 'Home' },
+  { href: routeHref('/blog', loc), label: 'Journal' },
+  { href: routeHref('/about', loc), label: 'About' },
+  { href: routeHref('/contact', loc), label: 'Contact' },
+];
+---
+
+<header class="editorial-header bg-white border-b border-gray-900">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 text-center">
+    <a href={routeHref('/', loc)} class="inline-block">
+      <span class="font-serif text-3xl md:text-4xl tracking-tight text-gray-900">{siteTitle}</span>
+    </a>
+    <nav class="no-print mt-5 flex justify-center gap-8 text-xs uppercase tracking-widest text-gray-600">
+      {nav.map((item) => (
+        <a href={item.href} class="hover:text-gray-900">{item.label}</a>
+      ))}
+    </nav>
+    <LocaleSwitcher options={localeOptions} class="mt-4 justify-center" />
+  </div>
+</header>

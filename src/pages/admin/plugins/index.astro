@@ -1,0 +1,387 @@
+---
+import AdminLayout from '../../../layouts/AdminLayout.astro';
+import { LocalDB } from '../../../lib/localdb';
+import { pluginManager } from '../../../lib/plugin-system';
+import { ensurePluginsBootstrapped } from '../../../plugins';
+import { isDeclarativeRecord } from '../../../lib/manifest-runtime';
+import { registryEnabled } from '../../../lib/registry';
+import { canOpenAdminPage } from '../../../lib/admin-access';
+
+await LocalDB.init();
+const t = Astro.locals.t;
+const user = Astro.locals.user;
+// One rule, asked — not re-implemented. A hand-written role test here is
+// how the page, the middleware and the sidebar drift apart.
+if (!canOpenAdminPage('/admin/plugins', user?.role)) {
+  return Astro.redirect('/admin');
+}
+
+await ensurePluginsBootstrapped();
+const records = await LocalDB.getPlugins();
+const recById = new Map(records.map((r) => [r.id, r]));
+
+/**
+ * Plugins the database says are ACTIVE but which nothing registered.
+ *
+ * This list is built from `pluginManager.getPlugins()`, so a plugin that failed
+ * to load simply DISAPPEARS from the page — no row, no error, nothing to
+ * click. On a shop that bought a paid module, that is the worst possible
+ * presentation: the admin looks tidy and correct while the feature is silently
+ * not happening, and the only trace is a line in the boot log nobody reads.
+ *
+ * The commonest cause is a deploy that did not install an external module named
+ * in ASTROBAAS_PLUGINS — an eyewear shop redeployed without @astrobaas/optical
+ * keeps accepting orders for prescription lenses and validates none of them.
+ */
+const orphaned = records
+  .filter((r) => r.active && !pluginManager.getPlugins().some((p) => p.id === r.id))
+  .map((r) => r.id);
+const plugins = pluginManager.getPlugins().map((p) => {
+  const rec = recById.get(p.id);
+  const declarative = isDeclarativeRecord(rec?.settings);
+  return {
+    id: p.id,
+    name: p.name,
+    version: p.version,
+    description: p.description,
+    author: p.author,
+    active: rec?.active ?? false,
+    declarative,
+    source: declarative ? ((rec!.settings as any).source ?? 'upload') : null,
+    capabilities: declarative ? Object.keys((rec!.settings as any).manifest?.capabilities ?? {}) : [],
+    dependencies: declarative ? ((rec!.settings as any).manifest?.dependencies ?? {}) : {},
+    hooks: [
+      ...Object.keys(p.filters ?? {}).map((h) => `filter:${h}`),
+      ...Object.keys(p.actions ?? {}).map((h) => `action:${h}`),
+    ],
+  };
+});
+const activeCount = plugins.filter((p) => p.active).length;
+const declarativeCount = plugins.filter((p) => p.declarative).length;
+const canUseRegistry = registryEnabled();
+---
+
+<AdminLayout title={t('admin.plugins.title')}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="mb-8">
+      <h1 class="text-3xl font-bold text-gray-900">{t('admin.plugins.title')}</h1>
+      <p class="text-gray-600 mt-2">
+        {t('admin.plugins.intro', { active: activeCount, total: plugins.length })}
+      </p>
+    </div>
+
+    {/* The emphasis and the <code> spans sit mid-sentence and move when the
+        sentence is reordered, so each sentence is ONE key rendered with
+        set:html rather than a chain of fragments English word order would
+        pin in place. The strings are ours, from the catalogue — no user data
+        reaches this. */}
+    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 text-sm text-blue-900">
+      <strong>{t('admin.plugins.tiersHeading')}</strong>
+      <Fragment set:html={t('admin.plugins.tiersBundled', { path: '<code>src/plugins/</code>' })} />
+      <Fragment set:html={t('admin.plugins.tiersDeclarative')} />
+      <Fragment set:html={t('admin.plugins.tiersDocs', { doc: '<code>PLUGIN_DEVELOPMENT.md</code>' })} />
+    </div>
+
+    <!-- Install a declarative plugin -->
+    {orphaned.length > 0 && (
+      <div class="mb-8 rounded-lg border border-red-300 bg-red-50 p-4">
+        <h2 class="font-semibold text-red-800">
+          {t('admin.plugins.orphanedTitle', undefined, { count: orphaned.length })}
+        </h2>
+        <p class="mt-1 text-sm text-red-700">
+          <Fragment set:html={t('admin.plugins.orphanedBody')} />
+        </p>
+        <ul class="mt-2 text-sm text-red-800 list-disc list-inside">
+          {orphaned.map((id) => <li><code>{id}</code></li>)}
+        </ul>
+        {/* The env var name and the module name are passed IN, not translated:
+            they are identifiers a reader has to type back verbatim. */}
+        <p class="mt-2 text-sm text-red-700">
+          <Fragment set:html={t('admin.plugins.orphanedCause', {
+            env: '<code class="px-1 bg-red-100 rounded">ASTROBAAS_PLUGINS</code>',
+          })} />
+          {orphaned.includes('optical') && (
+            <span> <Fragment set:html={t('admin.plugins.orphanedOptical', {
+              module: '<code class="px-1 bg-red-100 rounded">@astrobaas/optical</code>',
+            })} /></span>
+          )}
+        </p>
+      </div>
+    )}
+
+    <details class="bg-white rounded-lg shadow-sm border border-gray-200 mb-8" id="install-panel">
+      <summary class="cursor-pointer px-6 py-4 font-medium text-gray-900 select-none">
+        {t('admin.plugins.installPanel')}
+        <span class="text-xs font-normal text-gray-500 ml-2">
+          ({t('admin.plugins.installedCount', undefined, { count: declarativeCount })} · {
+            canUseRegistry ? t('admin.plugins.registryAvailable') : t('admin.plugins.registryDisabled')
+          })
+        </span>
+      </summary>
+
+      <div class="px-6 pb-6 space-y-6 border-t border-gray-100 pt-5">
+        <div id="install-notice" class="hidden px-3 py-2 rounded-md border text-sm"></div>
+
+        {canUseRegistry && (
+          <div>
+            <div class="flex items-center justify-between gap-3 mb-2">
+              <h3 class="text-sm font-semibold text-gray-900">{t('admin.plugins.fromRegistry')}</h3>
+              <button id="registry-load" type="button" class="text-sm px-3 py-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700">
+                {t('admin.plugins.browseRegistry')}
+              </button>
+            </div>
+            <p class="text-xs text-gray-500 mb-3">
+              {t('admin.plugins.registryHint')}
+            </p>
+            <div id="registry-list" class="space-y-2"></div>
+          </div>
+        )}
+
+        <div>
+          <h3 class="text-sm font-semibold text-gray-900 mb-2">{t('admin.plugins.fromManifest')}</h3>
+          <p class="text-xs text-gray-500 mb-2">
+            {t('admin.plugins.manifestHint')}
+          </p>
+          {/* The placeholder is a JSON code sample, not prose: its keys are
+              manifest field names the validator matches on. Untranslated in
+              every locale, deliberately. */}
+          <textarea
+            id="manifest-input"
+            rows="8"
+            spellcheck="false"
+            placeholder={'{\n  "id": "my-plugin",\n  "name": "My Plugin",\n  "version": "1.0.0",\n  "capabilities": { "css": ".x{}" }\n}'}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          ></textarea>
+          <div class="flex gap-2 mt-2">
+            <button id="manifest-install" type="button" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium">
+              {t('admin.plugins.validateInstall')}
+            </button>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    {plugins.length === 0 ? (
+      <p class="text-sm text-gray-500">{t('admin.plugins.empty')}</p>
+    ) : (
+      <div class="space-y-4">
+        {plugins.map((p) => (
+          <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 flex items-start justify-between gap-6">
+            <div class="min-w-0">
+              <div class="flex items-center gap-3 flex-wrap">
+                <h3 class="text-lg font-medium text-gray-900">{p.name}</h3>
+                <span class="text-xs text-gray-500">v{p.version}</span>
+                <span class={`px-2 py-0.5 rounded-full text-xs font-medium ${p.active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>
+                  {p.active ? t('admin.plugins.statusActive') : t('admin.plugins.statusInactive')}
+                </span>
+                <span class={`px-2 py-0.5 rounded-full text-xs font-medium ${p.declarative ? 'bg-purple-100 text-purple-800' : 'bg-slate-100 text-slate-700'}`}>
+                  {p.declarative ? t('admin.plugins.kindDeclarative') : t('admin.plugins.kindBundled')}
+                </span>
+              </div>
+              <p class="text-sm text-gray-600 mt-1">{p.description}</p>
+              <div class="text-xs text-gray-400 mt-2">
+                {/* Hook ids, capability keys and the source tag are values the
+                    plugin API defines — the LABELS around them translate, the
+                    values never do. */}
+                {t('admin.plugins.byAuthor', { author: p.author })} · {
+                  t('admin.plugins.hooks', { hooks: p.hooks.join(', ') || t('admin.plugins.noHooks') })
+                }
+                {p.declarative && (
+                  <span> · {t('admin.plugins.capabilities', { list: p.capabilities.join(', ') })}
+                  · {t('admin.plugins.source', { source: p.source ?? '' })}</span>
+                )}
+                {/* Shown even when satisfied: an operator deciding whether to
+                    turn something off needs to see what hangs off it, not only
+                    discover it from a refusal. */}
+                {Object.keys(p.dependencies).length > 0 && (
+                  <span> · {t('admin.plugins.requires', {
+                    list: Object.entries(p.dependencies).map(([d, r]) => `${d} ${r}`).join(', '),
+                  })}</span>
+                )}
+              </div>
+            </div>
+            <div class="shrink-0 flex items-center gap-2">
+              <button
+                class={`plugin-toggle px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
+                  p.active
+                    ? 'bg-red-50 text-red-700 hover:bg-red-100 border border-red-200'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                }`}
+                data-plugin-id={p.id}
+                data-active={p.active ? '1' : '0'}
+              >
+                {p.active ? t('admin.plugins.deactivate') : t('admin.plugins.activate')}
+              </button>
+              {p.declarative && (
+                <button
+                  class="plugin-uninstall px-3 py-2 rounded-lg text-sm font-medium bg-gray-100 hover:bg-red-100 hover:text-red-700 text-gray-600"
+                  data-plugin-id={p.id}
+                  data-plugin-name={p.name}
+                  title={t('admin.plugins.uninstallTitle')}
+                >
+                  {t('admin.plugins.uninstall')}
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    )}
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck
+  import { api, apiFetch } from '../../../lib/apiClient';
+  import { flash as sharedFlash } from '../../../lib/admin-ui';
+
+  const notice = document.getElementById('install-notice');
+  // Default 'error', which is what THIS screen's call sites were written
+  // against — nine of them call flash(msg) with no kind, and eight of those are
+  // failure paths. The shared-helper sweep normalised the default to 'success'
+  // and turned every plugin install error into a green box saying "Invalid
+  // JSON". The other three screens genuinely default to success and pass
+  // 'error' explicitly, so the divergence belongs here, named.
+  function flash(msg, kind = 'error') {
+    // The shared helper, not a seventh copy of the class string. Tailwind scans
+    // source TEXT for class names, so the branches there are written out in
+    // full — a composed `bg-${c}-50` is not in the stylesheet and the notice
+    // renders unstyled in a production build while looking right in dev.
+    sharedFlash(notice, msg, kind === 'success' ? 'success' : 'error');
+  }
+
+  // ---- activate / deactivate / uninstall ----
+  document.addEventListener('click', async (e) => {
+    const toggle = e.target.closest('.plugin-toggle');
+    if (toggle) {
+      const id = toggle.dataset.pluginId;
+      const active = toggle.dataset.active === '1';
+      toggle.disabled = true;
+      const res = await api.post('/api/plugins/toggle', { id, active: !active });
+      if (res.ok) window.location.reload();
+      else {
+        toggle.disabled = false;
+        alert(res.error || window.t('admin.plugins.toggleFailed'));
+      }
+      return;
+    }
+
+    const remove = e.target.closest('.plugin-uninstall');
+    if (remove) {
+      const id = remove.dataset.pluginId;
+      const name = remove.dataset.pluginName || id;
+      if (!confirm(window.t('admin.plugins.uninstallConfirm', { name }))) return;
+      remove.disabled = true;
+      const res = await apiFetch('/api/plugins/install', { method: 'DELETE', json: { id } });
+      if (res.ok) window.location.reload();
+      else {
+        remove.disabled = false;
+        alert(res.error || window.t('admin.plugins.uninstallFailed'));
+      }
+    }
+  });
+
+  // ---- install from a pasted manifest ----
+  const installBtn = document.getElementById('manifest-install');
+  installBtn?.addEventListener('click', async () => {
+    const raw = document.getElementById('manifest-input').value.trim();
+    if (!raw) return flash(window.t('admin.plugins.pasteFirst'));
+    let manifest;
+    try {
+      manifest = JSON.parse(raw);
+    } catch (err) {
+      return flash(window.t('admin.plugins.invalidJson', { message: err.message }));
+    }
+    installBtn.disabled = true;
+    const res = await api.post('/api/plugins/install', { manifest, source: 'upload' });
+    installBtn.disabled = false;
+    if (res.ok) {
+      flash(window.t('admin.plugins.installedFlash', { id: res.data.id, version: res.data.version }), 'success');
+      setTimeout(() => window.location.reload(), 700);
+    } else {
+      // Surface per-field validation errors, not just a generic failure.
+      // res.error and the per-field reasons come from the API already worded;
+      // only the fallback is ours to translate.
+      const details = res.details?.errors;
+      flash(Array.isArray(details)
+        ? `${res.error}: ${details.join(' · ')}`
+        : res.error || window.t('admin.plugins.installFailed'));
+    }
+  });
+
+  // ---- browse + install from the curated registry ----
+  const loadBtn = document.getElementById('registry-load');
+  const list = document.getElementById('registry-list');
+
+  function renderEntries(entries) {
+    list.textContent = '';
+    if (!entries.length) {
+      const p = document.createElement('p');
+      p.className = 'text-xs text-gray-500';
+      p.textContent = window.t('admin.plugins.registryEmpty');
+      list.appendChild(p);
+      return;
+    }
+    for (const entry of entries) {
+      const row = document.createElement('div');
+      row.className = 'flex items-start justify-between gap-4 border border-gray-200 rounded-lg p-3';
+
+      const left = document.createElement('div');
+      left.className = 'min-w-0';
+      const title = document.createElement('div');
+      title.className = 'text-sm font-medium text-gray-900';
+      // textContent throughout: registry data is third-party.
+      title.textContent = `${entry.name} v${entry.version}`;
+      const desc = document.createElement('p');
+      desc.className = 'text-xs text-gray-500 mt-0.5';
+      desc.textContent = entry.description || '';
+      left.append(title, desc);
+
+      const btn = document.createElement('button');
+      btn.className = 'shrink-0 px-3 py-1.5 rounded-lg text-sm bg-blue-600 text-white hover:bg-blue-700';
+      // The label is only ever read by a human — nothing dispatches on it, and
+      // the reset below uses the same key, so it cannot drift out of sync.
+      btn.textContent = window.t('admin.plugins.install');
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.textContent = window.t('admin.plugins.verifying');
+        const got = await api.get('/api/plugins/registry', { id: entry.id });
+        if (!got.ok) {
+          btn.disabled = false;
+          btn.textContent = window.t('admin.plugins.install');
+          return flash(got.error || window.t('admin.plugins.fetchManifestFailed'));
+        }
+        const res = await api.post('/api/plugins/install', {
+          manifest: got.data.manifest,
+          source: `registry:${entry.id}`,
+        });
+        if (res.ok) {
+          flash(window.t('admin.plugins.installedFlash', { id: res.data.id, version: res.data.version }), 'success');
+          setTimeout(() => window.location.reload(), 700);
+        } else {
+          btn.disabled = false;
+          btn.textContent = window.t('admin.plugins.install');
+          const details = res.details?.errors;
+          flash(Array.isArray(details)
+            ? `${res.error}: ${details.join(' · ')}`
+            : res.error || window.t('admin.plugins.installFailed'));
+        }
+      });
+
+      row.append(left, btn);
+      list.appendChild(row);
+    }
+  }
+
+  loadBtn?.addEventListener('click', async () => {
+    loadBtn.disabled = true;
+    loadBtn.textContent = window.t('admin.plugins.loading');
+    const res = await api.get('/api/plugins/registry');
+    loadBtn.disabled = false;
+    // Same key the server-rendered button used, so the reset restores the
+    // label the operator actually clicked.
+    loadBtn.textContent = window.t('admin.plugins.browseRegistry');
+    if (!res.ok) return flash(res.error || window.t('admin.plugins.registryReadFailed'));
+    renderEntries(res.data.plugins || []);
+  });
+</script>

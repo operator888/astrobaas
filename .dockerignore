@@ -1,0 +1,16 @@
+node_modules
+dist
+.astro
+.git
+.github
+db.json
+public/uploads/*
+!public/uploads/.gitkeep
+.env
+.env.*
+*.log
+.DS_Store
+# Lease files beside a lowdb database (src/lib/lease.ts)
+*.lease
+*.lease.lock
+*.lease.*.tmp

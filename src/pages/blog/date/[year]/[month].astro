@@ -1,0 +1,64 @@
+---
+/**
+ * A month's archive (C-153).
+ *
+ * Filtered in the route rather than pushed into `PostQuery`: a date range in
+ * the query means a second SQL implementation to keep in step with the
+ * in-memory comparator, for a page already bounded by how much a site has
+ * published.
+ *
+ * Unlike the author archive this needs no opt-in — a month is not a person.
+ */
+import PublicLayout from '../../../../layouts/PublicLayout.astro';
+import { LocalDB } from '../../../../lib/localdb';
+import { articlesOnly } from '../../../../lib/post-kind';
+import { visibleContent } from '../../../../lib/visibility';
+import { filterByLocale } from '../../../../lib/i18n';
+import { prepareCards } from '../../../../lib/post-cards';
+import { settingsMap } from '../../../../lib/settings-map';
+import { resolveActiveTheme } from '../../../../lib/theme-runtime';
+import { postHref } from '../../../../lib/locale-links';
+import { inMonth, monthLabel } from '../../../../lib/archive-view';
+
+export const prerender = false;
+
+const year = Number(Astro.params.year);
+const month = Number(Astro.params.month);
+// A malformed URL is a 404, not a page listing everything: `/blog/date/x/y`
+// rendering the whole archive would be a soft 404 with a working-looking title.
+if (!Number.isInteger(year) || year < 1970 || year > 3000
+  || !Number.isInteger(month) || month < 1 || month > 12) {
+  return new Response('Not found', { status: 404 });
+}
+
+await LocalDB.init();
+const map = settingsMap(await LocalDB.getSettings());
+const all = articlesOnly(visibleContent(await LocalDB.getPosts(), null)).filter((p) => !p.noindex);
+const posts = inMonth(filterByLocale(all, Astro.locals.locale), year, month);
+
+const cards = prepareCards(posts, {
+  users: await LocalDB.getUsers(),
+  categories: await LocalDB.getCategories(),
+  byline: { siteAuthorName: String(map.site_author_name ?? ''), siteTitle: String(map.site_title ?? '') },
+});
+
+const { slots } = await resolveActiveTheme();
+const PostCard = slots.PostCard as any;
+const label = monthLabel(year, month);
+---
+
+<PublicLayout title={`Archive: ${label}`} description={`Everything published in ${label}.`}>
+  <section class="max-w-4xl mx-auto px-4 py-12">
+    <h1 class="text-3xl font-bold text-gray-900 mb-2">{label}</h1>
+    <p class="text-sm text-gray-500 mb-8">
+      {cards.length} {cards.length === 1 ? 'article' : 'articles'}
+    </p>
+    {cards.length === 0 ? (
+      <p class="text-gray-500">Nothing was published that month.</p>
+    ) : (
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {cards.map((p) => <PostCard post={p} href={postHref(`/blog/${p.slug}`, p)} />)}
+      </div>
+    )}
+  </section>
+</PublicLayout>

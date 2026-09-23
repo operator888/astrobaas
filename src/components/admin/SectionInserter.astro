@@ -1,0 +1,336 @@
+---
+/**
+ * The section palette.
+ *
+ * This is the whole "Gutenberg-lite" implementation: an inserter, a vocabulary
+ * (src/core/sections.ts) and a stylesheet (src/styles/sections.css). Clicking a
+ * section pastes a pre-designed skeleton into the existing contenteditable
+ * editor. There is no block tree, no second document model, and no new storage.
+ *
+ * ## Why this stays CSP-clean
+ *
+ * The CSP is hash-based with no `'unsafe-inline'` for scripts. Everything below
+ * works within that:
+ *
+ *  - This `<script>` is an Astro script in a `.astro` file, so Vite bundles it
+ *    and Astro emits its sha256 — exactly like the editor script beside it.
+ *  - Templates are build-time literals from `sections.ts`. Nothing is
+ *    interpolated, so no operator data and nothing executable can appear in one.
+ *  - `execCommand('insertHTML', …)` inserts markup; it does not evaluate
+ *    scripts, and the sanitizer strips `<script>` on save regardless.
+ *  - No inline `style` attribute is ever written. The sanitizer removes them,
+ *    which is what silently destroyed the old alignment buttons.
+ *
+ * ## Why modifier controls are generated
+ *
+ * `SectionDef.modifiers` already describes the variants, so the `<select>`s are
+ * rendered from it. Hand-writing a control per section is what makes a palette
+ * stop scaling, and it is how a section ends up offering a class the sanitizer
+ * does not allow — the allow-list is generated from the same source.
+ */
+import { SECTIONS } from '../../core/sections';
+import { jsonForScript } from '../../lib/json-in-html';
+import { resolvePatterns } from '../../lib/pattern-registry';
+import { resolveActiveTheme } from '../../lib/theme-runtime';
+import { LocalDB } from '../../lib/localdb';
+import { isDeclarativeRecord } from '../../lib/manifest-runtime';
+import { installedSections } from '../../lib/manifest-sections';
+import type { PluginManifest } from '../../core/manifest';
+
+interface Props {
+  /** id of the RichTextEditor's contenteditable surface. */
+  targetId?: string;
+}
+const { targetId = 'editor-content' } = Astro.props;
+
+// Patterns come from the built-in set plus the active theme's, each vetted
+// against the sanitizer. A rejected one is simply not offered — the reason is
+// reported in Admin → Tools rather than surfaced mid-edit, where an author
+// could do nothing about it.
+const activeTheme = await resolveActiveTheme();
+const { patterns } = resolvePatterns(activeTheme.patterns, activeTheme.id);
+
+// Sections contributed by ACTIVE installed plugins. Deactivating a plugin
+// removes its sections from the palette but leaves them in existing content,
+// where they degrade to unstyled markup — the same trade every section makes,
+// and the reason the sanitizer matches the namespace by shape rather than by
+// looking up what is installed.
+await LocalDB.init();
+const pluginSections = (await LocalDB.getPlugins())
+  .filter((r) => r.active && isDeclarativeRecord(r.settings))
+  .flatMap((r) => installedSections((r.settings as { manifest: PluginManifest }).manifest));
+
+// Serialised as data, not code: a JSON script block carries nothing executable
+// and therefore needs no CSP hash.
+const palette = [
+  ...SECTIONS.map((s) => ({
+    name: s.name,
+    label: s.label,
+    description: s.description,
+    template: s.template,
+    modifiers: s.modifiers ?? {},
+    /**
+     * What a modifier class is built from. Core's own sections use the bare
+     * `ab-` namespace; a plugin's use its own, so a plugin cannot mint a core
+     * class and inherit styling it does not control.
+     */
+    modifierPrefix: 'ab-',
+    /** The class the caret-detection matches on. */
+    rootClass: `ab-${s.name}`,
+    from: '',
+  })),
+  // A plugin section is inserted and detected exactly like a core one; only its
+  // root class and its origin label differ.
+  ...pluginSections.map((s) => ({
+    name: `x-${s.pluginId}-${s.name}`,
+    label: s.label,
+    description: s.description,
+    template: s.template,
+    modifiers: s.modifiers,
+    modifierPrefix: s.modifierPrefix,
+    rootClass: s.className,
+    from: s.pluginId,
+  })),
+];
+
+// Patterns travel the same way — as data in a JSON block, never interpolated
+// into script source.
+const patternData = patterns.map((p) => ({ name: p.name, label: p.label, html: p.html }));
+
+// Chrome only. Section and pattern labels/descriptions come from sections.ts,
+// the theme and plugin manifests, so they are translated at their source rather
+// than here; the modifier <select>s built in the script below print strings that
+// are also class fragments (`ab-<group>-<value>`) and must stay verbatim.
+const t = Astro.locals.t;
+---
+
+<div class="ab-section-inserter border border-gray-200 rounded-lg p-3 mb-3" data-target={targetId}>
+  <div class="flex items-center justify-between mb-2">
+    <span class="text-sm font-medium text-gray-700">{t('admin.editor.sectionsHeading')}</span>
+    <span class="text-xs text-gray-400">{t('admin.editor.sectionsHint')}</span>
+  </div>
+
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+    {palette.map((s) => (
+      <button
+        type="button"
+        class="ab-insert-section text-left rounded-md border border-gray-200 px-2 py-2 hover:border-blue-500 transition-colors"
+        data-section={s.name}
+        title={s.from ? t('admin.editor.sectionFromPlugin', { description: s.description, plugin: s.from }) : s.description}
+      >
+        <span class="block text-xs font-medium text-gray-800">{s.label}</span>
+        <span class="block text-[11px] text-gray-400 truncate">
+          {s.from ? t('admin.editor.fromPlugin', { plugin: s.from }) : s.description}
+        </span>
+      </button>
+    ))}
+  </div>
+
+  {patternData.length > 0 && (
+    <div class="mt-3 pt-3 border-t border-gray-100">
+      <div class="flex items-center justify-between mb-2">
+        <span class="text-sm font-medium text-gray-700">{t('admin.editor.patternsHeading')}</span>
+        <span class="text-xs text-gray-400">{t('admin.editor.patternsHint')}</span>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        {patterns.map((p) => (
+          <button
+            type="button"
+            class="ab-insert-pattern text-left rounded-md border border-gray-200 px-2 py-2 hover:border-blue-500 transition-colors"
+            data-pattern={p.name}
+            title={p.description}
+          >
+            <span class="block text-xs font-medium text-gray-800">{p.label}</span>
+            <span class="block text-[11px] text-gray-400 truncate">{p.description}</span>
+          </button>
+        ))}
+      </div>
+      <script type="application/json" class="ab-pattern-data" set:html={jsonForScript(patternData)} />
+    </div>
+  )}
+
+  <!-- Variant controls for whichever section the cursor is inside. Hidden until
+       there is something to configure, so the palette stays quiet by default. -->
+  <div class="ab-section-modifiers mt-3 hidden">
+    <div class="flex items-center justify-between mb-1">
+      <span class="block text-xs font-medium text-gray-600">
+        {t('admin.editor.selectedSection')} <span class="ab-current-section font-normal text-gray-500"></span>
+      </span>
+      <!-- Move / duplicate / delete act on the section containing the caret.
+           Without these, a section inserted in the wrong place can only be
+           fixed by hand-editing HTML, which is exactly the thing a palette is
+           supposed to save you from. -->
+      <div class="flex items-center gap-1">
+        <button type="button" class="ab-section-op px-2 py-0.5 text-xs border border-gray-300 rounded hover:bg-gray-50" data-op="up" title={t('admin.editor.moveUp')}>↑</button>
+        <button type="button" class="ab-section-op px-2 py-0.5 text-xs border border-gray-300 rounded hover:bg-gray-50" data-op="down" title={t('admin.editor.moveDown')}>↓</button>
+        <button type="button" class="ab-section-op px-2 py-0.5 text-xs border border-gray-300 rounded hover:bg-gray-50" data-op="duplicate" title={t('admin.editor.duplicate')}>⧉</button>
+        <button type="button" class="ab-section-op px-2 py-0.5 text-xs border border-red-200 text-red-600 rounded hover:bg-red-50" data-op="delete" title={t('admin.editor.delete')}>✕</button>
+      </div>
+    </div>
+    <div class="ab-modifier-controls flex flex-wrap gap-2"></div>
+  </div>
+
+  <script type="application/json" class="ab-section-data" set:html={jsonForScript(palette)} />
+</div>
+
+<script>
+  import { insertIntoEditor, syncEditorSurface } from '../../lib/editor-insert';
+  // @ts-nocheck — vanilla browser glue (DOM only); not part of the typed API surface.
+  document.querySelectorAll('.ab-section-inserter').forEach((root) => {
+    const dataEl = root.querySelector('.ab-section-data');
+    if (!dataEl) return;
+    let SECTIONS = [];
+    try { SECTIONS = JSON.parse(dataEl.textContent || '[]'); } catch { return; }
+
+    const targetId = root.getAttribute('data-target') ?? '';
+    const surface: any = document.getElementById(targetId);
+    if (!surface) return;
+
+    // `any` on the three panel nodes: they are queried once, guarded by the
+    // early return above, and every use below is a DOM call whose element type
+    // varies. Narrowing each would be a dozen casts to restate the guard.
+    const modifierBox: any = root.querySelector('.ab-section-modifiers');
+    const controls: any = root.querySelector('.ab-modifier-controls');
+    const currentLabel: any = root.querySelector('.ab-current-section');
+
+    const patternEl = root.querySelector('.ab-pattern-data');
+    let PATTERNS = [];
+    if (patternEl) { try { PATTERNS = JSON.parse(patternEl.textContent || '[]'); } catch { PATTERNS = []; } }
+
+    /** lib/editor-insert.ts — the media picker is the third caller. */
+    const sync = () => syncEditorSurface(surface);
+
+    /** The nearest `ab-*` section containing the caret, if any. */
+    const currentSection = () => {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return null;
+      let node: any = sel.getRangeAt(0).startContainer;
+      if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+      while (node && node !== surface) {
+        if (node.classList) {
+          for (const s of SECTIONS) {
+            // `rootClass` rather than a name template: a plugin section's class
+            // is `ab-x-<pluginId>-<name>`, which no prefix rule here could
+            // reconstruct correctly.
+            if (node.classList.contains(s.rootClass)) return { el: node, def: s };
+          }
+        }
+        node = node.parentNode;
+      }
+      return null;
+    };
+
+    const renderModifiers = () => {
+      const found = currentSection();
+      controls.innerHTML = '';
+      // The box now carries the move/duplicate/delete controls too, so it is
+      // shown whenever the caret is inside ANY section — not only one that
+      // happens to have variants.
+      if (!found) {
+        modifierBox.classList.add('hidden');
+        return;
+      }
+      modifierBox.classList.remove('hidden');
+      if (currentLabel) currentLabel.textContent = found.def.label;
+      for (const [group, values] of Object.entries(found.def.modifiers) as [string, string[]][]) {
+        const label = document.createElement('label');
+        label.className = 'text-xs text-gray-600 flex items-center gap-1';
+        label.textContent = group;
+        const select = document.createElement('select');
+        select.className = 'text-xs border border-gray-300 rounded px-1 py-0.5';
+        for (const v of values) {
+          const opt = document.createElement('option');
+          opt.value = v;
+          opt.textContent = v;
+          // Reflect what the element already carries.
+          if (found.el.classList.contains(`${found.def.modifierPrefix}${group}-${v}`)) opt.selected = true;
+          select.appendChild(opt);
+        }
+        select.addEventListener('change', () => {
+          // Swap within the group only — never clear the element's other classes.
+          for (const v of values) found.el.classList.remove(`${found.def.modifierPrefix}${group}-${v}`);
+          found.el.classList.add(`${found.def.modifierPrefix}${group}-${select.value}`);
+          sync();
+        });
+        label.appendChild(select);
+        controls.appendChild(label);
+      }
+    };
+
+    root.querySelectorAll('.ab-insert-section').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const def = SECTIONS.find((s: any) => s.name === btn.getAttribute('data-section'));
+        if (!def) return;
+        // insertIntoEditor carries the caret rule AND the textarea sync — see
+        // lib/editor-insert.ts. This file had the pair written out twice.
+        insertIntoEditor(surface, def.template);
+        renderModifiers();
+      });
+    });
+
+    root.querySelectorAll('.ab-insert-pattern').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const def = PATTERNS.find((p: any) => p.name === btn.getAttribute('data-pattern'));
+        if (!def) return;
+        // Same rule as a section: a pattern is several sections, so appending
+        // is usually what is meant, and the caret is honoured when it is
+        // genuinely in the document.
+        insertIntoEditor(surface, def.html);
+        renderModifiers();
+      });
+    });
+
+    /** Move/duplicate/delete the section the caret is in. */
+    const runOp = (op: string) => {
+      const found = currentSection();
+      if (!found) return;
+      const el = found.el;
+      if (op === 'delete') {
+        // No confirm(): this is undoable with the editor's own history, and a
+        // dialog on every delete is the kind of friction that makes people stop
+        // using the controls.
+        el.remove();
+      } else if (op === 'duplicate') {
+        el.insertAdjacentElement('afterend', el.cloneNode(true));
+      } else if (op === 'up') {
+        // previousElementSibling, not previousSibling: whitespace text nodes
+        // between blocks would otherwise make the first click do nothing.
+        const prev = el.previousElementSibling;
+        if (prev) prev.insertAdjacentElement('beforebegin', el);
+      } else if (op === 'down') {
+        const next = el.nextElementSibling;
+        if (next) next.insertAdjacentElement('afterend', el);
+      }
+      sync();
+      // Moving a node collapses the selection, so put the caret back inside the
+      // section that was just acted on — otherwise the controls vanish after
+      // every click and the author has to re-click to move something twice.
+      if (op !== 'delete' && el.isConnected) {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        range.collapse(true);
+        const sel = window.getSelection();
+        if (sel) {
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+      }
+      renderModifiers();
+    };
+
+    root.querySelectorAll('.ab-section-op').forEach((btn) => {
+      // mousedown, not click: clicking a button blurs the contenteditable and
+      // the selection is gone by the time click fires, so `currentSection()`
+      // would return null and every button would silently do nothing.
+      btn.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        runOp(btn.getAttribute('data-op') ?? '');
+      });
+    });
+
+    // Follow the caret so the controls describe what the author is standing in.
+    for (const ev of ['keyup', 'mouseup', 'focus']) {
+      surface.addEventListener(ev, renderModifiers);
+    }
+  });
+</script>

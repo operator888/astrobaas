@@ -1,0 +1,411 @@
+---
+/**
+ * The command palette — one control, opened from anywhere in the admin.
+ *
+ * ## Why it exists
+ *
+ * The admin is 25 built-in screens across five groups, plus one per custom
+ * collection and one per plugin admin page. Reaching any of them means finding
+ * it in a sidebar taller than the viewport on a laptop. A keyboard-first index
+ * of the same screens is the cheapest large improvement available here.
+ *
+ * It indexes EVERYTHING the sidebar shows, deliberately: a palette that cannot
+ * reach a screen the sidebar can is a palette people stop trusting, and the
+ * first collection somebody adds is exactly the screen they will look for.
+ *
+ * ## Why the list is rendered server-side, not fetched
+ *
+ * It is built from `navFor(role)` — the same function the sidebar uses, under
+ * the same rules `canOpenAdminPage` enforces in the middleware — and then
+ * filtered by the commerce switch exactly as the sidebar filters it, so the two
+ * show the same screens rather than merely starting from the same list. The
+ * payload therefore contains only screens this person may actually open, which
+ * is not an optimisation but the security property:
+ *
+ *   **a palette must never reveal that something exists.**
+ *
+ * A client-side filter over the full list would let a manager type "users" and
+ * learn there is a Users screen before being refused by the door. Filtering
+ * happens over a list that was already narrowed by role, and there is no
+ * endpoint to probe.
+ *
+ * At ~28 rows this needs no API and no index. When the FIND tier arrives —
+ * products, orders, posts by name — that will need a request, and it will have
+ * to answer under the caller's role for the same reason, counts included.
+ *
+ * ## Labels come from `t()`, not from the nav table
+ *
+ * `NAV` carries a `key`, not a label; the sidebar renders `admin.chrome.<key>`.
+ * The palette does the same, so the two can never disagree about what a screen
+ * is called — and so a Greek admin does not get an English palette over a Greek
+ * sidebar. That exact bug is recorded in AdminSidebar's own header: one bare
+ * English string among translated ones, invisible until someone switched
+ * language.
+ *
+ * ## Matching
+ *
+ * `foldForSearch` — the same folding the catalogue and the blog use. Accents,
+ * case and Greek final sigma, so `παραγγελιεσ` finds `Παραγγελίες`. Shared
+ * rather than re-implemented, because a second folding rule is a second answer
+ * to "is this the same text".
+ */
+import { navFor, contentTypeNavFor } from '../../lib/admin-nav';
+import { pluginNavFor } from '../../lib/plugin-platform/admin-pages';
+import { isCommerceEnabled } from '../../lib/commerce-service';
+import { jsonForScript } from '../../lib/json-in-html';
+import type { Role } from '../../core/models';
+
+const t = Astro.locals.t;
+const role = Astro.locals.user?.role as Role | undefined;
+
+/**
+ * Flattened, role-filtered, and TRANSLATED here rather than in the browser.
+ *
+ * `window.t` exists in admin scripts, but the group heading a screen sits under
+ * is context a reader uses to tell "Categories" (content) from a shop screen —
+ * and that heading is only known here.
+ */
+/*
+ * The Shop group is hidden when commerce is off — exactly as the sidebar hides
+ * it (`navFor(role).filter((g) => commerceOn || g.heading !== 'groupShop')`).
+ *
+ * Without this the palette offered Products, Orders and Customers on a
+ * blog-only install: screens the sidebar deliberately does not show, and which
+ * the header comment above claimed the palette matched. "The same function the
+ * sidebar uses" was true of `navFor` and false of the result, because the
+ * sidebar filters what it returns.
+ */
+const commerceOn = await isCommerceEnabled();
+
+const commands = [
+  ...navFor(role)
+    .filter((g) => commerceOn || g.heading !== 'groupShop')
+    .flatMap((group) =>
+    group.items.map((item) => ({
+      href: item.href,
+      label: t(`admin.chrome.${item.key}`),
+      group: group.heading ? t(`admin.chrome.${group.heading}`) : '',
+    })),
+  ),
+  /*
+   * Collections and plugin screens.
+   *
+   * Both are labelled by the THING ITSELF rather than by a translation key —
+   * `labelPlural` on a content type, a plugin's own page title — so unlike
+   * everything above, these strings are OPERATOR-SUPPLIED. That is precisely
+   * why the payload below goes through `jsonForScript`: an operator who names a
+   * collection `</script><img src=x onerror=…>` would otherwise be writing
+   * markup into the admin shell of everyone else who opens the palette.
+   *
+   * Both helpers filter by the same `canOpenAdminPage` rule as the rest, so
+   * neither can put a screen in front of someone the middleware would bounce.
+   */
+  ...contentTypeNavFor(role).map((c) => ({
+    href: c.href, label: c.label, group: t('admin.chrome.collections'),
+  })),
+  ...pluginNavFor(role).map((c) => ({
+    href: c.href, label: c.label, group: t('admin.chrome.pluginsSection'),
+  })),
+];
+---
+
+{/*
+  Rendered on every admin screen from AdminLayout, beside the header rather
+  than inside it — the same reasoning as the storefront's search box: a control
+  that lives inside a replaceable component is a control that disappears the
+  first time somebody replaces it.
+*/}
+<div
+  id="ab-palette"
+  class="hidden fixed inset-0 z-[60]"
+  role="dialog"
+  aria-modal="true"
+  aria-labelledby="ab-palette-label"
+>
+  <div id="ab-palette-scrim" class="absolute inset-0 bg-gray-900/40"></div>
+
+  <div class="relative mx-auto mt-[12vh] w-[min(92vw,40rem)] rounded-xl bg-white shadow-2xl ring-1 ring-gray-200 overflow-hidden">
+    <label id="ab-palette-label" for="ab-palette-input" class="sr-only">
+      {t('admin.palette.label')}
+    </label>
+    <input
+      id="ab-palette-input"
+      type="text"
+      role="combobox"
+      autocomplete="off"
+      aria-expanded="true"
+      aria-controls="ab-palette-list"
+      aria-autocomplete="list"
+      placeholder={t('admin.palette.placeholder')}
+      class="w-full px-4 py-3.5 text-base border-0 border-b border-gray-200 focus:outline-none focus:ring-0"
+    />
+
+    <ul id="ab-palette-list" role="listbox" aria-label={t('admin.palette.label')} class="max-h-[52vh] overflow-y-auto py-1"></ul>
+
+    {/*
+      `role="status"` so the zero-results message is ANNOUNCED.
+
+      Without it the listbox simply emptied and nothing was spoken: a screen
+      reader user typing a query that matched nothing got silence, which is
+      indistinguishable from the palette having stopped working. It lives
+      outside the listbox on purpose — an option-less `role="option"` would be
+      worse — so a live region is the only thing that reaches them.
+    */}
+    <p id="ab-palette-empty" role="status" aria-live="polite" class="hidden px-4 py-6 text-sm text-gray-500 text-center"></p>
+
+    <div class="flex items-center justify-between px-4 py-2 border-t border-gray-100 bg-gray-50 text-[11px] text-gray-500">
+      <span>↑ ↓ &nbsp;·&nbsp; ↵</span>
+      <span>{t('admin.palette.hint')}</span>
+    </div>
+  </div>
+</div>
+
+{/*
+  The commands as DATA, not as generated markup.
+
+  A <script type="application/json"> block rather than an inline script
+  assigning to a global: the CSP is hash-based, and a JSON block carries no
+  executable content to hash. It is also why the labels are already translated
+  — the browser never has to look one up.
+
+  `jsonForScript`, NOT `JSON.stringify`. A bare stringify does not escape `<`,
+  so a value containing `</script>` closes this element and everything after it
+  is parsed as markup. Today every label here is a developer-written
+  translation, so nothing can carry that — but the very next thing this palette
+  should index is content types and plugin pages, which are labelled by the
+  OPERATOR, and that change would turn a safe line into stored XSS in the admin
+  shell. The helper's own header records that this had already happened three
+  times before a fourth site was written without it.
+*/}
+<script id="ab-palette-data" type="application/json" set:html={jsonForScript(commands)}></script>
+<script
+  id="ab-palette-strings"
+  type="application/json"
+  set:html={jsonForScript({
+    empty: t('admin.palette.empty'),
+    recent: t('admin.palette.recent'),
+    goTo: t('admin.palette.goTo'),
+  })}
+></script>
+
+<script>
+  import { foldForSearch } from '../../lib/text-search';
+
+  /*
+   * BUNDLED, not `is:inline`.
+   *
+   * Two reasons, and the second is the one this codebase keeps relearning:
+   * the CSP is hash-based so a bundled module needs no hash, AND a `<script>`
+   * block in an .astro file is a SEPARATE MODULE SCOPE from the frontmatter
+   * above it. Nothing up there is visible down here, which is why the commands
+   * travel through a JSON block rather than a closure.
+   */
+  interface Command { href: string; label: string; group: string }
+
+  const root = document.getElementById('ab-palette');
+  const input = document.getElementById('ab-palette-input') as HTMLInputElement | null;
+  const list = document.getElementById('ab-palette-list');
+  const empty = document.getElementById('ab-palette-empty');
+  const dataEl = document.getElementById('ab-palette-data');
+  const stringsEl = document.getElementById('ab-palette-strings');
+
+  if (root && input && list && empty && dataEl) {
+    const commands: Command[] = JSON.parse(dataEl.textContent || '[]');
+    const strings = JSON.parse(stringsEl?.textContent || '{}') as Record<string, string>;
+
+    // Pre-folded ONCE. Folding 28 labels on every keystroke is cheap, but it is
+    // also pointless — the labels do not change while the page is open.
+    const folded = commands.map((c) => ({
+      label: foldForSearch(c.label),
+      group: foldForSearch(c.group),
+      href: foldForSearch(c.href),
+    }));
+
+    /**
+     * How well a command matches, or -1 for not at all.
+     *
+     * Substring-anywhere is not good enough on its own: typing "or" matched
+     * Orders, but ALSO Categories (categ-or-ies), Import a site and Email
+     * wording — so the thing you meant was fourth in a list of four. Where the
+     * match LANDS is most of the signal, so a match at the start of the label
+     * outranks one at the start of a word, which outranks one buried mid-word,
+     * which outranks a match on the group name or the URL.
+     *
+     * Deliberately not fuzzy. A palette over 28 known labels does not need
+     * subsequence matching, and fuzziness mostly buys surprising results.
+     */
+    function score(i: number, q: string): number {
+      const f = folded[i];
+      if (f.label.startsWith(q)) return 0;
+      // ` ` + q catches a word start without a regex, and without the cost of
+      // building one per keystroke.
+      if (f.label.includes(` ${q}`)) return 1;
+      if (f.label.includes(q)) return 2;
+      if (f.group.startsWith(q) || f.group.includes(` ${q}`)) return 3;
+      if (f.group.includes(q) || f.href.includes(q)) return 4;
+      return -1;
+    }
+
+    /* --- recents -----------------------------------------------------------
+     * localStorage, deliberately: this is a per-person convenience, it is
+     * worthless to anyone else, and it must never become something the server
+     * has to store or a visitor's data we now hold. Every access is guarded —
+     * a private window, or a browser set to block site data, throws on read.
+     */
+    const RECENT_KEY = 'ab.palette.recent';
+    const readRecent = (): string[] => {
+      try { return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); } catch { return []; }
+    };
+    const remember = (href: string) => {
+      try {
+        const next = [href, ...readRecent().filter((h) => h !== href)].slice(0, 5);
+        localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+      } catch { /* storage unavailable — recents are a nicety, not a feature */ }
+    };
+
+    let matches: Command[] = [];
+    let active = 0;
+
+    function render(query: string) {
+      const q = foldForSearch(query);
+      if (!q) {
+        // An empty palette shows where you have been, not a blank rectangle.
+        const recent = readRecent();
+        const byHref = new Map(commands.map((c) => [c.href, c]));
+        const seen = recent.map((h) => byHref.get(h)).filter(Boolean) as Command[];
+        matches = seen.length ? seen : commands.slice(0, 8);
+      } else {
+        matches = commands
+          .map((c, i) => ({ c, rank: score(i, q), i }))
+          .filter((m) => m.rank >= 0)
+          // Stable within a rank, so equally-good matches keep NAV order — the
+          // order of the sidebar an operator already has a feel for.
+          .sort((a, b) => a.rank - b.rank || a.i - b.i)
+          .map((m) => m.c);
+      }
+      active = 0;
+
+      list!.textContent = '';
+      empty!.classList.toggle('hidden', matches.length > 0);
+      if (!matches.length) {
+        // A FUNCTION replacement, not a string one. `String.replace` gives `$&`,
+        // `` $` ``, `$'` and `$1` special meaning IN THE REPLACEMENT, so typing
+        // `$&` into the palette printed the matched text back instead of what
+        // was typed. A function argument is taken literally.
+        empty!.textContent = (strings.empty || 'No matches for “{query}”')
+          .replace('{query}', () => query);
+        return;
+      }
+
+      matches.forEach((c, i) => {
+        const li = document.createElement('li');
+        li.id = `ab-palette-opt-${i}`;
+        li.setAttribute('role', 'option');
+        li.setAttribute('aria-selected', String(i === active));
+        li.className = 'px-4 py-2.5 flex items-baseline gap-2 cursor-pointer text-sm';
+        const label = document.createElement('span');
+        label.className = 'font-medium text-gray-900';
+        label.textContent = c.label;
+        li.appendChild(label);
+        if (c.group) {
+          const g = document.createElement('span');
+          // gray-500, not gray-400: at 12px the 4.5:1 threshold applies and
+          // gray-400 on white is about 2.6:1. This is the only place the group
+          // a screen belongs to is shown, so it is content, not decoration.
+          g.className = 'text-xs text-gray-500';
+          g.textContent = c.group;
+          li.appendChild(g);
+        }
+        li.addEventListener('mouseenter', () => { active = i; paint(); });
+        li.addEventListener('click', () => go(i));
+        list!.appendChild(li);
+      });
+      paint();
+    }
+
+    function paint() {
+      [...list!.children].forEach((li, i) => {
+        li.setAttribute('aria-selected', String(i === active));
+        (li as HTMLElement).className =
+          'px-4 py-2.5 flex items-baseline gap-2 cursor-pointer text-sm '
+          + (i === active ? 'bg-blue-50 text-blue-900' : '');
+      });
+      // Both must track REALITY. `aria-expanded` was hardcoded true in the
+      // markup, so the combobox claimed an open popup while the list was empty,
+      // and a stale activedescendant pointed at an option that no longer exists.
+      input!.setAttribute('aria-expanded', matches.length ? 'true' : 'false');
+      if (matches.length) input!.setAttribute('aria-activedescendant', `ab-palette-opt-${active}`);
+      else input!.removeAttribute('aria-activedescendant');
+      (list!.children[active] as HTMLElement | undefined)?.scrollIntoView({ block: 'nearest' });
+    }
+
+    function go(i: number) {
+      const c = matches[i];
+      if (!c) return;
+      remember(c.href);
+      window.location.href = c.href;
+    }
+
+    let lastFocus: HTMLElement | null = null;
+    function open() {
+      lastFocus = document.activeElement as HTMLElement | null;
+      root!.classList.remove('hidden');
+      // The drawer in the same layout locks the background; a modal that lets
+      // the page scroll behind it is a modal that loses the reader's place.
+      document.body.style.overflow = 'hidden';
+      input!.value = '';
+      render('');
+      input!.focus();
+    }
+    function close() {
+      root!.classList.add('hidden');
+      document.body.style.overflow = '';
+      // Focus goes back where it came from, or a keyboard user is dropped at
+      // the top of the document with no idea where they are.
+      lastFocus?.focus();
+    }
+
+    document.addEventListener('keydown', (e) => {
+      // ⌘K on a Mac, Ctrl+K elsewhere — the shortcut people already try.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        root!.classList.contains('hidden') ? open() : close();
+        return;
+      }
+      if (root!.classList.contains('hidden')) return;
+      if (e.key === 'Escape') {
+        // `stopImmediatePropagation`, because AdminLayout registers its own
+        // document-level Escape handler for the mobile navigation drawer. One
+        // press was closing both, so a reader who opened the palette from the
+        // drawer lost the drawer too and could not tell why.
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        close();
+      }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); active = (active + 1) % Math.max(matches.length, 1); paint(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); active = (active - 1 + matches.length) % Math.max(matches.length, 1); paint(); }
+      else if (e.key === 'Enter') { e.preventDefault(); go(active); }
+      else if (e.key === 'Tab') {
+        // A modal that lets focus wander behind the scrim is a modal a keyboard
+        // user cannot get out of. There is exactly one focusable control in
+        // here, so the trap is this simple.
+        e.preventDefault();
+        input!.focus();
+      }
+    });
+
+    input.addEventListener('input', () => render(input!.value));
+    document.getElementById('ab-palette-scrim')?.addEventListener('click', close);
+    // The visible affordance in the header. A shortcut nobody can see is a
+    // feature for the person who wrote it.
+    document.getElementById('ab-palette-open')?.addEventListener('click', open);
+
+    // Name the modifier this keyboard actually has. Rendered as Ctrl by the
+    // server, corrected here on a Mac — the opposite order would flash the
+    // wrong key at the majority of readers.
+    if (/Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent)) {
+      const kbd = document.getElementById('ab-palette-kbd');
+      if (kbd) kbd.textContent = '⌘K';
+    }
+  }
+</script>

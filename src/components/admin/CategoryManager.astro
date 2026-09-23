@@ -1,0 +1,444 @@
+---
+// @ts-nocheck
+interface Props {
+  categories?: Array<{id: string, name: string, slug: string, description?: string, count?: number}>;
+}
+
+const { categories = [] } = Astro.props;
+const t = Astro.locals.t;
+---
+
+<div class="category-manager">
+  <div class="flex items-center justify-between mb-6">
+    <h2 class="text-2xl font-bold text-gray-900">{t('admin.categories.title')}</h2>
+    <button id="add-category-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors duration-200 flex items-center">
+      <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>
+      </svg>
+      {t('admin.categories.addButton')}
+    </button>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <!-- Category Form -->
+    <div class="lg:col-span-1">
+      <div class="bg-white border border-gray-200 rounded-lg p-6">
+        <h3 id="form-title" class="text-lg font-semibold text-gray-900 mb-4">{t('admin.categories.formTitleAdd')}</h3>
+
+        <form id="category-form" class="space-y-4">
+          <input type="hidden" id="category-id" name="id" />
+
+          <div>
+            <label for="category-name" class="block text-sm font-medium text-gray-700 mb-2">{t('admin.categories.nameLabel')}</label>
+            <input 
+              type="text" 
+              id="category-name" 
+              name="name" 
+              required
+              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder={t('admin.categories.namePlaceholder')}
+            />
+          </div>
+
+          <div>
+            <label for="category-slug" class="block text-sm font-medium text-gray-700 mb-2">{t('admin.categories.slugLabel')}</label>
+            <input 
+              type="text" 
+              id="category-slug" 
+              name="slug" 
+              required
+              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="category-slug"
+            />
+            <p class="text-xs text-gray-500 mt-1">{t('admin.categories.slugHint')}</p>
+          </div>
+
+          <div>
+            <label for="category-description" class="block text-sm font-medium text-gray-700 mb-2">{t('admin.categories.descriptionLabel')}</label>
+            <textarea 
+              id="category-description" 
+              name="description" 
+              rows="3"
+              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder={t('admin.categories.descriptionPlaceholder')}
+            ></textarea>
+          </div>
+
+          <div class="flex space-x-3">
+            <button 
+              type="submit" 
+              class="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors duration-200"
+            >
+              <span id="submit-text">{t('admin.categories.submitAdd')}</span>
+            </button>
+            <button 
+              type="button" 
+              id="cancel-btn" 
+              class="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors duration-200 hidden"
+            >
+              {t('admin.categories.cancel')}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Categories List -->
+    <div class="lg:col-span-2">
+      <div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+        <!-- Search and Filter -->
+        <div class="p-4 border-b border-gray-200 bg-gray-50">
+          <div class="flex items-center justify-between">
+            <div class="relative flex-1 max-w-md">
+              <input 
+                type="text" 
+                id="category-search" 
+                placeholder={t('admin.categories.searchPlaceholder')}
+                class="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+              <svg class="w-5 h-5 text-gray-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+              </svg>
+            </div>
+            <!--
+              The count and its noun are ONE string, not a number plus a
+              hard-coded plural: "1 categories" is wrong in English and worse in
+              German. The script rewrites the whole label.
+            -->
+            <div id="category-count" class="ml-4 text-sm text-gray-600">{t('admin.categories.count', {}, { count: 0 })}</div>
+          </div>
+        </div>
+
+        <!-- Categories Table -->
+        <div class="overflow-x-auto">
+          <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.categories.colName')}</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.categories.colSlug')}</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.categories.colDescription')}</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.categories.colPosts')}</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('admin.categories.colActions')}</th>
+              </tr>
+            </thead>
+            <tbody id="categories-tbody" class="bg-white divide-y divide-gray-200">
+              <!--
+                Sample rows. The names, slugs and descriptions below are sample
+                CONTENT, not interface text — they are replaced by the real
+                categories as soon as the script loads — so they stay in
+                English. Only the chrome around them is translated.
+              -->
+              <tr class="hover:bg-gray-50 category-row" data-category-id="1">
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <div class="text-sm font-medium text-gray-900">Technology</div>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <div class="text-sm text-gray-500">technology</div>
+                </td>
+                <td class="px-6 py-4">
+                  <div class="text-sm text-gray-500">Articles about technology and innovation</div>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                    {t('admin.categories.postCount', {}, { count: 12 })}
+                  </span>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                  <div class="flex space-x-2">
+                    <button class="text-blue-600 hover:text-blue-900 edit-category" data-category-id="1">{t('admin.categories.edit')}</button>
+                    <button class="text-red-600 hover:text-red-900 delete-category" data-category-id="1">{t('admin.categories.delete')}</button>
+                  </div>
+                </td>
+              </tr>
+
+              <tr class="hover:bg-gray-50 category-row" data-category-id="2">
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <div class="text-sm font-medium text-gray-900">Lifestyle</div>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <div class="text-sm text-gray-500">lifestyle</div>
+                </td>
+                <td class="px-6 py-4">
+                  <div class="text-sm text-gray-500">Life tips and personal experiences</div>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                    {t('admin.categories.postCount', {}, { count: 8 })}
+                  </span>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                  <div class="flex space-x-2">
+                    <button class="text-blue-600 hover:text-blue-900 edit-category" data-category-id="2">{t('admin.categories.edit')}</button>
+                    <button class="text-red-600 hover:text-red-900 delete-category" data-category-id="2">{t('admin.categories.delete')}</button>
+                  </div>
+                </td>
+              </tr>
+
+              <tr class="hover:bg-gray-50 category-row" data-category-id="3">
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <div class="text-sm font-medium text-gray-900">Travel</div>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <div class="text-sm text-gray-500">travel</div>
+                </td>
+                <td class="px-6 py-4">
+                  <div class="text-sm text-gray-500">Travel guides and adventures</div>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                    {t('admin.categories.postCount', {}, { count: 5 })}
+                  </span>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                  <div class="flex space-x-2">
+                    <button class="text-blue-600 hover:text-blue-900 edit-category" data-category-id="3">{t('admin.categories.edit')}</button>
+                    <button class="text-red-600 hover:text-red-900 delete-category" data-category-id="3">{t('admin.categories.delete')}</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Empty State -->
+        <div id="empty-state" class="hidden p-8 text-center">
+          <svg class="w-12 h-12 text-gray-400 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/>
+          </svg>
+          <h3 class="text-lg font-medium text-gray-900 mb-2">{t('admin.categories.emptyTitle')}</h3>
+          <p class="text-gray-500 mb-4">{t('admin.categories.emptyBody')}</p>
+          <button class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors duration-200">
+            {t('admin.categories.emptyAction')}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../lib/apiClient';
+  class CategoryManager {
+    constructor(element) {
+      this.element = element;
+      this.form = element.querySelector('#category-form');
+      this.tbody = element.querySelector('#categories-tbody');
+      this.searchInput = element.querySelector('#category-search');
+      this.categoryCount = element.querySelector('#category-count');
+      this.emptyState = element.querySelector('#empty-state');
+
+      this.categories = [];
+      this.editingId = null;
+
+      this.init();
+    }
+
+    async init() {
+      this.form.addEventListener('submit', this.handleSubmit.bind(this));
+      this.element.querySelector('#add-category-btn').addEventListener('click', this.resetForm.bind(this));
+      this.element.querySelector('#cancel-btn').addEventListener('click', this.resetForm.bind(this));
+      this.element.querySelector('#category-name').addEventListener('input', this.generateSlug.bind(this));
+      this.searchInput.addEventListener('input', this.handleSearch.bind(this));
+      this.tbody.addEventListener('click', this.handleTableClick.bind(this));
+
+      await this.reload();
+    }
+
+    async reload() {
+      const res = await api.get('/api/categories/get');
+      this.categories = res.ok ? (res.data || []) : [];
+      this.updateCategoryCount();
+      this.renderCategories();
+    }
+
+    /**
+     * `window.t` has no plural support — it is a flat map lookup — so the
+     * plural form is chosen here. en, el and de all have exactly the `one` and
+     * `other` CLDR categories, so `n === 1` is correct for all three; a
+     * language with more forms would need the label rendered server-side.
+     */
+    countLabel(n) {
+      return window.t(n === 1 ? 'admin.categories.count_one' : 'admin.categories.count_other', { count: n });
+    }
+
+    postCountLabel(n) {
+      return window.t(n === 1 ? 'admin.categories.postCount_one' : 'admin.categories.postCount_other', { count: n });
+    }
+
+    generateSlug(e) {
+      const name = e.target.value;
+      const slug = name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      
+      this.element.querySelector('#category-slug').value = slug;
+    }
+    
+    async handleSubmit(e) {
+      e.preventDefault();
+      const formData = new FormData(this.form);
+      const payload = {
+        name: String(formData.get('name') ?? '').trim(),
+        slug: String(formData.get('slug') ?? '').trim() || undefined,
+        description: String(formData.get('description') ?? '').trim() || undefined,
+      };
+      if (!payload.name) return this.showNotification(window.t('admin.categories.nameRequired'), 'error');
+
+      let res;
+      if (this.editingId) {
+        res = await api.put('/api/categories/update', { id: this.editingId, ...payload });
+      } else {
+        res = await api.post('/api/categories/create', payload);
+      }
+      if (!res.ok) return this.showNotification(window.t('admin.categories.saveFailed', { error: res.error }), 'error');
+      this.showNotification(window.t('admin.categories.saved', { name: payload.name }), 'success');
+      this.resetForm();
+      await this.reload();
+    }
+
+    async deleteCategory(id) {
+      const category = this.categories.find(c => c.id === id);
+      if (!category) return;
+      if (!confirm(window.t('admin.categories.deleteConfirm', { name: category.name }))) return;
+      const res = await api.delete('/api/categories/delete', { id });
+      if (!res.ok) return this.showNotification(window.t('admin.categories.deleteFailed', { error: res.error }), 'error');
+      this.showNotification(window.t('admin.categories.deleted', { name: category.name }), 'success');
+      await this.reload();
+    }
+    
+    editCategory(id) {
+      const category = this.categories.find(c => c.id === id);
+      if (category) {
+        this.editingId = id;
+        
+        // Populate form
+        this.element.querySelector('#category-id').value = category.id;
+        this.element.querySelector('#category-name').value = category.name;
+        this.element.querySelector('#category-slug').value = category.slug;
+        this.element.querySelector('#category-description').value = category.description;
+        
+        // Update form UI
+        this.element.querySelector('#form-title').textContent = window.t('admin.categories.formTitleEdit');
+        this.element.querySelector('#submit-text').textContent = window.t('admin.categories.submitUpdate');
+        this.element.querySelector('#cancel-btn').classList.remove('hidden');
+        
+        // Scroll to form
+        this.form.scrollIntoView({ behavior: 'smooth' });
+      }
+    }
+    
+    resetForm() {
+      this.form.reset();
+      this.editingId = null;
+      
+      // Reset form UI
+      this.element.querySelector('#form-title').textContent = window.t('admin.categories.formTitleAdd');
+      this.element.querySelector('#submit-text').textContent = window.t('admin.categories.submitAdd');
+      this.element.querySelector('#cancel-btn').classList.add('hidden');
+    }
+    
+    handleTableClick(e) {
+      const editBtn = e.target.closest('.edit-category');
+      const deleteBtn = e.target.closest('.delete-category');
+      
+      if (editBtn) {
+        const id = editBtn.dataset.categoryId;
+        this.editCategory(id);
+      } else if (deleteBtn) {
+        const id = deleteBtn.dataset.categoryId;
+        this.deleteCategory(id);
+      }
+    }
+    
+    handleSearch(e) {
+      const query = e.target.value.toLowerCase();
+      const rows = this.tbody.querySelectorAll('.category-row');
+      
+      rows.forEach(row => {
+        const name = row.querySelector('.text-gray-900').textContent.toLowerCase();
+        const description = row.querySelector('.text-gray-500').textContent.toLowerCase();
+        
+        if (name.includes(query) || description.includes(query)) {
+          row.style.display = '';
+        } else {
+          row.style.display = 'none';
+        }
+      });
+    }
+    
+    renderCategories() {
+      if (this.categories.length === 0) {
+        this.tbody.innerHTML = '';
+        this.emptyState.classList.remove('hidden');
+        return;
+      }
+      
+      this.emptyState.classList.add('hidden');
+      
+      this.tbody.innerHTML = this.categories.map(category => `
+        <tr class="hover:bg-gray-50 category-row" data-category-id="${category.id}">
+          <td class="px-6 py-4 whitespace-nowrap">
+            <div class="text-sm font-medium text-gray-900">${category.name}</div>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap">
+            <div class="text-sm text-gray-500">${category.slug}</div>
+          </td>
+          <td class="px-6 py-4">
+            <div class="text-sm text-gray-500">${category.description || ''}</div>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap">
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${this.getCountBadgeColor(category.count || 0)}">
+              ${this.postCountLabel(category.count || 0)}
+            </span>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+            <div class="flex space-x-2">
+              <button class="text-blue-600 hover:text-blue-900 edit-category" data-category-id="${category.id}">${window.t('admin.categories.edit')}</button>
+              <button class="text-red-600 hover:text-red-900 delete-category" data-category-id="${category.id}">${window.t('admin.categories.delete')}</button>
+            </div>
+          </td>
+        </tr>
+      `).join('');
+    }
+    
+    getCountBadgeColor(count) {
+      if (count >= 10) return 'bg-blue-100 text-blue-800';
+      if (count >= 5) return 'bg-green-100 text-green-800';
+      return 'bg-purple-100 text-purple-800';
+    }
+    
+    updateCategoryCount() {
+      this.categoryCount.textContent = this.countLabel(this.categories.length);
+    }
+    
+    generateId() {
+      return Date.now().toString();
+    }
+    
+    showNotification(message, type = 'info') {
+      // Create notification element
+      const notification = document.createElement('div');
+      notification.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 ${
+        type === 'success' ? 'bg-green-500 text-white' : 
+        type === 'error' ? 'bg-red-500 text-white' : 
+        'bg-blue-500 text-white'
+      }`;
+      notification.textContent = message;
+      
+      document.body.appendChild(notification);
+      
+      // Remove after 3 seconds
+      setTimeout(() => {
+        notification.remove();
+      }, 3000);
+    }
+  }
+  
+  // Initialize category manager
+  document.addEventListener('DOMContentLoaded', () => {
+    const categoryManagers = document.querySelectorAll('.category-manager');
+    categoryManagers.forEach(manager => new CategoryManager(manager));
+  });
+</script>

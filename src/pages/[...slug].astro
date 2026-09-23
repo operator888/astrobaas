@@ -1,0 +1,104 @@
+---
+/**
+ * Pages — CMS-authored content at the site root.
+ *
+ * A catch-all sits BELOW every explicit route in Astro's ordering, so nothing
+ * existing is shadowed by adding this file — which is what makes it safe to
+ * ship to a live site.
+ *
+ * That ordering is STATIC, decided from the filesystem, and no database row can
+ * change it. An earlier version of this comment claimed `/about` resolved to
+ * its built-in file "until someone creates a Page with that slug"; the opposite
+ * is true. A built-in route always wins, so a Page claiming one of those slugs
+ * would be permanently unreachable while still looking saved and linkable in
+ * the admin. Those slugs are therefore refused at write time — see
+ * `src/lib/reserved-slugs.ts`.
+ *
+ * A Page is a Post with `kind: 'page'`. Same record, same editor, same
+ * revisions — a different route and no date/author byline, because "About" is
+ * not an article.
+ */
+import PublicLayout from '../layouts/PublicLayout.astro';
+import { resolveActiveTheme } from '../lib/theme-runtime';
+import { LocalDB } from '../lib/localdb';
+import { visibleOne } from '../lib/visibility';
+import { isPage } from '../lib/post-kind';
+import { buildPageView } from '../lib/page-view';
+import { jsonForScript } from '../lib/json-in-html';
+import { hreflangFor } from '../lib/hreflang';
+import { switcherOptions } from '../lib/locale-links';
+import { tocThreshold, tocLabel } from '../lib/toc';
+import { PRINT_BUTTON_SETTING, printButtonEnabled } from '../lib/print-view';
+import PrintButton from '../components/public/PrintButton.astro';
+
+const slugParam = Astro.params.slug ?? '';
+// A catch-all captures nested paths too; a Page slug is a single segment, so a
+// deeper path is a 404 rather than a surprising match.
+const slug = Array.isArray(slugParam) ? slugParam.join('/') : String(slugParam);
+
+await LocalDB.init();
+const all = await LocalDB.getPosts();
+const page = all.find((p) => isPage(p) && p.slug === slug);
+
+// Same visibility rule as everything else: an unpublished page 404s for anyone
+// who may not see it, rather than 403ing and thereby confirming the slug.
+if (!page || !visibleOne(page, Astro.locals.user)) {
+  return new Response(null, { status: 404 });
+}
+
+// A Page designated as the home page is ALSO served at `/`. Both URLs must
+// name the SAME canonical, or the two render the same bytes and each declares
+// itself the original — the duplicate-content split buildPageView's own
+// `canonicalPath` comment says this exists to prevent, at the one route that
+// was not passing it.
+const homeSlugSetting = await LocalDB.getSetting('home_page_slug');
+const isDesignatedHome = String(homeSlugSetting?.value ?? '').trim() === page.slug;
+const view = await buildPageView(page, {
+  astroSite: Astro.site,
+  requestUrl: Astro.url,
+  locale: Astro.locals.locale,
+  ...(isDesignatedHome ? { canonicalPath: '/' } : {}),
+});
+
+// The Page renders through the theme's PageArticle slot, so activating a theme
+// changes every subpage — not only the blog. Falls back to the built-in view.
+const { slots } = await resolveActiveTheme();
+const PageArticle = slots.PageArticle as any;
+const TableOfContents = slots.TableOfContents as any;
+
+// Pages get a contents list on the same terms as posts — a long policy or
+// documentation page is exactly where one earns its place. Same setting, so an
+// operator cannot end up with one on articles and not on pages.
+const pageTocMin = tocThreshold((await LocalDB.getSetting('toc_min_headings'))?.value);
+const pageTocItems = pageTocMin > 0 && view.toc.length >= pageTocMin ? view.toc : [];
+
+// Same switch as the post route, read through the same helper (C-152).
+const printButton = printButtonEnabled((await LocalDB.getSetting(PRINT_BUTTON_SETTING))?.value);
+
+// Switching language on a record has to land on that record's TRANSLATION,
+// which has its own slug — the same path under another prefix would 404. The
+// route is the only place that knows both, so it builds the entries and the
+// header just renders them.
+const localeOptions = switcherOptions({
+  path: `/${page.slug}`,
+  current: Astro.locals.locale,
+  post: page,
+  all,
+  pathFor: (p) => `/${p.slug}`,
+});
+---
+
+<PublicLayout title={view.title} description={view.description} sidebarContext="page" breadcrumbs={view.trail} noindex={page.noindex} canonical={view.canonical} localeOptions={localeOptions}>
+  <Fragment slot="head">
+    {hreflangFor(page, all, { origin: view.origin, pathFor: (p) => `/${p.slug}` })
+      .map((l) => <link rel="alternate" hreflang={l.hreflang} href={l.href} />)}
+    {view.jsonLd && <script type="application/ld+json" set:html={jsonForScript(view.jsonLd)} />}
+  </Fragment>
+  {pageTocItems.length > 0 && (
+    <div class="max-w-4xl mx-auto px-4 pt-8">
+      <TableOfContents items={pageTocItems} label={tocLabel(Astro.locals.locale)} />
+    </div>
+  )}
+  {printButton && <PrintButton />}
+  <PageArticle post={page} contentHtml={view.bodyHtml} isHome={false} />
+</PublicLayout>

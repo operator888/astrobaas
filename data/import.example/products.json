@@ -1,0 +1,66 @@
+[
+  {
+    "wp_id": "1001",
+    "name": "Acetate Round Frame",
+    "slug": "acetate-round-frame",
+    "description": "<p>A lightweight acetate frame with spring hinges.</p>",
+    "short_description": "Lightweight acetate, spring hinges.",
+    "sku": "DEMO-FRAME-001",
+    "price_cents": 12900,
+    "regular_price_cents": 14900,
+    "sale_price_cents": 12900,
+    "on_sale": true,
+    "stock": 12,
+    "in_stock": true,
+    "categories": [
+      "eyeglasses"
+    ],
+    "brand": "Demo Optics",
+    "images": [
+      "2024/01/demo-frame-001.jpg"
+    ],
+    "created_at": "2024-01-15T10:00:00Z"
+  },
+  {
+    "wp_id": "1002",
+    "name": "Polarised Sunglasses",
+    "slug": "polarised-sunglasses",
+    "description": "<p>UV400 polarised lenses in a metal frame.</p>",
+    "short_description": "UV400 polarised.",
+    "sku": "DEMO-SUN-002",
+    "price_cents": 8900,
+    "regular_price_cents": 8900,
+    "sale_price_cents": null,
+    "on_sale": false,
+    "stock": 5,
+    "in_stock": true,
+    "categories": [
+      "sunglasses"
+    ],
+    "brand": "Demo Optics",
+    "images": [
+      "2024/01/demo-sun-002.jpg"
+    ],
+    "created_at": "2024-02-02T10:00:00Z"
+  },
+  {
+    "wp_id": "1003",
+    "name": "Lens Cleaning Spray",
+    "slug": "lens-cleaning-spray",
+    "description": "<p>30 ml alcohol-free spray with microfibre cloth.</p>",
+    "short_description": "30 ml, alcohol-free.",
+    "sku": "DEMO-CARE-003",
+    "price_cents": 550,
+    "regular_price_cents": 550,
+    "sale_price_cents": null,
+    "on_sale": false,
+    "stock": 100,
+    "in_stock": true,
+    "categories": [
+      "accessories"
+    ],
+    "brand": "Demo Optics",
+    "images": [],
+    "created_at": "2024-03-10T10:00:00Z"
+  }
+]
