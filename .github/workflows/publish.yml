@@ -54,6 +54,10 @@ on:
         description: 'npm dist-tag (alpha keeps it off `latest`)'
         type: string
         default: alpha
+      promote:
+        description: 'ONLY move `latest` to this already-published version (e.g. 0.1.2). Builds and publishes nothing.'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -61,8 +65,41 @@ permissions:
   id-token: write
 
 jobs:
+  # Moving `latest` is a separate, deliberate act (see PUBLISHING.md), so it is
+  # its own manual run that touches nothing else. It exists because the
+  # maintainer account publishes through this token: `npm dist-tag` from a
+  # laptop needs a 2FA-enabled account, and a CI job is the auditable place.
+  promote:
+    name: Move latest
+    if: github.event_name == 'workflow_dispatch' && inputs.promote != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Point latest at an already-published version
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Through the environment, never inlined into the script.
+          VERSION: ${{ inputs.promote }}
+        run: |
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::'$VERSION' is not a version number."
+            exit 1
+          fi
+          if [ "$(npm view "astrobaas@$VERSION" version 2>/dev/null)" != "$VERSION" ]; then
+            echo "::error::astrobaas@$VERSION is not on the registry. Publish it first (tag v$VERSION)."
+            exit 1
+          fi
+          npm dist-tag add "astrobaas@$VERSION" latest
+          echo "dist-tags now:"
+          npm view astrobaas dist-tags
+
   publish:
     name: Build, verify, publish
+    if: github.event_name != 'workflow_dispatch' || inputs.promote == ''
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

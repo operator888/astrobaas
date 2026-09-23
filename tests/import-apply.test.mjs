@@ -27,6 +27,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadTogether } from './lib/load.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..');
@@ -35,27 +36,21 @@ const root = path.join(here, '..');
  * The child: one driver, one database, the whole scenario.            *
  * ------------------------------------------------------------------ */
 if (process.env.IMPORT_TEST_CHILD) {
-  const { build } = await import('esbuild');
-  const { pathToFileURL } = await import('node:url');
 
   const cacheDir = path.join(root, 'node_modules', '.cache');
   await fs.mkdir(cacheDir, { recursive: true });
-  const load = async (entry, name) => {
-    const out = path.join(cacheDir, `astrobaas-imp-${name}-${process.pid}.mjs`);
-    await build({
-      entryPoints: [path.join(root, entry)],
-      bundle: true, format: 'esm', platform: 'node', packages: 'external',
-      outfile: out, logLevel: 'silent',
-    });
-    const mod = await import(pathToFileURL(out).href);
-    await fs.rm(out, { force: true });
-    return mod;
-  };
 
-  const { parseWxr } = await load('src/lib/import/wxr.ts', 'wxr');
-  const { planImport } = await load('src/lib/import/plan.ts', 'plan');
-  const { applyImport } = await load('src/lib/import/apply.ts', 'apply');
-  const { LocalDB } = await load('src/lib/localdb.ts', 'db');
+  const [
+    { parseWxr },
+    { planImport },
+    { applyImport },
+    { LocalDB },
+  ] = await loadTogether([
+    'src/lib/import/wxr.ts',
+    'src/lib/import/plan.ts',
+    'src/lib/import/apply.ts',
+    'src/lib/localdb.ts',
+  ]);
 
   const xml = await fs.readFile(path.join(here, 'fixtures', 'wordpress-export.xml'), 'utf8');
   const plan = planImport(parseWxr(xml));

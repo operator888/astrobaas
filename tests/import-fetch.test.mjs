@@ -19,11 +19,11 @@
  * Run with:  node tests/import-fetch.test.mjs
  */
 import http from 'node:http';
-import { build } from 'esbuild';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+import { loadTogether } from './lib/load.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..');
@@ -36,20 +36,14 @@ process.env.UPLOADS_DIR = path.join(tmp, 'uploads');
 
 const cacheDir = path.join(root, 'node_modules', '.cache');
 await fs.mkdir(cacheDir, { recursive: true });
-const load = async (entry, name) => {
-  const out = path.join(cacheDir, `astrobaas-fetch-${name}-${process.pid}.mjs`);
-  await build({
-    entryPoints: [path.join(root, entry)],
-    bundle: true, format: 'esm', platform: 'node', packages: 'external',
-    outfile: out, logLevel: 'silent',
-  });
-  const mod = await import(pathToFileURL(out).href);
-  await fs.rm(out, { force: true });
-  return mod;
-};
 
-const { applyImport } = await load('src/lib/import/apply.ts', 'apply');
-const { LocalDB } = await load('src/lib/localdb.ts', 'db');
+const [
+  { applyImport },
+  { LocalDB },
+] = await loadTogether([
+  'src/lib/import/apply.ts',
+  'src/lib/localdb.ts',
+]);
 
 let pass = 0;
 let fail = 0;

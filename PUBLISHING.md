@@ -55,12 +55,17 @@ The registry points `latest` at a package's very first version whatever tag it
 was published under, so `npm install astrobaas` resolves 0.1.0 too. From then
 on the workflow leaves `latest` where it is.
 
-The workflow defaults to `alpha` and **never moves `latest`**. Promoting a
-release is a separate, deliberate command:
+The workflow defaults to `alpha` and **never moves `latest`** on a publish.
+Promoting a release is a separate, deliberate act — a manual run of the same
+workflow that only moves the tag:
 
 ```bash
-npm dist-tag add astrobaas@1.0.0 latest
+gh workflow run publish.yml -R operator888/astrobaas -f promote=1.0.0
 ```
+
+It refuses anything that is not a version number or not already on the
+registry, and builds nothing. (`npm dist-tag add astrobaas@1.0.0 latest` from a
+laptop does the same, but npm requires the account to have 2FA enabled.)
 
 Suggested progression: `alpha` → `beta` → `latest`. Move `latest` only when the
 README's "What's not done yet" section holds nothing you would be embarrassed
@@ -122,11 +127,12 @@ scripts/setup.mjs
 scripts/reset-password.mjs    `npm run reset-password`
 scripts/scaffold.mjs          `astrobaas plugin new`, `theme new`
 scripts/lib/db-target.mjs     shared by the offline scripts above
+scripts/lib/prompt.mjs        their prompts, which also work piped
 .env.example
 LICENSE, README.md            (npm always includes these)
 ```
 
-The four `scripts/` and `bin/lib/` entries are there because the CLI shells out
+The five `scripts/` and `bin/lib/` entries are there because the CLI shells out
 to them: leave one out and the published binary fails at the moment someone
 runs it, not at pack time.
 

@@ -22,6 +22,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadTogether } from './lib/load.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..');
@@ -47,9 +48,15 @@ if (process.env.REPLACE_TEST_CHILD) {
     return mod;
   };
 
-  const { ingestMedia } = await load('src/lib/media/ingest.ts', 'ingest');
-  const R = await load('src/lib/media/replace.ts', 'replace');
-  const { LocalDB } = await load('src/lib/localdb.ts', 'db');
+  const [
+    { ingestMedia },
+    R,
+    { LocalDB },
+  ] = await loadTogether([
+    'src/lib/media/ingest.ts',
+    'src/lib/media/replace.ts',
+    'src/lib/localdb.ts',
+  ]);
 
   const sharpMod = await import('sharp');
   const sharp = sharpMod.default ?? sharpMod;

@@ -7,12 +7,12 @@
  * Prompts for a new password and writes it to db.json. If the email doesn't
  * exist, errors out — use `npm run setup` to create a new admin instead.
  */
-import readline from 'node:readline';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { promisify } from 'node:util';
 import { requireJsonDb } from './lib/db-target.mjs';
+import { createPrompter } from './lib/prompt.mjs';
 
 // Honours DB_PATH, and REFUSES when the install is on libSQL or a
 // relational database — where there is no db.json and writing one would
@@ -26,8 +26,7 @@ if (!emailArg) {
   process.exit(2);
 }
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-const ask = (q) => new Promise((res) => rl.question(q, (a) => res(a)));
+const prompt = createPrompter();
 
 const pbkdf2 = promisify(crypto.pbkdf2);
 
@@ -63,14 +62,14 @@ async function main() {
 
   console.log(`Resetting password for ${users[idx].email} (role: ${users[idx].role}).`);
   console.log('(Password will be visible while typing.)\n');
-  const pwd = ((await ask('New password (>=8 chars): ')) || '').trim();
+  const pwd = (await prompt.require('New password (>=8 chars): ', 'the new password')).trim();
   if (pwd.length < 8) {
     console.error('Password must be at least 8 characters.');
-    rl.close();
+    prompt.close();
     process.exit(1);
   }
-  const confirm = ((await ask('Confirm password: ')) || '').trim();
-  rl.close();
+  const confirm = (await prompt.require('Confirm password: ', 'the confirmation')).trim();
+  prompt.close();
   if (pwd !== confirm) {
     console.error('Passwords do not match.');
     process.exit(1);

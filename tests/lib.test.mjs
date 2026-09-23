@@ -36,36 +36,83 @@ const cacheDir = path.join(here, '..', 'node_modules', '.cache');
 await fs.mkdir(cacheDir, { recursive: true });
 
 /**
- * Bundle (not just transpile) so a module that imports a sibling resolves.
- * A single-file transform leaves `import './analytics'` unresolvable at
- * runtime, which fails as a confusing ERR_MODULE_NOT_FOUND pointing at the
- * cache directory rather than at the real cause.
+ * Every module this file tests, built ONCE, with code splitting.
+ *
+ * Bundle (not just transpile) so a module that imports a sibling resolves. But
+ * one esbuild call per module gave each bundle its own copy of everything it
+ * imports — including LocalDB, its lowdb instance and its atomic writer. Five
+ * copies wrote the same DB_PATH, each with its own `.db.json.tmp`, and when two
+ * writes overlapped one rename moved the other's temp file away: ENOENT on
+ * rename, intermittently, on the public CI's Node 22 job (2026-09-23).
+ * Reproduced deterministically: two separately bundled LocalDB copies, 10
+ * concurrent writes each, 20 rounds → 20 ENOENT; one shared copy → 0.
+ *
+ * One build with `splitting: true` puts shared code in shared chunks, so there
+ * is exactly one LocalDB however many entry points reach it — and
+ * `tests/lib.test.mjs` asserts that below, so a new separate build fails here
+ * rather than flaking in CI. The two custom entries re-export several modules
+ * that must share instances (a transport override and the notifier that uses it).
  */
-async function load(rel) {
-  const tmp = path.join(cacheDir, `astrocms-${path.basename(rel)}-${process.pid}.mjs`);
-  await build({
-    entryPoints: [path.join(here, '..', rel)],
-    bundle: true, format: 'esm', platform: 'node', packages: 'external',
-    outfile: tmp, logLevel: 'silent',
-  });
-  const mod = await import(pathToFileURL(tmp).href);
-  await fs.rm(tmp, { force: true });
-  return mod;
+const LIB = path.join(here, '..', 'src/lib');
+const outDir = path.join(cacheDir, `astrobaas-lib-test-${process.pid}`);
+const entrySrc = path.join(cacheDir, `astrobaas-lib-test-entries-${process.pid}`);
+await fs.mkdir(entrySrc, { recursive: true });
+const customEntries = {
+  notify: [
+    `export { notifySubmission, submitterReplyTo } from ${JSON.stringify(path.join(LIB, 'submission-notify.ts'))};`,
+    `export { setEmailTransport } from ${JSON.stringify(path.join(LIB, 'email.ts'))};`,
+    `export { LocalDB } from ${JSON.stringify(path.join(LIB, 'localdb.ts'))};`,
+  ],
+  'sched-mail': [
+    `export { sweepStockWaitlist, sweepRecoveryReminders, maybeSendCampaign } from ${JSON.stringify(path.join(LIB, 'scheduler.ts'))};`,
+    `export * as email from ${JSON.stringify(path.join(LIB, 'email.ts'))};`,
+    `export { LocalDB } from ${JSON.stringify(path.join(LIB, 'localdb.ts'))};`,
+    `export { WAITLIST_TYPE } from ${JSON.stringify(path.join(LIB, 'commerce/stock-waitlist.ts'))};`,
+    `export { CAMPAIGN_TYPE } from ${JSON.stringify(path.join(LIB, 'newsletter-campaign.ts'))};`,
+    `export { ABANDONMENT_KEYS } from ${JSON.stringify(path.join(LIB, 'commerce/abandonment.ts'))};`,
+  ],
+  // Not a module under test: the probe for "is there exactly one LocalDB".
+  localdb: [`export { LocalDB } from ${JSON.stringify(path.join(LIB, 'localdb.ts'))};`],
+};
+const entryPoints = {};
+for (const f of ['validate', 'auth', 'settings-visibility', 'text-search', 'escape-html', 'security-headers',
+  'csp-config', 'webhook-util', 'api-key-scopes', 'url-guard', 'email', 'observability', 'scheduler-util', 'seed-data']) {
+  entryPoints[`lib/${f}`] = path.join(LIB, `${f}.ts`);
+}
+for (const [name, lines] of Object.entries(customEntries)) {
+  const file = path.join(entrySrc, `${name}.ts`);
+  await fs.writeFile(file, lines.join('\n'));
+  entryPoints[`entry/${name}`] = file;
+}
+await build({
+  entryPoints, outdir: outDir, bundle: true, splitting: true, format: 'esm',
+  platform: 'node', packages: 'external', logLevel: 'silent',
+});
+await fs.rm(entrySrc, { recursive: true, force: true });
+// Chunks can be imported lazily (dynamic import inside a module), so the build
+// stays until the process ends.
+process.on('exit', () => fsSync.rmSync(outDir, { recursive: true, force: true }));
+
+const importBuilt = (name) => import(pathToFileURL(path.join(outDir, `${name}.js`)).href);
+async function fromBuild(rel) {
+  const name = `lib/${path.basename(rel, '.ts')}`;
+  if (!entryPoints[name]) throw new Error(`${rel} is not in the lib.test.mjs build — add it to entryPoints.`);
+  return importBuilt(name);
 }
 
-const { validate, slugify } = await load('src/lib/validate.ts');
-const auth = await load('src/lib/auth.ts');
-const { visibleSettings, isPublicSetting, PUBLIC_SETTING_KEYS } = await load('src/lib/settings-visibility.ts');
-const { foldForSearch, matchesSearch, transliterate } = await load('src/lib/text-search.ts');
-const { escapeHtml } = await load('src/lib/escape-html.ts');
-const { securityHeaders, corsAllowOrigin, corsHeaders } = await load('src/lib/security-headers.ts');
-const { cspDirectives, cspScriptResources, cspStyleResources } = await load('src/lib/csp-config.ts');
-const { webhookMatches, webhookBody, WEBHOOK_EVENTS } = await load('src/lib/webhook-util.ts');
-const { isValidScope, apiKeyExpired, requiredScopeFor, scopeSatisfied, scopedKeyAllowed } = await load('src/lib/api-key-scopes.ts');
-const { isPrivateHostname, checkWebhookUrl } = await load('src/lib/url-guard.ts');
-const email = await load('src/lib/email.ts');
-const obs = await load('src/lib/observability.ts');
-const sched = await load('src/lib/scheduler-util.ts');
+const { validate, slugify } = await fromBuild('src/lib/validate.ts');
+const auth = await fromBuild('src/lib/auth.ts');
+const { visibleSettings, isPublicSetting, PUBLIC_SETTING_KEYS } = await fromBuild('src/lib/settings-visibility.ts');
+const { foldForSearch, matchesSearch, transliterate } = await fromBuild('src/lib/text-search.ts');
+const { escapeHtml } = await fromBuild('src/lib/escape-html.ts');
+const { securityHeaders, corsAllowOrigin, corsHeaders } = await fromBuild('src/lib/security-headers.ts');
+const { cspDirectives, cspScriptResources, cspStyleResources } = await fromBuild('src/lib/csp-config.ts');
+const { webhookMatches, webhookBody, WEBHOOK_EVENTS } = await fromBuild('src/lib/webhook-util.ts');
+const { isValidScope, apiKeyExpired, requiredScopeFor, scopeSatisfied, scopedKeyAllowed } = await fromBuild('src/lib/api-key-scopes.ts');
+const { isPrivateHostname, checkWebhookUrl } = await fromBuild('src/lib/url-guard.ts');
+const email = await fromBuild('src/lib/email.ts');
+const obs = await fromBuild('src/lib/observability.ts');
+const sched = await fromBuild('src/lib/scheduler-util.ts');
 
 let pass = 0;
 let fail = 0;
@@ -446,20 +493,9 @@ check('escapeHtml stringifies null/number safely', escapeHtml(null) === '' && es
 
 // ---------------- a form notification's Reply-To is the person who wrote ----------------
 {
-  // One bundle, so the transport override, the settings store and the notifier
-  // are the SAME module instances — three separate loads would each have their own.
-  const entry = path.join(cacheDir, `astrobaas-notify-entry-${process.pid}.ts`);
-  const lib = path.join(here, '..', 'src/lib');
-  await fs.writeFile(entry, [
-    `export { notifySubmission, submitterReplyTo } from ${JSON.stringify(path.join(lib, 'submission-notify.ts'))};`,
-    `export { setEmailTransport } from ${JSON.stringify(path.join(lib, 'email.ts'))};`,
-    `export { LocalDB } from ${JSON.stringify(path.join(lib, 'localdb.ts'))};`,
-  ].join('\n'));
-  const outFile = path.join(cacheDir, `astrobaas-notify-${process.pid}.mjs`);
-  await build({ entryPoints: [entry], bundle: true, format: 'esm', platform: 'node', packages: 'external', outfile: outFile, logLevel: 'silent' });
-  const N = await import(pathToFileURL(outFile).href);
-  await fs.rm(outFile, { force: true });
-  await fs.rm(entry, { force: true });
+  // The transport override, the settings store and the notifier are the SAME
+  // module instances: one entry in the shared build (see the top of the file).
+  const N = await importBuilt('entry/notify');
 
   const fields = [
     { name: 'name', rule: { type: 'string' } },
@@ -682,21 +718,7 @@ check('escapeHtml stringifies null/number safely', escapeHtml(null) === '' && es
    * must hand the transport the shorter background wait. Checked by running all
    * three against a capturing transport, not by reading the source.
    */
-  const entry = path.join(cacheDir, `astrobaas-sched-mail-entry-${process.pid}.ts`);
-  const lib = path.join(here, '..', 'src/lib');
-  await fs.writeFile(entry, [
-    `export { sweepStockWaitlist, sweepRecoveryReminders, maybeSendCampaign } from ${JSON.stringify(path.join(lib, 'scheduler.ts'))};`,
-    `export * as email from ${JSON.stringify(path.join(lib, 'email.ts'))};`,
-    `export { LocalDB } from ${JSON.stringify(path.join(lib, 'localdb.ts'))};`,
-    `export { WAITLIST_TYPE } from ${JSON.stringify(path.join(lib, 'commerce/stock-waitlist.ts'))};`,
-    `export { CAMPAIGN_TYPE } from ${JSON.stringify(path.join(lib, 'newsletter-campaign.ts'))};`,
-    `export { ABANDONMENT_KEYS } from ${JSON.stringify(path.join(lib, 'commerce/abandonment.ts'))};`,
-  ].join('\n'));
-  const outFile = path.join(cacheDir, `astrobaas-sched-mail-${process.pid}.mjs`);
-  await build({ entryPoints: [entry], bundle: true, format: 'esm', platform: 'node', packages: 'external', outfile: outFile, logLevel: 'silent' });
-  const M = await import(pathToFileURL(outFile).href);
-  await fs.rm(outFile, { force: true });
-  await fs.rm(entry, { force: true });
+  const M = await importBuilt('entry/sched-mail');
   const BG = M.email.BACKGROUND_DATA_TIMEOUT_MS ?? 60_000;
 
   const { LocalDB } = M;
@@ -903,7 +925,7 @@ check('escapeHtml stringifies null/number safely', escapeHtml(null) === '' && es
 // JavaScript's coercions make "adjacent" wide: Number(true) is 1, Number([7]) is
 // 7, Number('0x10') is 16. A `number` field that coerces takes all of them.
 {
-  const { parsePaging, DEFAULT_STRING_MAX } = await load('src/lib/validate.ts');
+  const { parsePaging, DEFAULT_STRING_MAX } = await fromBuild('src/lib/validate.ts');
 
   const num = (v) => validate({ n: v }, { n: { type: 'number' } });
   check('a real number is accepted', num(5).ok && num(0).ok && num(-3.5).ok);
@@ -987,8 +1009,8 @@ check('escapeHtml stringifies null/number safely', escapeHtml(null) === '' && es
   // /login scan away. These assertions pin the two halves of the fix: a fresh
   // production install never gets the known password, and an existing one
   // cannot keep using it.
-  const seed = await load('src/lib/seed-data.ts');
-  const auth = await load('src/lib/auth.ts');
+  const seed = await fromBuild('src/lib/seed-data.ts');
+  const auth = await fromBuild('src/lib/auth.ts');
 
   const prevEnv = process.env.NODE_ENV;
   const prevPw = process.env.ADMIN_PASSWORD;
@@ -1026,6 +1048,18 @@ check('escapeHtml stringifies null/number safely', escapeHtml(null) === '' && es
   process.env.NODE_ENV = prevEnv;
   if (prevPw === undefined) delete process.env.ADMIN_PASSWORD;
   else process.env.ADMIN_PASSWORD = prevPw;
+}
+
+// ---------------- the harness itself: ONE LocalDB for the whole file ----------------
+{
+  // Every entry that reaches LocalDB must reach the SAME object. A separately
+  // bundled copy would bring back the rename race described at the top.
+  const probe = (await importBuilt('entry/localdb')).LocalDB;
+  const copies = [
+    (await importBuilt('entry/notify')).LocalDB,
+    (await importBuilt('entry/sched-mail')).LocalDB,
+  ];
+  check('the whole file shares one LocalDB instance', copies.every((c) => c === probe));
 }
 
 console.log(`${pass} passed, ${fail} failed`);

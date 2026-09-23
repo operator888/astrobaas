@@ -12,33 +12,31 @@
  *
  * Run with:  node tests/compliance.test.mjs
  */
-import { build } from 'esbuild';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+import { loadTogether } from './lib/load.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cacheDir = path.join(here, '..', 'node_modules', '.cache');
 await fs.mkdir(cacheDir, { recursive: true });
 
-async function load(rel, tag) {
-  const out = path.join(cacheDir, `astrobaas-${tag}-${process.pid}.mjs`);
-  await build({
-    entryPoints: [path.join(here, '..', rel)],
-    bundle: true, format: 'esm', platform: 'node', packages: 'external',
-    outfile: out, logLevel: 'silent',
-  });
-  const mod = await import(pathToFileURL(out).href);
-  await fs.rm(out, { force: true });
-  return mod;
-}
 
-const consent = await load('src/lib/consent.ts', 'consent');
-const analytics = await load('src/lib/analytics.ts', 'analytics');
-const withdrawal = await load('src/lib/withdrawal.ts', 'withdrawal');
-const csp = await load('src/lib/csp-config.ts', 'cspcfg');
-const assistant = await load('src/lib/ai-assistant.ts', 'assistant');
-const visibility = await load('src/lib/settings-visibility.ts', 'visib');
+const [
+  consent,
+  analytics,
+  withdrawal,
+  csp,
+  assistant,
+  visibility,
+] = await loadTogether([
+  'src/lib/consent.ts',
+  'src/lib/analytics.ts',
+  'src/lib/withdrawal.ts',
+  'src/lib/csp-config.ts',
+  'src/lib/ai-assistant.ts',
+  'src/lib/settings-visibility.ts',
+]);
 
 let pass = 0;
 let fail = 0;
