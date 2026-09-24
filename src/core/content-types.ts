@@ -18,6 +18,13 @@ export interface ContentTypeField {
   name: string;
   rule: FieldRule;
   /**
+   * What a person reads: "Seats left" for `seats_left`. Optional; screens fall
+   * back to a readable form of the name. Presentation only, like `step`, so
+   * the validator never sees it. It used to be dropped on save, so a theme or
+   * plugin that sent labels got raw field names on every screen.
+   */
+  label?: string;
+  /**
    * Which step of a multi-step form this field belongs to (C-22).
    *
    * 1-based, and absent means step 1 — so an existing single-step type keeps

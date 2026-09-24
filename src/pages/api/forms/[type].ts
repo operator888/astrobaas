@@ -54,6 +54,7 @@ export const GET: APIRoute = async ({ params }) => {
       stepCount: stepCount(def),
       fields: def.fields.map((f) => ({
         name: f.name,
+        label: f.label ?? null,
         rule: f.rule,
         step: f.step ?? 1,
         showIf: f.showIf ?? null,

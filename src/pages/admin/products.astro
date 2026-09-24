@@ -8,6 +8,8 @@ import { formatMoney } from '../../lib/money-format';
 import RichTextEditor from '../../components/admin/RichTextEditor.astro';
 import { mainImage } from '../../lib/product-fields';
 import { getProductFieldDefs } from '../../lib/commerce-service';
+import Pagination from '../../components/admin/Pagination.astro';
+import { readPaging, listHref } from '../../lib/admin-paging';
 
 await LocalDB.init();
 const user = Astro.locals.user;
@@ -18,6 +20,26 @@ if (!canOpenAdminPage('/admin/products', user?.role)) {
 }
 
 const products = await LocalDB.getProducts();
+
+/*
+ * The table shows one PAGE of the products the search matches, not all of
+ * them: rendering every product made this screen's cost grow with the
+ * catalogue. The search moved here from the browser for the same reason — it
+ * could only hide rows that had already been sent — and it folds both sides
+ * with the same foldForSearch the browser used, so what matches is unchanged
+ * ("cafe" still finds "Café"). The counters below stay whole-catalogue totals.
+ */
+const sp = Astro.url.searchParams;
+const qRaw = (sp.get('q') ?? '').trim();
+const qFolded = foldForSearch(qRaw);
+// Newest first, as the posts list is. Unpaged, oldest-first did no harm; paged,
+// a product you had just saved reloaded onto the LAST page, out of sight.
+const newestFirst = products.slice().sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''));
+const matching = qFolded
+  ? newestFirst.filter((p) => foldForSearch(`${p.name} ${p.sku ?? ''} ${p.brand ?? ''} ${p.gtin ?? ''} ${(p.tags ?? []).join(' ')}`).includes(qFolded))
+  : newestFirst;
+const paging = readPaging(sp, matching.length);
+const pageProducts = matching.slice(paging.start, paging.end);
 const brands = await LocalDB.getBrands();
 const categories = await LocalDB.getProductCategories();
 /**
@@ -186,12 +208,20 @@ const categoryTree: { cat: (typeof categories)[number]; depth: number }[] = (() 
       </div>
     </div>
 
-    <div class="mb-4">
-      <input id="filter" type="search" placeholder="Filter by name, SKU or brand…"
+    <form method="get" class="mb-4 flex flex-wrap items-center gap-2" role="search">
+      <input id="filter" name="q" type="search" value={qRaw} placeholder="Search all products by name, SKU, brand, GTIN or tag…"
         class="w-full md:w-96 px-3 py-2 border border-gray-300 rounded-lg text-sm" />
-    </div>
+      {sp.get('per') && <input type="hidden" name="per" value={sp.get('per')} />}
+      <button type="submit" class="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 bg-white hover:bg-gray-50">Search</button>
+      {qRaw && (
+        <a href={listHref(sp, { q: null, page: null })} class="text-sm text-blue-600 hover:underline">
+          Clear — {matching.length} of {products.length} match
+        </a>
+      )}
+    </form>
 
-    <div class="bg-white rounded-lg border border-gray-200 overflow-x-auto">
+    <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
+    <div class="overflow-x-auto">
       <table class="min-w-full divide-y divide-gray-200 text-sm">
         <thead class="bg-gray-50">
           <tr>
@@ -205,10 +235,15 @@ const categoryTree: { cat: (typeof categories)[number]; depth: number }[] = (() 
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-100" id="rows">
-          {products.map((p) => {
+          {pageProducts.length === 0 && (
+            <tr><td colspan="7" class="px-4 py-10 text-center text-gray-500">
+              {qRaw ? `No products match “${qRaw}”.` : 'No products yet.'}
+            </td></tr>
+          )}
+          {pageProducts.map((p) => {
           const thumb = mainImage(p.images);
           return (
-            <tr class="product-row group hover:bg-gray-50" data-name={foldForSearch(`${p.name} ${p.sku ?? ''} ${p.brand ?? ''} ${p.gtin ?? ''} ${(p.tags ?? []).join(' ')}`)}>
+            <tr class="product-row group hover:bg-gray-50">
               {/*
                 The cell has to be wider than the padding plus the image, or the
                 image loses.
@@ -279,6 +314,8 @@ const categoryTree: { cat: (typeof categories)[number]; depth: number }[] = (() 
           );})}
         </tbody>
       </table>
+    </div>
+    <Pagination paging={paging} searchParams={sp} />
     </div>
   </div>
 
@@ -1331,15 +1368,6 @@ const categoryTree: { cat: (typeof categories)[number]; depth: number }[] = (() 
   const dateOnly = (iso) => (iso ? String(iso).slice(0, 10) : '');
 
   /* ---------------- open / populate ---------------- */
-  document.getElementById('filter').addEventListener('input', (e) => {
-    // Fold the query the same way the server folded data-name at render time.
-    // Folding only one side is the classic half-fix: it matches nothing.
-    const q = fold(e.target.value);
-    document.querySelectorAll('.product-row').forEach((r) => {
-      r.style.display = r.dataset.name.includes(q) ? '' : 'none';
-    });
-  });
-
   document.getElementById('new-product').addEventListener('click', () => {
     form.reset();
     form.elements.id.value = '';

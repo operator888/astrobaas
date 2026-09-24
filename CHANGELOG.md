@@ -8,6 +8,85 @@ semver yet because the API surface is pre-alpha.
 
 Nothing yet.
 
+## [0.1.3] — 2026-09-24
+
+### Pagination on the admin's products, posts and pages lists
+
+The products screen rendered every product in the catalogue into one page and
+filtered them in the browser, so it slowed as the catalogue grew and its search
+could only hide rows that had already been sent. Posts and pages were paged ten
+at a time with only Previous / Next, and the controls disappeared entirely below
+eleven items.
+
+All three now share one control (`src/components/admin/Pagination.astro`,
+`src/lib/admin-paging.ts`): "Showing 26–50 of 312", Previous / Next, numbered
+pages with gaps, and 25 / 50 / 100 per page. It is plain links — no script —
+so every page is a URL, the Back button works, and filters and the search
+survive paging. The products search now runs on the server across the whole
+catalogue, folding accents exactly as before ("cafe" finds "Café"), with a
+count of matches and a way to clear it; the counters above the table stay
+whole-catalogue totals. Products are listed **newest first**, as posts are:
+paged oldest-first, a product you had just saved reloaded onto the last page.
+Labels are translated (en, de, el).
+
+`tests/admin-paging.test.mjs` pins the arithmetic (clamping, the page window,
+links that keep filters); two Playwright tests drive the screens — against the
+previous code the products screen rendered all 30 seeded rows and the posts
+screen had no summary, so both fail there.
+
+### Collection entries can be edited in production
+
+The entries screen for a custom collection was blank in production: its data
+came from an inline script, which the Content-Security-Policy blocks, so the
+form never appeared and the list stayed on "Loading…". It worked on the dev
+server, which sends no CSP. The data is now a JSON block, and
+`tests/csp-inline-scripts.test.mjs` fails on any page that builds an inline
+script per request.
+
+The screen is also usable for real content now: image fields have a picker with
+search and upload, link fields are a dropdown of entries by name, and fields
+show their labels. Field `label`s are now kept when a content type is saved
+(they were dropped), can be set in the Content types builder, and appear on
+public forms too. Emptying an optional field while editing now clears it.
+
+### Public forms work from a headless storefront
+
+A content type with `writable: 'public'` (a table request, an RSVP, an
+enquiry) answered `403 CSRF_FAILED` to every submission from a storefront on
+another origin, and so did its file upload. The cookie-less, allow-listed
+exemption that checkout, contact and newsletter already had never included the
+form builder's own forms. Both routes are on it now. A type that is not public
+still answers 404, a request carrying a session still needs the CSRF token, and
+an origin not in `CORS_ORIGINS` is still refused. `tests/request-limits.test.mjs`
+now fails if any anonymous write in `PUBLIC_API_WRITE` is missing from both the
+cross-origin list and the CSRF-exempt list, which is how this one was missed.
+
+### Errors reach cross-origin callers with their CORS headers
+
+The middleware's own refusals (401, the CSRF and scope 403s, 411, 413, 429 and
+both maintenance 503s) were sent without `Access-Control-Allow-Origin`, so a
+storefront saw only "blocked by CORS policy" and never the status or code. They
+all go through one helper now, the CORS preflight is answered before the
+maintenance check (so a storefront can read the 503 and its `Retry-After`), and
+a test fails if a new early return skips the helper.
+### "View site" opens the site your visitors see
+
+The admin header's **View site** button was a hard-coded `/`. On a headless
+install that opened the CMS's own built-in pages rather than the storefront.
+It now opens the **Site URL** setting when one is set, and `/` otherwise.
+`tests/site-url.test.mjs` checks the rule and that the header uses it; smoke
+checks the rendered admin page.
+
+### Tests
+
+- `tests/health-deep.test.mjs` booted its servers on fixed ports 4341–4344.
+  With anything else holding one, Vite silently moved to the next port, the
+  test polled the old one for a minute, failed "server never started" and left
+  its servers running. It now picks free ports below the OS's ephemeral range,
+  fails at once if a port is taken before the bind, and stops any server that
+  never answered. Reproduced with port 4341 held: the old test failed and left
+  two servers; the new one passed three runs with nothing left behind.
+
 ## [0.1.2] — 2026-09-23
 
 ### Uploads are always served with their security headers

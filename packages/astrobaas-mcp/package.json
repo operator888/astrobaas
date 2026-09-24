@@ -1,6 +1,6 @@
 {
   "name": "astrobaas-mcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "license": "GPL-3.0-or-later",
   "description": "Model Context Protocol server for an AstroBaaS backend — lets an AI agent read and write its content. Zero dependencies, runs under npx.",

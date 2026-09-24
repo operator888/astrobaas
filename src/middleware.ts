@@ -546,6 +546,23 @@ const CROSS_ORIGIN_PUBLIC_WRITE = [
   /^\/api\/contact\/?$/,
   /^\/api\/newsletter\/?$/,
   /^\/api\/products\/[^/]+\/notify-me\/?$/,
+  // ...and the form builder's own forms, which were the sibling left behind:
+  // a `writable: 'public'` type posted from a headless site (a table request,
+  // an RSVP, an enquiry) got `403 CSRF_FAILED`, and its file field with it.
+  // Measured on a live demo storefront, 2026-09-24. Widening the PATTERN to
+  // every type name widens nothing real: the handler still answers 404 for a
+  // type that has not said `public`, and the upload route 404s unless the
+  // type is public AND declares a file field — the same doors PUBLIC_API_WRITE
+  // already opened for same-origin visitors.
+  //
+  // The pattern also matches the STATIC routes under /api/content/. Today
+  // that is `/api/content/changes`, whose POST requires an admin or editor —
+  // which a cookie-less caller can only be through a bearer key, already
+  // exempt — so it answers 403 either way. A new static POST route there that
+  // serves ANONYMOUS callers would inherit this exemption: give it its own
+  // decision here, not this one by accident.
+  /^\/api\/content\/[a-z][a-z0-9-]{1,40}\/?$/,
+  /^\/api\/forms\/[^/]+\/upload\/?$/,
 ];
 
 /**
@@ -709,6 +726,34 @@ const main = defineMiddleware(async (context, next) => {
 
   const pathname = url.pathname;
 
+  // ---- CORS preflight for the JSON API (headless cross-origin clients) ----
+  //
+  // First, before the maintenance fast path and anything that reads the
+  // database: it depends only on the environment and the Origin header, and a
+  // storefront has to be able to READ a maintenance 503 (and its Retry-After)
+  // rather than see its preflight fail and report a CORS error.
+  const cors: Record<string, string> = pathname.startsWith('/api/')
+    ? corsHeaders(request.headers.get('origin'))
+    : {};
+  if (method === 'OPTIONS' && pathname.startsWith('/api/')) {
+    return new Response(null, { status: 204, headers: cors });
+  }
+  // Every /api answer carries the same CORS headers, REFUSALS INCLUDED. An
+  // early return below skips the decoration that runs after next(), and a
+  // 401, 403 or 429 without Access-Control-Allow-Origin is unreadable to the
+  // storefront that caused it: the browser withholds the status and the body
+  // and reports only "blocked by CORS policy". Every integration bug then looks
+  // like a CORS misconfiguration — which is how a CSRF refusal on a public form
+  // went unrecognised. So each early /api return goes through this, and
+  // tests/request-limits.test.mjs fails on one that does not.
+  const withCors = (res: Response): Response => {
+    for (const [k, v] of Object.entries(cors)) {
+      if (k.toLowerCase() === 'vary') res.headers.set(k, mergeVary(res.headers.get(k), v));
+      else res.headers.set(k, v);
+    }
+    return res;
+  };
+
   // ---- Maintenance mode (env-only fast path) ----
   //
   // Deliberately BEFORE ensurePluginsBootstrapped and before anything that
@@ -729,7 +774,7 @@ const main = defineMiddleware(async (context, next) => {
     // That is the right trade: an env-var maintenance mode is the emergency
     // one, and it must answer without reading anything.
     return pathname.startsWith('/api/')
-      ? maintenanceApiResponse(envMaintenance)
+      ? withCors(maintenanceApiResponse(envMaintenance))
       : maintenanceResponse(envMaintenance);
   }
 
@@ -751,12 +796,12 @@ const main = defineMiddleware(async (context, next) => {
         // GONE. Never turned into a redirect to the home page — that is a
         // soft-404 by another name, and these shops are already in trouble
         // with Google Merchant.
-        return new Response('Gone', {
+        return withCors(new Response('Gone', {
           status: 410,
           headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
-        });
+        }));
       }
-      return new Response(null, {
+      return withCors(new Response(null, {
         status: hit.status,
         headers: {
           Location: hit.location,
@@ -765,7 +810,7 @@ const main = defineMiddleware(async (context, next) => {
           // fighting a year of cached redirects, so say an hour.
           'Cache-Control': hit.status === 301 ? 'public, max-age=3600' : 'no-store',
         },
-      });
+      }));
     }
   }
 
@@ -787,13 +832,6 @@ const main = defineMiddleware(async (context, next) => {
     setCapabilityOverrides(null);
   }
 
-  // ---- CORS preflight for the JSON API (headless cross-origin clients) ----
-  const cors: Record<string, string> = pathname.startsWith('/api/')
-    ? corsHeaders(request.headers.get('origin'))
-    : {};
-  if (method === 'OPTIONS' && pathname.startsWith('/api/')) {
-    return new Response(null, { status: 204, headers: cors });
-  }
 
   // ---- Session attach (always) ----
   // The token is cryptographically verified, then revalidated against the DB so
@@ -924,10 +962,10 @@ const main = defineMiddleware(async (context, next) => {
         // 403 rather than 404: a crawler that is being refused should learn
         // that the page exists and it is not welcome, so it stops retrying.
         // A 404 teaches it the URL is dead and can poison an index.
-        return new Response(verdict.reason || 'Blocked by crawler policy', {
+        return withCors(new Response(verdict.reason || 'Blocked by crawler policy', {
           status: 403,
           headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-        });
+        }));
       }
     } catch {
       /* A failing policy plugin must never take the site down. */
@@ -963,7 +1001,7 @@ const main = defineMiddleware(async (context, next) => {
     const { result: rl } = await chargeBuckets(plan);
     rateHeaders = rateLimitHeaders(rl);
     if (!rl.allowed) {
-      return new Response(
+      return withCors(new Response(
         JSON.stringify({
           success: false,
           error: {
@@ -983,7 +1021,7 @@ const main = defineMiddleware(async (context, next) => {
             ...rateHeaders,
           },
         },
-      );
+      ));
     }
     // A write whose length we were not told (S3.7). The size check below reads
     // Content-Length, so a chunked body walked straight past it and was
@@ -991,7 +1029,7 @@ const main = defineMiddleware(async (context, next) => {
     // proxies and browsers this app is deployed behind are covered in
     // `isUnframedWrite`.
     if (isUnframedWrite(method, request.headers)) {
-      return new Response(
+      return withCors(new Response(
         JSON.stringify({
           success: false,
           error: {
@@ -1000,16 +1038,16 @@ const main = defineMiddleware(async (context, next) => {
           },
         }),
         { status: 411, headers: { 'Content-Type': 'application/json', ...rateHeaders } },
-      );
+      ));
     }
     // Reject oversized bodies BEFORE any handler buffers them (OOM DoS guard).
     if (method !== 'GET' && method !== 'HEAD') {
       const declared = Number(request.headers.get('content-length') || '0');
       if (declared > bodyLimitFor(pathname)) {
-        return new Response(
+        return withCors(new Response(
           JSON.stringify({ success: false, error: { message: 'Request body too large', code: 'PAYLOAD_TOO_LARGE' } }),
           { status: 413, headers: { 'Content-Type': 'application/json' } },
-        );
+        ));
       }
     }
   }
@@ -1041,7 +1079,7 @@ const main = defineMiddleware(async (context, next) => {
     );
     if (shouldHoldRequest(planned, pathname, user?.role)) {
       return pathname.startsWith('/api/')
-        ? maintenanceApiResponse(planned)
+        ? withCors(maintenanceApiResponse(planned))
         : maintenanceResponse(planned);
     }
 
@@ -1139,10 +1177,10 @@ const main = defineMiddleware(async (context, next) => {
         ...cors,
         ...rateHeaders,
       };
-      return new Response(
+      return withCors(new Response(
         JSON.stringify({ success: false, error: { message: 'Not found', code: 'NOT_FOUND' } }),
         { status: 404, headers },
-      );
+      ));
     }
   }
 
@@ -1213,10 +1251,10 @@ const main = defineMiddleware(async (context, next) => {
         user = null;
         locals.user = null;
       } else {
-        return new Response(
+        return withCors(new Response(
           JSON.stringify({ success: false, error: { message: 'This API key\'s scopes do not permit this endpoint', code: 'INSUFFICIENT_SCOPE' } }),
           { status: 403, headers: { 'Content-Type': 'application/json' } },
-        );
+        ));
       }
     }
 
@@ -1226,10 +1264,10 @@ const main = defineMiddleware(async (context, next) => {
         // Public GETs and public form POSTs are allowed; anything else
         // without auth is 401. (CSRF is still enforced below for writes.)
         if (!isPublicApi(method, pathname) && !isPublicWrite(method, pathname)) {
-          return new Response(
+          return withCors(new Response(
             JSON.stringify({ success: false, error: { message: 'Unauthorized', code: 'UNAUTHORIZED' } }),
             { status: 401, headers: { 'Content-Type': 'application/json' } },
-          );
+          ));
         }
       }
       // (The scope gate used to sit here. It now runs above, for every /api
@@ -1254,13 +1292,13 @@ const main = defineMiddleware(async (context, next) => {
           }
         }
         if (!csrfEqual(token, csrf)) {
-          return new Response(
+          return withCors(new Response(
             JSON.stringify({
               success: false,
               error: { message: 'Bad or missing CSRF token', code: 'CSRF_FAILED' },
             }),
             { status: 403, headers: { 'Content-Type': 'application/json' } },
-          );
+          ));
         }
       }
     }
@@ -1282,10 +1320,7 @@ const main = defineMiddleware(async (context, next) => {
   // never replaced: a cacheable route has already said it varies on Cookie and
   // Authorization, and overwriting that with `Origin` alone would let a shared
   // cache serve one caller's copy to another.
-  for (const [k, v] of Object.entries(cors)) {
-    if (k.toLowerCase() === 'vary') res.headers.set(k, mergeVary(res.headers.get(k), v));
-    else res.headers.set(k, v);
-  }
+  withCors(res);
   // Publish the remaining budget on every /api response. A client that can only
   // learn its limit by being refused can only discover it by hitting it.
   for (const [k, v] of Object.entries(rateHeaders)) {

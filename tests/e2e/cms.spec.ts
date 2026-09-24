@@ -571,8 +571,11 @@ test('editing a product in the admin does not destroy its variants or images', a
   const variantIds = created.data.variants.map((v: any) => v.id).sort();
 
   // Open the product in the admin and save it WITHOUT changing anything.
+  // The search runs on the server now (the list is paginated), so submit it:
+  // that is also what finds a product that is not on the first page.
   await page.goto('/admin/products');
   await page.fill('#filter', slug.slice(-6));
+  await Promise.all([page.waitForURL(/\?q=/), page.press('#filter', 'Enter')]);
   const editBtn = page.locator(`.edit[data-id="${created.data.id}"]`);
   await expect(editBtn).toBeVisible();
   await editBtn.click();
@@ -615,6 +618,92 @@ test('editing a product in the admin does not destroy its variants or images', a
   expect(after.tags).toHaveLength(2);
   // Variant stock survives too.
   expect(after.variants.find((v: any) => v.options.Colour === 'Black').stock).toBe(4);
+});
+
+/*
+ * Pagination on the admin lists (src/lib/admin-paging.ts). Products used to
+ * render the whole catalogue and filter it in the browser, which cannot find
+ * anything that was not sent; posts and pages paged ten at a time with the
+ * controls hidden below eleven. Each run seeds records under a unique marker
+ * and searches for it, so earlier tests' data does not change the counts.
+ */
+async function seed(page: Page, url: string, bodies: object[]) {
+  return page.evaluate(async ({ url, bodies }) => {
+    const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') ?? '';
+    for (const body of bodies) {
+      const res = await fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`${url} ${res.status} ${await res.text()}`);
+    }
+  }, { url, bodies });
+}
+
+test('the products list pages, and its search reaches every page', async ({ page }) => {
+  await login(page);
+  await page.goto('/admin/products');
+  const mark = `pg${Date.now().toString(36)}`;
+  await seed(page, '/api/products', Array.from({ length: 30 }, (_, i) => ({
+    name: `Paged ${mark} ${String(i + 1).padStart(2, '0')}`, slug: `${mark}-${i + 1}`, price_cents: 1000 + i,
+  })));
+
+  await page.goto(`/admin/products?q=${mark}`);
+  await expect(page.locator('.product-row')).toHaveCount(25);
+  await expect(page.locator('[data-pagination-summary]')).toHaveText(/1–25 of 30/);
+
+  await page.click('.admin-pagination a[rel="next"]');
+  await expect(page).toHaveURL(new RegExp(`q=${mark}.*page=2|page=2.*q=${mark}`));
+  await expect(page.locator('.product-row')).toHaveCount(5);
+  await expect(page.locator('[data-pagination-summary]')).toHaveText(/26–30 of 30/);
+
+  // A product on the LAST page, found from the first: the old in-browser
+  // filter could only hide rows it had been sent, so this was impossible.
+  const lastName = `Paged ${mark} 30`;
+  await page.goto('/admin/products');
+  await page.fill('#filter', lastName);
+  await Promise.all([page.waitForURL(/\?q=/), page.press('#filter', 'Enter')]);
+  await expect(page.locator('.product-row')).toHaveCount(1);
+  await expect(page.locator('.product-row')).toContainText(lastName);
+
+  await page.goto(`/admin/products?q=${mark}&per=50`);
+  await expect(page.locator('.product-row')).toHaveCount(30);
+  await expect(page.locator('.admin-pagination nav')).toHaveCount(0);
+
+  await page.goto(`/admin/products?q=nothing-${mark}`);
+  await expect(page.locator('#rows')).toContainText('No products match');
+
+  // Newest first: the product just created is at the top of page 1, with no
+  // search — paged oldest-first, it reloaded onto the last page, out of sight.
+  await page.goto('/admin/products');
+  await expect(page.locator('.product-row').first()).toContainText(`Paged ${mark} 30`);
+});
+
+test('posts and pages page too, and the controls show from page 1', async ({ page }) => {
+  await login(page);
+  await page.goto('/admin/posts');
+  const mark = `pp${Date.now().toString(36)}`;
+  await seed(page, '/api/posts', [
+    ...Array.from({ length: 27 }, (_, i) => ({ title: `Post ${mark} ${i + 1}`, status: 'draft', kind: 'post' })),
+    ...Array.from({ length: 12 }, (_, i) => ({ title: `Page ${mark} ${i + 1}`, status: 'draft', kind: 'page' })),
+  ]);
+
+  await page.goto(`/admin/posts?q=${mark}&kind=post`);
+  await expect(page.locator('[data-pagination-summary]')).toHaveText(/1–25 of 27/);
+  await page.click('.admin-pagination a[rel="next"]');
+  await expect(page.locator('[data-pagination-summary]')).toHaveText(/26–27 of 27/);
+  // The filters survive paging: still only posts, still only this run's.
+  expect(page.url()).toContain('kind=post');
+  expect(page.url()).toContain(`q=${mark}`);
+
+  // Twelve pages fit on one page of 25 — the size choice is still offered,
+  // where the old controls disappeared entirely below eleven.
+  await page.goto(`/admin/posts?q=${mark}&kind=page`);
+  await expect(page.locator('[data-pagination-summary]')).toHaveText(/1–12 of 12/);
+  await expect(page.locator('.admin-pagination nav')).toHaveCount(0);
+  await page.goto(`/admin/posts?q=${mark}`);
+  await expect(page.locator('[data-pagination-summary]')).toHaveText(/1–25 of 39/);
+  await page.click('.admin-pagination >> text=50');
+  await expect(page.locator('[data-pagination-summary]')).toHaveText(/1–39 of 39/);
 });
 
 test('public catalogue is readable without auth; orders are not', async ({ page, request }) => {

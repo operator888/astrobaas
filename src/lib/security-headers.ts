@@ -91,7 +91,8 @@ export function describeCorsPosture(env: NodeJS.ProcessEnv = process.env): {
       ? {
           warning:
             'CORS_ORIGINS=* — ANY website can make a visitor\'s browser place orders, start payments and send '
-            + 'contact/newsletter posts without a CSRF token. No session is exposed, but the origin allow-list '
+            + 'contact/newsletter posts, or submit your public forms and upload files to them, without a CSRF '
+            + 'token. No session is exposed, but the origin allow-list '
             + 'no longer limits which sites embed your checkout. List your storefront origins instead '
             + '(e.g. CORS_ORIGINS=https://shop.example.com).',
         }

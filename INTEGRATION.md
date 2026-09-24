@@ -170,8 +170,10 @@ can read a signed-in admin's data through CORS, even with `CORS_ORIGINS=*`.
 Same-origin frontends need nothing.
 
 **The allow-list does a second job, and `*` switches it off.** A shopper's
-browser on your storefront places orders, starts payments and posts contact and
-newsletter forms **without** the CSRF cookie (it cannot read one cross-site).
+browser on your storefront places orders, starts payments, posts contact and
+newsletter forms and submits your own public forms (any content type with
+`writable: 'public'`, file fields included) **without** the CSRF cookie (it
+cannot read one cross-site).
 That is allowed only for requests that carry **no session cookie** and whose
 `Origin` is on this list. With `CORS_ORIGINS=*`, any website can make a
 visitor's browser do those things. No session is involved, so nothing is taken
@@ -193,6 +195,16 @@ sign-in (`POST /api/auth/login`) also sets it for a script that never loads a
 page. API responses (including every anonymous `GET`) no longer set any cookie,
 so a CDN can cache them. Cookie-less cross-origin storefront calls never needed
 the token.
+
+**Refusals are readable too.** Every `/api` answer to an allow-listed origin
+carries the CORS headers, errors included: a `401`, `403 CSRF_FAILED`,
+`403 INSUFFICIENT_SCOPE`, `411`, `413`, `429` or maintenance `503` reaches your
+code with its status and `error.code`. So if your browser console says a
+request was *blocked by CORS policy*, look first at `CORS_ORIGINS` (is this
+exact origin, scheme and port included, on the list?) and at the request's
+headers (a custom header outside `Content-Type`, `Authorization`,
+`X-CSRF-Token` and `Idempotency-Key` fails the preflight). An unexpected server
+error (500) is the one answer that can still arrive without CORS headers.
 
 ## 3. Call the API
 

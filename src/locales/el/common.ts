@@ -19,6 +19,12 @@ export const common = {
   'admin.common.none': 'Καμία',
   'admin.common.yes': 'Ναι',
   'admin.common.no': 'Όχι',
+  'admin.pagination.showing': 'Εμφάνιση {from}–{to} από {total}',
+  'admin.pagination.perPage': 'Ανά σελίδα:',
+  'admin.pagination.label': 'Σελιδοποίηση',
+  'admin.pagination.previous': 'Προηγούμενη',
+  'admin.pagination.next': 'Επόμενη',
+  'admin.pagination.page': 'Σελίδα {page}',
 };
 
 export default common;

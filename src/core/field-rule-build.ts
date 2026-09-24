@@ -298,8 +298,19 @@ export function buildFieldPresentation(
   steps: number,
   earlier: ReadonlySet<string>,
   push: (message: string) => void,
-): { step?: number; showIf?: { field: string; equals: string | number | boolean } } | null {
-  const out: { step?: number; showIf?: { field: string; equals: string | number | boolean } } = {};
+): { label?: string; step?: number; showIf?: { field: string; equals: string | number | boolean } } | null {
+  const out: { label?: string; step?: number; showIf?: { field: string; equals: string | number | boolean } } = {};
+
+  if (raw.label !== undefined) {
+    if (typeof raw.label !== 'string') {
+      push(`${where}.label must be a string`);
+      return null;
+    }
+    // Rendered as text everywhere, never as HTML; control characters are
+    // dropped so a label cannot break a line or a table cell.
+    const label = raw.label.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80);
+    if (label) out.label = label;
+  }
 
   if (raw.step !== undefined) {
     const n = raw.step;

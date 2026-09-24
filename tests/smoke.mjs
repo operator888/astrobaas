@@ -3038,6 +3038,13 @@ async function main() {
       const feed = await (await fetch(`${BASE}/rss.xml`)).text();
       if (/smoke-seo\.example\.com/.test(feed)) ok('...and drives rss.xml');
       else fail('site_url inert in rss', feed.slice(0, 140));
+
+      // ...and the admin's "View site" button, which was a hard-coded "/": on a
+      // headless install that opened the CMS's own pages, not the storefront.
+      const adminHtml = await (await fetch(`${BASE}/admin`, { headers: { Cookie: sessionCookie } })).text();
+      if (/href="https:\/\/smoke-seo\.example\.com"[^>]*target="_blank"/.test(adminHtml)) {
+        ok('...and the admin View site button opens it');
+      } else fail('View site ignores site_url', (adminHtml.match(/<a[^>]*target="_blank"[^>]*>/) ?? [''])[0].slice(0, 160));
     }
 
     // --- red-team regressions ---
@@ -4509,6 +4516,37 @@ async function main() {
         });
         if (bogus.status === 422) ok('a reference to an upload that is not there is refused');
         else fail('dangling file reference', `status=${bogus.status}`);
+      }
+
+      // The file field from a HEADLESS site: cookie-less, allow-listed origin.
+      // It was the second half of the same 403 — a storefront could not even
+      // attach the file, let alone post the form that references it.
+      {
+        const STORE = 'https://frontend.example.com';
+        const xfd = new FormData();
+        xfd.append('file', new Blob([png], { type: 'image/png' }), 'cv.png');
+        const xup = await fetch(`${BASE}/api/forms/smoke-application/upload`, {
+          method: 'POST', headers: { Origin: STORE }, body: xfd,
+        });
+        const xj = await xup.json().catch(() => null);
+        if (xup.status === 201 && /^pf_[0-9a-f]{20}$/.test(xj?.data?.id ?? '')) {
+          ok('a headless storefront can attach a file, cookie-less');
+        } else fail('cross-origin upload', `status=${xup.status} ${JSON.stringify(xj)?.slice(0, 160)}`);
+        if (xj?.data?.id) {
+          const xpost = await fetch(`${BASE}/api/content/smoke-application`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', Origin: STORE },
+            body: JSON.stringify({ email: 'far@away.gr', cv: xj.data.id }),
+          });
+          if (xpost.status === 201) ok('...and submit the form that carries it');
+          else fail('cross-origin submission with a file', `status=${xpost.status}`);
+        }
+        const efd = new FormData();
+        efd.append('file', new Blob([png], { type: 'image/png' }), 'cv.png');
+        const eup = await fetch(`${BASE}/api/forms/smoke-application/upload`, {
+          method: 'POST', headers: { Origin: 'https://evil.example.com' }, body: efd,
+        });
+        if (eup.status === 403) ok('...while a NON-allow-listed origin still cannot upload');
+        else fail('upload cors bypass', `evil origin got ${eup.status}`);
       }
 
       // A type with no file field must not expose an upload endpoint at all.
@@ -11606,6 +11644,106 @@ async function main() {
     if (typed && typed.data?.submitted_at === undefined) {
       ok('public forms: a staff entry is not marked as a public submission');
     } else fail('staff entry marked as submission', String(typed?.data?.submitted_at));
+
+    // ---- ...and from a HEADLESS site: the cookie-less cross-origin door ----
+    //
+    // Everything above posts the way a page on THIS origin does, with the CSRF
+    // cookie echoed in the header. A form on a headless storefront cannot: it
+    // is on another site, so it never sees that cookie, and every submission
+    // was `403 CSRF_FAILED` — measured on a live demo storefront's table
+    // request form. Checkout, contact and newsletter had been exempted for
+    // exactly this caller; the form builder's forms were the sibling left out.
+    // Its own type, so the per-type submission limit the block above already
+    // spends cannot turn a pass into a 429.
+    {
+      const STORE = 'https://frontend.example.com';
+      const json = { 'Content-Type': 'application/json' };
+      const rsvp = {
+        name: 'smoke-rsvp', label: 'RSVP', visibility: 'staff', writable: 'public',
+        fields: [
+          { name: 'name', rule: { type: 'string', min: 1, max: 100 } },
+          { name: 'guests', rule: { type: 'number', int: true, min: 1, max: 12 } },
+        ],
+      };
+      const putRsvp = await fetch(`${BASE}/api/content-types`, {
+        method: 'PUT', headers: authed, body: JSON.stringify([...defs, rsvp]),
+      });
+      if (putRsvp.status !== 200) fail('rsvp type PUT', `status=${putRsvp.status}`);
+
+      // THE CASE THAT WAS BROKEN: no cookie at all, allow-listed origin.
+      const fromStore = await fetch(`${BASE}/api/content/smoke-rsvp`, {
+        method: 'POST', headers: { ...json, Origin: STORE },
+        body: JSON.stringify({ name: 'A guest', guests: 2 }),
+      });
+      if (fromStore.status === 201) ok('public forms: a headless storefront can submit, cookie-less');
+      else fail('cross-origin form submit', `status=${fromStore.status} ${(await fromStore.text()).slice(0, 120)}`);
+      const stored = await (await fetch(`${BASE}/api/content/smoke-rsvp`, { headers: { Cookie: sessionCookie } }))
+        .json().catch(() => null);
+      if ((stored?.data ?? []).some((e) => e.data?.name === 'A guest')) ok('...and the submission is really stored');
+      else fail('cross-origin submission not stored', JSON.stringify(stored?.data ?? null).slice(0, 120));
+
+      // The exemption opens the DOOR, not the type: a type that never said
+      // `public` still 404s for this caller, exactly as for a same-origin one.
+      const notForm = await fetch(`${BASE}/api/content/smoke-notice`, {
+        method: 'POST', headers: { ...json, Origin: STORE },
+        body: JSON.stringify({ title: 'I should not exist' }),
+      });
+      if (notForm.status === 404) ok('...and a type that is not a form still refuses it');
+      else fail('cross-origin write to a staff type', `status=${notForm.status}`);
+
+      // Another site entirely. Page script cannot forge Origin.
+      const evil = await fetch(`${BASE}/api/content/smoke-rsvp`, {
+        method: 'POST', headers: { ...json, Origin: 'https://evil.example.com' },
+        body: JSON.stringify({ name: 'Evil', guests: 1 }),
+      });
+      if (evil.status === 403) ok('...and a NON-allow-listed origin is still refused');
+      else fail('form cors bypass', `evil origin got ${evil.status}`);
+      if (!evil.headers.get('access-control-allow-origin')) ok('...without a CORS grant for that origin');
+      else fail('CORS granted to a stranger', evil.headers.get('access-control-allow-origin'));
+
+      // No Origin: a non-browser caller, which must use a key or the token.
+      const bare = await fetch(`${BASE}/api/content/smoke-rsvp`, {
+        method: 'POST', headers: json, body: JSON.stringify({ name: 'Curl', guests: 1 }),
+      });
+      if (bare.status === 403) ok('...and a request with no Origin still needs the token');
+      else fail('originless form bypass', `got ${bare.status}`);
+
+      // THE ATTACK: a request carrying a SESSION keeps the full CSRF check.
+      const ridden = await fetch(`${BASE}/api/content/smoke-rsvp`, {
+        method: 'POST', headers: { ...json, Origin: STORE, Cookie: sessionCookie },
+        body: JSON.stringify({ name: 'Ridden', guests: 1 }),
+      });
+      const riddenJson = await ridden.json().catch(() => null);
+      if (ridden.status === 403 && riddenJson?.error?.code === 'CSRF_FAILED') {
+        ok('...and a SESSION-carrying request is still CSRF-checked');
+      } else fail('csrf bypassed for a session on a form', `got ${ridden.status}`);
+
+      // ---- a refusal must be READABLE by the storefront that caused it ----
+      //
+      // Without Access-Control-Allow-Origin the browser hides the status and
+      // the body and reports "blocked by CORS policy", so every one of these
+      // looked like a CORS misconfiguration from the storefront's side.
+      if (ridden.headers.get('access-control-allow-origin') === STORE) {
+        ok('a CSRF refusal to an allow-listed origin carries CORS, so the storefront can read it');
+      } else fail('CSRF 403 unreadable cross-origin', `ACAO=${ridden.headers.get('access-control-allow-origin')}`);
+
+      const unauth = await fetch(`${BASE}/api/products`, {
+        method: 'POST', headers: { ...json, Origin: STORE },
+        body: JSON.stringify({ name: 'Injected', slug: 'injected-cors', price_cents: 1 }),
+      });
+      if ((unauth.status === 401 || unauth.status === 403)
+          && unauth.headers.get('access-control-allow-origin') === STORE) {
+        ok('...and so does a 401 for a staff-only write');
+      } else fail('401 unreadable cross-origin', `status=${unauth.status} ACAO=${unauth.headers.get('access-control-allow-origin')}`);
+
+      const huge = await fetch(`${BASE}/api/content/smoke-rsvp`, {
+        method: 'POST', headers: { ...json, Origin: STORE },
+        body: JSON.stringify({ name: 'x'.repeat(2 * 1024 * 1024 + 10), guests: 1 }),
+      });
+      if (huge.status === 413 && huge.headers.get('access-control-allow-origin') === STORE) {
+        ok('...and so does a 413 for an oversized body');
+      } else fail('413 unreadable cross-origin', `status=${huge.status} ACAO=${huge.headers.get('access-control-allow-origin')}`);
+    }
 
     await fetch(`${BASE}/api/content-types`, { method: 'PUT', headers: authed, body: '[]' });
   }

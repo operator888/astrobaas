@@ -92,7 +92,7 @@ const byStep = Array.from({ length: totalSteps }, (_, i) =>
       hidden={Boolean(f.showIf)}
     >
       <label class="block text-sm font-medium ab-ink mb-1" for={`f-${def.name}-${f.name}`}>
-        {humanise(f.name)}
+        {f.label ?? humanise(f.name)}
         {(f.rule as any).optional && <span class="ab-muted font-normal"> (optional)</span>}
       </label>
       {f.rule.type === 'file' ? (

@@ -19,6 +19,12 @@ export const common = {
   'admin.common.none': 'None',
   'admin.common.yes': 'Yes',
   'admin.common.no': 'No',
+  'admin.pagination.showing': 'Showing {from}–{to} of {total}',
+  'admin.pagination.perPage': 'Per page:',
+  'admin.pagination.label': 'Pagination',
+  'admin.pagination.previous': 'Previous',
+  'admin.pagination.next': 'Next',
+  'admin.pagination.page': 'Page {page}',
 };
 
 export default common;

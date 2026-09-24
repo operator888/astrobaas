@@ -1,0 +1,57 @@
+---
+/**
+ * The admin's list pagination: "Showing 26–50 of 312", Previous / Next, page
+ * numbers with gaps, and the page size. Plain links — no script, so it works
+ * under the strict CSP and without JavaScript, and every page is a URL.
+ *
+ * The page does the filtering and passes the result of readPaging(); this only
+ * draws. Every link keeps the page's other parameters (search, filters) and a
+ * size change goes back to page 1, so it never lands past the end.
+ */
+import { PAGE_SIZES, listHref, pageWindow, type Paging } from '../../lib/admin-paging';
+
+interface Props {
+  paging: Paging;
+  searchParams: URLSearchParams;
+}
+const { paging, searchParams: sp } = Astro.props;
+const t = Astro.locals.t;
+const { page, totalPages, total, start, end, pageSize } = paging;
+const windowed = pageWindow(page, totalPages);
+const btn = 'px-3 py-1.5 border border-gray-300 text-sm rounded-md text-gray-700 bg-white hover:bg-gray-50';
+---
+{total > 0 && (
+  <div class="admin-pagination flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 py-3 border-t border-gray-200 bg-white text-sm">
+    <p class="text-gray-600" data-pagination-summary>
+      {t('admin.pagination.showing', { from: start + 1, to: end, total })}
+    </p>
+    <div class="flex flex-wrap items-center gap-3">
+      <span class="text-gray-500">
+        {t('admin.pagination.perPage')}
+        {PAGE_SIZES.map((size, i) => (
+          <>
+            {i > 0 && <span aria-hidden="true"> · </span>}
+            {size === pageSize
+              ? <strong class="text-gray-900" aria-current="true">{size}</strong>
+              : <a class="text-blue-600 hover:underline" href={listHref(sp, { per: size, page: null })}>{size}</a>}
+          </>
+        ))}
+      </span>
+      {totalPages > 1 && (
+        <nav class="flex items-center gap-1" aria-label={t('admin.pagination.label')}>
+          {page > 1
+            ? <a class={btn} rel="prev" href={listHref(sp, { page: page - 1 })}>{t('admin.pagination.previous')}</a>
+            : <span class={`${btn} opacity-50 cursor-not-allowed`} aria-disabled="true">{t('admin.pagination.previous')}</span>}
+          {windowed.map((p) => p === null
+            ? <span class="px-2 text-gray-400" aria-hidden="true">…</span>
+            : p === page
+              ? <span class="px-3 py-1.5 text-sm rounded-md bg-blue-600 text-white font-medium" aria-current="page">{p}</span>
+              : <a class={btn} href={listHref(sp, { page: p })} aria-label={t('admin.pagination.page', { page: p })}>{p}</a>)}
+          {page < totalPages
+            ? <a class={btn} rel="next" href={listHref(sp, { page: page + 1 })}>{t('admin.pagination.next')}</a>
+            : <span class={`${btn} opacity-50 cursor-not-allowed`} aria-disabled="true">{t('admin.pagination.next')}</span>}
+        </nav>
+      )}
+    </div>
+  </div>
+)}

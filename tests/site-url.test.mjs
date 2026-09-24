@@ -30,7 +30,7 @@ await build({
   bundle: true, format: 'esm', platform: 'node', packages: 'external',
   outfile: out, logLevel: 'silent',
 });
-const { resolveSiteUrl, absoluteUrl } = await import(pathToFileURL(out).href);
+const { resolveSiteUrl, absoluteUrl, viewSiteHref } = await import(pathToFileURL(out).href);
 await fs.rm(out, { force: true });
 
 let pass = 0;
@@ -116,6 +116,23 @@ function check(name, cond) {
   check('a missing leading slash is added', absoluteUrl('blog/x', 'https://a.example.com') === 'https://a.example.com/blog/x');
   // Better a relative URL than one rooted at a wrong origin.
   check('an unresolvable site leaves the path relative', absoluteUrl('/blog/x', null) === '/blog/x');
+}
+
+/* ---- The admin's "View site" button ---------------------------------- */
+{
+  // THE BUG: it was a hard-coded "/", so on a headless install it opened the
+  // CMS's built-in site instead of the storefront visitors see.
+  check('View site opens the configured site', viewSiteHref('https://shop.example.com') === 'https://shop.example.com');
+  check('...without a trailing slash', viewSiteHref('https://shop.example.com/') === 'https://shop.example.com');
+  check('...and falls back to "/" when nothing is set', viewSiteHref(undefined) === '/' && viewSiteHref('  ') === '/');
+  check('...and never follows a javascript: URL', viewSiteHref('javascript:alert(1)') === '/');
+
+  // The header must USE it. A helper nobody calls is how the Site URL field
+  // was inert the first time.
+  const header = await fs.readFile(path.join(root, 'src/components/admin/AdminHeader.astro'), 'utf8');
+  check('the admin header links View site through viewSiteHref',
+    /viewSiteHref\(/.test(header) && /href=\{viewSite\}/.test(header));
+  check('...and no longer hard-codes href="/" on it', !/href="\/"\s+target="_blank"/.test(header));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -7,6 +7,8 @@ import { locales, isMultilingual, isKnownLocale, filterByLocale, recordLocale } 
 import { articlesOnly, pagesOnly, isPage } from '../../../lib/post-kind';
 import { resolveByline } from '../../../lib/byline';
 import { getSiteSettings } from '../../../lib/site';
+import Pagination from '../../../components/admin/Pagination.astro';
+import { readPaging } from '../../../lib/admin-paging';
 
 await LocalDB.init();
 // Filtered through the same helper as the API: the list used to show every
@@ -36,8 +38,6 @@ const categoryFilter = sp.get('category') ?? '';
 const localeFilter = isKnownLocale(sp.get('locale')) ? String(sp.get('locale')) : '';
 const siteLocales = locales();
 const siteIsMultilingual = isMultilingual();
-const pageSize = 10;
-const page = Math.max(1, parseInt(sp.get('page') || '1', 10) || 1);
 
 let filtered = allPosts.slice().sort(
   (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
@@ -59,11 +59,12 @@ if (q) {
   });
 }
 
+// Shared with the products screen (lib/admin-paging.ts): 25 / 50 / 100 per
+// page, numbered pages, and the controls shown whenever there is anything to
+// page through — they used to vanish below eleven posts.
 const totalCount = filtered.length;
-const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
-const safePage = Math.min(page, totalPages);
-const pageStart = (safePage - 1) * pageSize;
-const pagePosts = filtered.slice(pageStart, pageStart + pageSize);
+const paging = readPaging(sp, totalCount);
+const pagePosts = filtered.slice(paging.start, paging.end);
 
 const posts = pagePosts.map(post => {
   const author = allUsers.find(user => user.id === post.author_id);
@@ -80,11 +81,6 @@ const posts = pagePosts.map(post => {
   };
 });
 
-function pageHref(p: number) {
-  const usp = new URLSearchParams(sp);
-  usp.set('page', String(p));
-  return `?${usp.toString()}`;
-}
 ---
 
 <AdminLayout title="Posts">
@@ -105,6 +101,8 @@ function pageHref(p: number) {
 
     <!-- Filters and Search -->
     <form method="GET" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+      {/* Keep the chosen page size across a filter change; a new filter starts at page 1. */}
+      {sp.get('per') && <input type="hidden" name="per" value={sp.get('per')} />}
       <div class="flex flex-col md:flex-row md:items-center md:justify-between space-y-4 md:space-y-0">
         <div class="relative flex-1 max-w-md">
           <input
@@ -247,38 +245,10 @@ function pageHref(p: number) {
         </table>
       </div>
 
-      <!-- Pagination -->
-      <div class="bg-white px-4 py-3 border-t border-gray-200 sm:px-6">
-        <div class="flex items-center justify-between">
-          <p class="text-sm text-gray-700">
-            {totalCount === 0
-              ? 'No posts match your filters.'
-              : (
-                <>
-                  Showing
-                  <span class="font-medium"> {pageStart + 1} </span>–
-                  <span class="font-medium"> {Math.min(pageStart + pageSize, totalCount)} </span>
-                  of <span class="font-medium">{totalCount}</span>
-                </>
-              )}
-          </p>
-          {totalPages > 1 && (
-            <nav class="inline-flex space-x-1">
-              {safePage > 1 && (
-                <a href={pageHref(safePage - 1)} class="px-3 py-1.5 border border-gray-300 text-sm rounded-md text-gray-700 bg-white hover:bg-gray-50">
-                  Previous
-                </a>
-              )}
-              <span class="px-3 py-1.5 text-sm text-gray-500">Page {safePage} / {totalPages}</span>
-              {safePage < totalPages && (
-                <a href={pageHref(safePage + 1)} class="px-3 py-1.5 border border-gray-300 text-sm rounded-md text-gray-700 bg-white hover:bg-gray-50">
-                  Next
-                </a>
-              )}
-            </nav>
-          )}
-        </div>
-      </div>
+      {totalCount === 0 && (
+        <p class="bg-white px-4 py-3 border-t border-gray-200 sm:px-6 text-sm text-gray-700">No posts match your filters.</p>
+      )}
+      <Pagination paging={paging} searchParams={sp} />
     </div>
   </div>
 </AdminLayout>

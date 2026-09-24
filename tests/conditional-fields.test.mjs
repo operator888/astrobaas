@@ -233,6 +233,37 @@ check('a step with no title is refused', () => {
   }
 });
 
+// ─────────────────────────────────────────────── field labels (presentation)
+//
+// A field's `label` used to be dropped on save, so a theme or plugin that sent
+// "Seats left" got `seats_left` on the admin screen and the public form alike.
+
+check('a field label is kept, trimmed', () => {
+  const r = v(def({ fields: [{ name: 'seats_left', label: '  Seats left ', rule: { type: 'number' } }] }));
+  if (!r.ok) throw new Error(r.errors.join());
+  eq(r.defs[0].fields[0].label, 'Seats left');
+});
+
+check('a field label is capped and loses control characters', () => {
+  const r = v(def({ fields: [{ name: 'a', label: `Line\nbreak\u0000${'x'.repeat(200)}`, rule: { type: 'string' } }] }));
+  if (!r.ok) throw new Error(r.errors.join());
+  const label = r.defs[0].fields[0].label;
+  if (/[\u0000-\u001f]/.test(label)) throw new Error('control characters kept');
+  eq(label.length, 80, 'length');
+});
+
+check('an empty field label is not stored', () => {
+  const r = v(def({ fields: [{ name: 'a', label: '   ', rule: { type: 'string' } }] }));
+  if (!r.ok) throw new Error(r.errors.join());
+  eq('label' in r.defs[0].fields[0], false);
+});
+
+check('a field label that is not a string is refused', () => {
+  const r = v(def({ fields: [{ name: 'a', label: { html: '<b>x</b>' }, rule: { type: 'string' } }] }));
+  if (r.ok) throw new Error('accepted an object label');
+  if (!/label must be a string/.test(r.errors.join())) throw new Error(r.errors.join());
+});
+
 check('a definition with neither steps nor conditions is unchanged', () => {
   const r = v(def({ fields: [{ name: 'a', rule: { type: 'string' } }] }));
   if (!r.ok) throw new Error(r.errors.join());

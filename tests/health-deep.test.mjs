@@ -17,6 +17,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
+import net from 'node:net';
 import path from 'node:path';
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -26,6 +27,29 @@ const bad = (n, m) => { console.error(`✗ ${n}: ${m}`); fail++; };
 
 const TOKEN = 'health-token-for-this-test-only-32chars';
 
+/**
+ * A port that is free right now. The four servers used to sit on fixed
+ * ports 4341–4344: with anything else on the machine holding one (another
+ * checkout's dev server, a stray http.server), Vite silently moved to the next
+ * port, this polled the old one for a minute, failed "server never started" —
+ * and left the servers it had started running (2026-09-24).
+ */
+const canBind = (port) => new Promise((resolve) => {
+  const srv = net.createServer();
+  srv.once('error', () => resolve(false));
+  srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
+});
+// Below the OS's ephemeral range (49152+ on macOS, 32768+ on Linux): a port
+// the OS hands out for "any free port" is also one it may give the server's
+// own outgoing connections a moment later — which is exactly what happened.
+async function freePort() {
+  for (let i = 0; i < 50; i++) {
+    const port = 20000 + Math.floor(Math.random() * 12000);
+    if (await canBind(port)) return port;
+  }
+  throw new Error('no free port found in 20000–31999');
+}
+
 async function boot(port, env) {
   const p = spawn('npx', ['astro', 'dev', '--port', String(port), '--host', '127.0.0.1', '--ignore-lock'], {
     env: { ...process.env, AUTH_SECRET: 'health-fail-secret-abcdefghijkl', HEALTH_TOKEN: TOKEN,
@@ -34,11 +58,16 @@ async function boot(port, env) {
   });
   let log = '';
   p.stdout.on('data', (c) => (log += c)); p.stderr.on('data', (c) => (log += c));
+  const stop = () => { try { process.kill(-p.pid, 'SIGTERM'); } catch { /* gone */ } };
   for (let i = 0; i < 120; i++) {
+    // Taken between freePort() and the bind: say so now, not after a minute
+    // of polling a port nobody is listening on.
+    if (/Port \d+ is in use/.test(log)) { stop(); throw new Error(`port ${port} was taken before the server bound it\n${log}`); }
     try { const r = await fetch(`http://127.0.0.1:${port}/login`); if (r.ok) return { p, log: () => log }; }
     catch { /* not yet */ }
     await wait(500);
   }
+  stop(); // a server that never answered must not outlive the test
   throw new Error('server never started\n' + log);
 }
 const kill = (s) => { try { process.kill(-s.p.pid, 'SIGTERM'); } catch { /* gone */ } };
@@ -50,8 +79,9 @@ const get = (port, q = '') =>
   const db = path.join(os.tmpdir(), `hf-ok-${process.pid}.json`);
   const up = path.join(os.tmpdir(), `hf-ok-up-${process.pid}`);
   await fs.rm(db, { force: true });
-  const s = await boot(4341, { DB_PATH: db, UPLOADS_DIR: up });
-  const r = await get(4341);
+  const port1 = await freePort();
+  const s = await boot(port1, { DB_PATH: db, UPLOADS_DIR: up });
+  const r = await get(port1);
   const j = await r.json();
   if (r.status === 200 && j.ok === true) ok('a healthy install answers 200 to a bearer token, with no session');
   else bad('healthy 200', `status=${r.status} failed=${JSON.stringify(j.failed)}`);
@@ -69,8 +99,9 @@ const get = (port, q = '') =>
   await fs.rm(db, { force: true });
   await fs.mkdir(up, { recursive: true });
   await fs.chmod(up, 0o500); // r-x, not writable
-  const s = await boot(4342, { DB_PATH: db, UPLOADS_DIR: up });
-  const r = await get(4342);
+  const port2 = await freePort();
+  const s = await boot(port2, { DB_PATH: db, UPLOADS_DIR: up });
+  const r = await get(port2);
   const j = await r.json();
   if (r.status === 503) ok('an unwritable uploads directory answers 503');
   else bad('unwritable 503', `status=${r.status} ${JSON.stringify(j.checks?.find((c) => c.name === 'uploads_writable'))}`);
@@ -89,11 +120,12 @@ const get = (port, q = '') =>
   const db = path.join(os.tmpdir(), `hf-pl-${process.pid}.json`);
   const up = path.join(os.tmpdir(), `hf-pl-up-${process.pid}`);
   await fs.rm(db, { force: true });
-  const s = await boot(4343, {
+  const port3 = await freePort();
+  const s = await boot(port3, {
     DB_PATH: db, UPLOADS_DIR: up,
     ASTROBAAS_PLUGINS: './definitely-not-a-real-module.mjs',
   });
-  const r = await get(4343);
+  const r = await get(port3);
   const j = await r.json();
   if (r.status === 503) ok('a plugin that will not load answers 503');
   else bad('plugin 503', `status=${r.status}`);
@@ -110,10 +142,11 @@ const get = (port, q = '') =>
   const db = path.join(os.tmpdir(), `hf-cfg-${process.pid}.json`);
   const up = path.join(os.tmpdir(), `hf-cfg-up-${process.pid}`);
   await fs.rm(db, { force: true });
-  const s = await boot(4344, { DB_PATH: db, UPLOADS_DIR: up });
+  const port4 = await freePort();
+  const s = await boot(port4, { DB_PATH: db, UPLOADS_DIR: up });
 
   // Log in so a setting can be written.
-  const login = await fetch('http://127.0.0.1:4344/api/auth/login', {
+  const login = await fetch(`http://127.0.0.1:${port4}/api/auth/login`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: 'admin@local', password: 'admin' }),
   });
@@ -122,7 +155,7 @@ const get = (port, q = '') =>
   const csrf = cookies.map((c) => c.split(';')[0]).find((c) => c.startsWith('astrobaas_csrf='));
   const token = csrf ? decodeURIComponent(csrf.split('=')[1]) : '';
 
-  await fetch('http://127.0.0.1:4344/api/settings/update', {
+  await fetch(`http://127.0.0.1:${port4}/api/settings/update`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Cookie: `${session}; ${csrf}`, 'X-CSRF-Token': token },
     body: JSON.stringify({
@@ -137,7 +170,7 @@ const get = (port, q = '') =>
     }),
   });
 
-  const r = await get(4344, '?write=0');
+  const r = await get(port4, '?write=0');
   const j = await r.json();
   const c = j.checks?.find((x) => x.name === 'public_site_url');
   if (c?.status === 'ok' && c.data?.media_base === 'https://cms.configured.test')
@@ -145,7 +178,7 @@ const get = (port, q = '') =>
   else bad('configured base', JSON.stringify(c));
 
   // And an ANONYMOUS storefront request gets that base, not the request origin.
-  const prods = await fetch('http://127.0.0.1:4344/api/products?limit=1');
+  const prods = await fetch(`http://127.0.0.1:${port4}/api/products?limit=1`);
   const pj = await prods.json();
   if (pj?.meta?.media_base === 'https://cms.configured.test')
     ok('...and an anonymous storefront call gets it, not the 127.0.0.1 it connected to');

@@ -379,6 +379,13 @@ import AdminLayout from '../../layouts/AdminLayout.astro';
     name.value = f.name;
     name.className = 'ct-fname px-2 py-1.5 border border-gray-300 rounded w-40 text-sm';
 
+    // What editors and visitors read. Optional: without it the screens show a
+    // readable form of the name.
+    const label = document.createElement('input');
+    label.placeholder = 'Label (optional)';
+    label.value = f.label ?? '';
+    label.className = 'ct-flabel px-2 py-1.5 border border-gray-300 rounded w-44 text-sm';
+
     const type = document.createElement('select');
     type.className = 'ct-ftype px-2 py-1.5 border border-gray-300 rounded text-sm';
     for (const [v, label] of FIELD_TYPES) {
@@ -467,7 +474,7 @@ import AdminLayout from '../../layouts/AdminLayout.astro';
     // rebuilt as soon as a name changes rather than at save time.
     name.addEventListener('input', syncAllConditions);
 
-    row.append(name, type, options, req, step, cond, condVal, del, sub);
+    row.append(name, label, type, options, req, step, cond, condVal, del, sub);
     return row;
   }
 
@@ -490,6 +497,8 @@ import AdminLayout from '../../layouts/AdminLayout.astro';
         rule.fields = [...row.querySelectorAll('.ct-subfield')].map(readSubField).filter((f) => f.name);
       }
       const field = { name: row.querySelector('.ct-fname').value.trim(), rule };
+      const fieldLabel = row.querySelector('.ct-flabel')?.value.trim();
+      if (fieldLabel) field.label = fieldLabel;
       const stepSel = row.querySelector('.ct-fstep');
       const stepNo = Number(stepSel.value || '1');
       // Step 1 is the default and is not stored, so a type built before steps

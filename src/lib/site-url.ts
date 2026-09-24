@@ -75,3 +75,20 @@ export function absoluteUrl(path: string, siteUrl: string | null): string {
   if (!siteUrl) return path;
   return `${siteUrl}${path.startsWith('/') ? path : `/${path}`}`;
 }
+
+/**
+ * Where the admin's "View site" button goes.
+ *
+ * It was a hard-coded "/", which is right for an install that serves its own
+ * pages and wrong for every headless one: there "/" is the CMS's built-in
+ * site, not the storefront visitors actually see, so an operator clicked
+ * "View site" and landed on a page their customers never visit. The `site_url`
+ * setting is where the site lives; use it when it is set.
+ *
+ * Deliberately NOT resolveSiteUrl(): its build-time and request-origin
+ * fallbacks both point back at this CMS, which "/" already does without an
+ * absolute URL that could be stale.
+ */
+export function viewSiteHref(setting: unknown): string {
+  return normaliseOrigin(setting) ?? '/';
+}

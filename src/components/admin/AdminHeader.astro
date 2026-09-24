@@ -6,7 +6,16 @@
  * on every screen; the two icon-only controls carry an aria-label for the same
  * reason, since an unnamed button is unusable in ANY language.
  */
+import { LocalDB } from '../../lib/localdb';
+import { viewSiteHref } from '../../lib/site-url';
+
 const t = Astro.locals.t;
+// The site visitors see: the storefront on a headless install, this CMS's own
+// pages otherwise. A settings read that fails must not take the header down.
+let viewSite = '/';
+try {
+  viewSite = viewSiteHref((await LocalDB.getSetting('site_url'))?.value);
+} catch { /* keep "/" */ }
 ---
 
 <header class="bg-white shadow-sm border-b border-gray-200">
@@ -64,7 +73,7 @@ const t = Astro.locals.t;
       </button>
       
       <!-- View site -->
-      <a href="/" target="_blank" class="inline-flex items-center px-3 py-2 border border-gray-300 text-sm font-medium rounded-lg text-gray-700 bg-white hover:bg-gray-50 transition-colors duration-200">
+      <a href={viewSite} target="_blank" rel="noopener" class="inline-flex items-center px-3 py-2 border border-gray-300 text-sm font-medium rounded-lg text-gray-700 bg-white hover:bg-gray-50 transition-colors duration-200">
         <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
         </svg>

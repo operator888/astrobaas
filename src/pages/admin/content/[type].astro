@@ -36,7 +36,11 @@ const clientDef = {
   <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
     <div class="flex items-baseline justify-between mb-2">
       <h1 class="text-2xl font-semibold text-gray-900">{clientDef.labelPlural}</h1>
-      <a href="/admin/content-types" class="text-sm text-gray-500 hover:text-gray-900">← Content types</a>
+      <div class="flex items-center gap-4">
+        <a href="/admin/content-types" class="text-sm text-gray-500 hover:text-gray-900">← Content types</a>
+        <button id="ce-new" type="button"
+          class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium">New {clientDef.label}</button>
+      </div>
     </div>
     <p class="text-sm text-gray-500 mb-2">
       Served at <code>/api/content/{def.name}</code>
@@ -87,13 +91,27 @@ const clientDef = {
   </div>
 </AdminLayout>
 
-<script is:inline set:html={`window.__CT_DEF__ = ${jsonForScript(clientDef)};`}></script>
+{/*
+  The definition travels as DATA, never as script. It used to be an inline
+  `window.__CT_DEF__ = …` script, and the production Content-Security-Policy
+  (hash-based, no 'unsafe-inline') blocks an inline script whose text is made
+  per request: nothing can hash it at build time. The dev server sends no CSP,
+  so the screen worked there and was blank in production: no form, the list
+  stuck on "Loading…". A `type="application/json"` block is not executed, so
+  CSP does not apply to it. tests/csp-inline-scripts.test.mjs keeps it so.
+*/}
+<script id="ce-def" type="application/json" set:html={jsonForScript(clientDef)}></script>
 <script>
   // @ts-nocheck
-  import { api } from '../../../lib/apiClient';
+  import { api, apiFetch } from '../../../lib/apiClient';
+  import { fieldsOfType } from '../../../lib/field-walk';
   import { flash as sharedFlash } from '../../../lib/admin-ui';
 
-  const DEF = window.__CT_DEF__;
+  const DEF = JSON.parse(document.getElementById('ce-def').textContent);
+  // What a person reads is the field's label; the name is the API key.
+  // Same fallback as the public form: `seats_left` reads "Seats left".
+  const labelOf = (f) => f.label || f.name.replace(/[_-]+/g, ' ').replace(/^./, (c) => c.toUpperCase());
+  const fieldByName = (name) => DEF.fields.find((f) => f.name === name);
   const API = `/api/content/${encodeURIComponent(DEF.name)}`;
   let editingId = null;
 
@@ -156,6 +174,174 @@ const clientDef = {
     wrap.__getValue = () => current;
     render();
     return wrap;
+  }
+
+  /**
+   * An image (a `media` field). The stored value is the media id, which no
+   * person knows, so the control shows the picture and offers the library:
+   * search, pick, or upload a new one right here. The id stays internal.
+   */
+  function mediaFor(field) {
+    const wrap = document.createElement('div');
+    wrap.className = 'ce-input ce-media';
+    wrap.dataset.field = field.name;
+    let current = '';
+
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-3';
+    const thumb = document.createElement('img');
+    thumb.className = 'h-16 w-24 rounded-md object-cover bg-gray-100 border border-gray-200';
+    thumb.alt = '';
+    const empty = document.createElement('span');
+    empty.className = 'text-sm text-gray-400';
+    empty.textContent = 'No image';
+    const choose = document.createElement('button');
+    choose.type = 'button';
+    choose.className = 'px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50';
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'text-sm text-gray-500 hover:text-red-600';
+    clear.textContent = 'Remove';
+    row.append(thumb, empty, choose, clear);
+
+    const panel = document.createElement('div');
+    panel.className = 'hidden mt-3 border border-gray-200 rounded-lg p-3 bg-gray-50';
+    const bar = document.createElement('div');
+    bar.className = 'flex flex-wrap items-center gap-2 mb-3';
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.placeholder = 'Search images by name or description';
+    search.className = 'flex-1 min-w-40 px-3 py-1.5 border border-gray-300 rounded-lg text-sm';
+    const upload = document.createElement('label');
+    upload.className = 'px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-700 bg-white hover:bg-gray-50 cursor-pointer';
+    upload.textContent = 'Upload new';
+    const file = document.createElement('input');
+    file.type = 'file';
+    // The four image formats the uploader accepts (lib/media/ingest.ts).
+    file.accept = 'image/png,image/jpeg,image/gif,image/webp';
+    file.className = 'sr-only';
+    upload.appendChild(file);
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'text-sm text-gray-500 hover:text-gray-800';
+    close.textContent = 'Close';
+    bar.append(search, upload, close);
+    const msg = document.createElement('p');
+    msg.className = 'text-sm text-gray-500 mb-2';
+    const grid = document.createElement('div');
+    grid.className = 'grid grid-cols-3 sm:grid-cols-5 gap-2 max-h-72 overflow-y-auto';
+    panel.append(bar, msg, grid);
+    wrap.append(row, panel);
+
+    const show = (id, url) => {
+      current = id || '';
+      thumb.hidden = !url;
+      if (url) thumb.src = url; else thumb.removeAttribute('src');
+      empty.hidden = !!url || !!current;
+      if (current && !url) { empty.hidden = false; empty.textContent = 'Image chosen'; }
+      else empty.textContent = 'No image';
+      choose.textContent = current ? 'Change image' : 'Choose image';
+      clear.hidden = !current;
+    };
+
+    let timer = 0;
+    const list = async () => {
+      msg.textContent = 'Loading…';
+      grid.replaceChildren();
+      const res = await api.get('/api/media/get', { limit: 200, q: search.value.trim() || undefined });
+      if (!res.ok) {
+        msg.textContent = res.status === 403
+          ? 'Your role cannot browse the media library.'
+          : `Could not load the media library: ${res.error}`;
+        return;
+      }
+      const items = (res.data || []).filter((m) => m && m.url && (m.mime_type || 'image/').startsWith('image/'));
+      msg.textContent = items.length ? '' : (search.value ? 'No image matches that search.' : 'The library is empty. Upload an image.');
+      for (const m of items) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'block aspect-[4/3] rounded-md overflow-hidden border-2 border-transparent hover:border-blue-500 focus:border-blue-500 bg-white';
+        b.title = m.original_name || m.alt_text || '';
+        const img = document.createElement('img');
+        img.src = m.thumb_url || m.url;
+        img.alt = m.alt_text || m.original_name || '';
+        img.loading = 'lazy';
+        img.className = 'w-full h-full object-cover';
+        b.appendChild(img);
+        b.addEventListener('click', () => { show(m.id, m.url); panel.classList.add('hidden'); choose.focus(); });
+        grid.appendChild(b);
+      }
+    };
+
+    choose.addEventListener('click', () => {
+      const opening = panel.classList.contains('hidden');
+      panel.classList.toggle('hidden');
+      if (opening) { search.value = ''; list(); search.focus(); }
+    });
+    close.addEventListener('click', () => { panel.classList.add('hidden'); choose.focus(); });
+    clear.addEventListener('click', () => show('', ''));
+    search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(list, 250); });
+    file.addEventListener('change', async () => {
+      const f = file.files?.[0];
+      if (!f) return;
+      msg.textContent = `Uploading ${f.name}…`;
+      const fd = new FormData();
+      fd.append('file', f);
+      const res = await apiFetch('/api/media/upload', { method: 'POST', body: fd });
+      file.value = '';
+      if (!res.ok) { msg.textContent = `Upload failed: ${res.error}`; return; }
+      show(res.data.id, res.data.url);
+      panel.classList.add('hidden');
+    });
+
+    wrap.__setValue = (id, url) => show(typeof id === 'string' ? id : '', url || '');
+    wrap.__getValue = () => current;
+    show('', '');
+    return wrap;
+  }
+
+  /**
+   * A link to another collection's entry (a `ref` field). The stored value is
+   * that entry's id; the control lists the entries by the name a person
+   * recognises. Options are loaded once per target collection and shared with
+   * the table, which shows the same names.
+   */
+  const refCache = new Map(); // collection -> Promise<[{id, label}]>
+  const entryLabel = (e) => {
+    const d = e.data || {};
+    return String(d.name || d.title || d.label || d.slug || d.email || e.id);
+  };
+  function refOptions(to) {
+    if (!refCache.has(to)) {
+      refCache.set(to, api.get(`/api/content/${encodeURIComponent(to)}`, { limit: 200 })
+        .then((r) => (r.ok ? (r.data || []).map((e) => ({ id: e.id, label: entryLabel(e) })) : []))
+        .then((opts) => opts.sort((a, b) => a.label.localeCompare(b.label))));
+    }
+    return refCache.get(to);
+  }
+
+  function refFor(field) {
+    const el = document.createElement('select');
+    el.className = 'ce-input w-full px-3 py-2 border border-gray-300 rounded-lg';
+    el.dataset.field = field.name;
+    let pending = '';
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = field.rule.optional ? '(none)' : 'Choose…';
+    el.appendChild(blank);
+    refOptions(field.rule.to).then((opts) => {
+      for (const o of opts) {
+        const opt = document.createElement('option');
+        opt.value = o.id;
+        opt.textContent = o.label;
+        el.appendChild(opt);
+      }
+      if (!opts.length) blank.textContent = `No ${field.rule.to} entries yet`;
+      if (pending) el.value = pending;
+    });
+    el.__setValue = (v) => { pending = typeof v === 'string' ? v : ''; el.value = pending; };
+    el.__getValue = () => el.value;
+    return el;
   }
 
   function repeaterFor(field) {
@@ -275,6 +461,8 @@ const clientDef = {
     const r = field.rule;
     if (r.type === 'repeater') return repeaterFor(field);
     if (r.type === 'file') return fileFor(field);
+    if (r.type === 'media') return mediaFor(field);
+    if (r.type === 'ref') return refFor(field);
     let el;
     if (r.type === 'boolean') {
       el = document.createElement('input');
@@ -319,9 +507,13 @@ const clientDef = {
       }
       const label = document.createElement('label');
       label.className = 'block text-sm font-medium text-gray-700 mb-1';
-      label.textContent = f.name + (f.rule.optional ? '' : ' *');
-      cell.appendChild(label);
-      cell.appendChild(inputFor(f));
+      label.textContent = labelOf(f) + (f.rule.optional || f.rule.type === 'boolean' ? '' : ' *');
+      const input = inputFor(f);
+      const target = input.matches('input, select, textarea') ? input : input.querySelector('button, input');
+      if (target) { target.id = `ce-f-${f.name}`; label.htmlFor = target.id; }
+      // Long text and images get the whole row.
+      if (f.rule.type === 'media' || f.rule.type === 'repeater' || input.tagName === 'TEXTAREA') cell.className = 'md:col-span-2';
+      cell.append(label, input);
       wrap.appendChild(cell);
     }
     if (DEF.fields.some((f) => f.showIf)) {
@@ -370,7 +562,7 @@ const clientDef = {
       if (el.closest('[data-show-field]')?.hidden) continue;
       const rule = DEF.fields.find((f) => f.name === name)?.rule ?? { type: 'string' };
       let v;
-      if (rule.type === 'file') v = el.__getValue() || undefined;
+      if (rule.type === 'file' || rule.type === 'media' || rule.type === 'ref') v = el.__getValue() || undefined;
       else if (rule.type === 'repeater') {
         v = el.__getItems();
         // An empty list is "no items", which for an OPTIONAL repeater means the
@@ -386,8 +578,20 @@ const clientDef = {
         if (v.length === 0) v = undefined;
       } else v = el.value === '' ? undefined : el.value;
       if (v !== undefined) data[name] = v;
+      // Emptying an optional field while editing means "clear it". The
+      // update is partial, so leaving the key out would keep the old value;
+      // null is what the API reads as a clear.
+      else if (editingId && rule.optional && rule.type !== 'repeater' && rule.type !== 'file') data[name] = null;
     }
     return data;
+  }
+
+  /** Required fields left empty, by label. Hidden conditional fields are not asked. */
+  function missing(data) {
+    return DEF.fields.filter((f) => !f.rule.optional && f.rule.type !== 'boolean' && f.rule.type !== 'repeater'
+      && f.rule.type !== 'file'
+      && !document.querySelector(`#ce-form [data-field="${CSS.escape(f.name)}"][data-show-field]`)?.hidden
+      && (data[f.name] === undefined || data[f.name] === null)).map(labelOf);
   }
 
   function fillForm(data) {
@@ -395,7 +599,8 @@ const clientDef = {
       const name = el.dataset.field;
       const rule = DEF.fields.find((f) => f.name === name)?.rule ?? { type: 'string' };
       const v = data?.[name];
-      if (rule.type === 'file') el.__setValue(v);
+      if (rule.type === 'file' || rule.type === 'ref') el.__setValue(v);
+      else if (rule.type === 'media') el.__setValue(v, data?.[`${name}_url`]);
       else if (rule.type === 'repeater') el.__setItems(v);
       else if (rule.type === 'boolean') el.checked = !!v;
       else if (rule.type === 'array') el.value = Array.isArray(v) ? v.join(', ') : '';
@@ -412,6 +617,14 @@ const clientDef = {
     fillForm({});
   }
   $('ce-cancel').addEventListener('click', resetForm);
+  // The form sits under the list; with a long collection it is far down the
+  // page, and a screen whose way to add something is out of sight reads as a
+  // screen that cannot add anything.
+  $('ce-new').addEventListener('click', () => {
+    resetForm();
+    $('ce-form-title').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    $('ce-form').querySelector('input, select, textarea, button')?.focus({ preventScroll: true });
+  });
   $('ce-filter')?.addEventListener('change', (e) => {
     statusFilter = e.target.value;
     load();
@@ -420,8 +633,13 @@ const clientDef = {
   /* ---- list ---- */
 
   // A repeater's value is a list of records; printing it in a table cell gives
-  // "[object Object]" per item, so those columns are skipped.
-  const COLS = DEF.fields.filter((f) => f.rule.type !== 'repeater').slice(0, 4).map((f) => f.name);
+  // "[object Object]" per item, so those columns are skipped. A collection with
+  // pictures leads with its first one: that is how people recognise a row.
+  const firstMedia = DEF.fields.find((f) => f.rule.type === 'media');
+  const COLS = [
+    ...(firstMedia ? [firstMedia.name] : []),
+    ...DEF.fields.filter((f) => f.rule.type !== 'repeater' && f.rule.type !== 'media').slice(0, 4).map((f) => f.name),
+  ];
 
   function buildHead() {
     const tr = $('ce-head');
@@ -429,7 +647,7 @@ const clientDef = {
     for (const c of COLS) {
       const th = document.createElement('th');
       th.className = 'px-4 py-3 text-left font-medium';
-      th.textContent = c;
+      th.textContent = labelOf(fieldByName(c));
       tr.appendChild(th);
     }
     if (DEF.moderated) {
@@ -473,8 +691,18 @@ const clientDef = {
 
   let statusFilter = 'all';
 
+  // id -> name, for every collection this one links to, so the table can say
+  // "Hana Sato" where the record says 7603983c-….
+  const refNames = new Map();
+  async function loadRefNames() {
+    // Nested ones too: a repeater's link fields load their own options, and
+    // sharing the walk keeps this from being the flat copy that misses them.
+    const targets = [...new Set(fieldsOfType(DEF, 'ref').map((w) => w.field.rule.to))];
+    for (const to of targets) for (const o of await refOptions(to)) refNames.set(o.id, o.label);
+  }
+
   async function load() {
-    const res = await api.get(API);
+    const [res] = await Promise.all([api.get(API), loadRefNames()]);
     const body = $('ce-body');
     body.replaceChildren();
     if (!res.ok) { notice(`Could not load entries: ${res.error}`, 'error'); return; }
@@ -508,7 +736,22 @@ const clientDef = {
         const td = document.createElement('td');
         td.className = 'px-4 py-3 text-gray-700 max-w-60 truncate';
         const v = row.data?.[c];
-        td.textContent = Array.isArray(v) ? v.join(', ') : typeof v === 'boolean' ? (v ? 'yes' : 'no') : (v ?? '');
+        const kind = fieldByName(c)?.rule.type;
+        if (kind === 'media') {
+          const url = row.data?.[`${c}_url`];
+          if (url) {
+            const img = document.createElement('img');
+            img.src = url;
+            img.alt = row.data?.[`${c}_alt`] || '';
+            img.loading = 'lazy';
+            img.className = 'h-10 w-14 rounded object-cover bg-gray-100';
+            td.appendChild(img);
+          }
+        } else if (kind === 'ref') {
+          td.textContent = (v && refNames.get(v)) || (v ? '(missing)' : '');
+        } else {
+          td.textContent = Array.isArray(v) ? v.join(', ') : typeof v === 'boolean' ? (v ? 'yes' : 'no') : (v ?? '');
+        }
         tr.appendChild(td);
       }
       if (DEF.moderated) {
@@ -554,7 +797,7 @@ const clientDef = {
         $('ce-form-title').textContent = `Edit ${DEF.label}`;
         $('ce-cancel').classList.remove('hidden');
         fillForm(row.data);
-        $('ce-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        $('ce-form-title').scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
       const del = document.createElement('button');
       del.type = 'button';
@@ -575,11 +818,19 @@ const clientDef = {
   $('ce-save').addEventListener('click', async () => {
     $('ce-error').textContent = '';
     const data = readForm();
+    const absent = missing(data);
+    if (absent.length) {
+      $('ce-error').textContent = `Fill in: ${absent.join(', ')}.`;
+      return;
+    }
     const res = editingId
       ? await api.put(`${API}/${encodeURIComponent(editingId)}`, data)
       : await api.post(API, data);
     if (!res.ok) {
-      const details = res.details ? Object.values(res.details).join('; ') : res.error;
+      // Keyed by field name; say it with the label the form shows.
+      const details = res.details
+        ? Object.entries(res.details).map(([k, m]) => `${fieldByName(k) ? labelOf(fieldByName(k)) : k}: ${m}`).join('; ')
+        : res.error;
       $('ce-error').textContent = details || 'Could not save';
       return;
     }

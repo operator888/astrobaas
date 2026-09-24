@@ -387,9 +387,93 @@ const code = (src) => src.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\/
     mv?.('origin, Cookie', 'Origin') === 'origin, Cookie');
   check('Vary: * stays *', mv?.('*', 'Origin') === '*');
   const mwSrc = await readRepo('src/middleware.ts');
-  const echo = mwSrc.slice(mwSrc.indexOf('Echo CORS headers on allowed cross-origin API responses'));
+  // The echo lives in ONE helper, used after next() and by every early return.
+  const echo = mwSrc.slice(mwSrc.indexOf('const withCors = '));
   check('middleware: the CORS echo merges Vary rather than setting it',
-    /mergeVary\(res\.headers\.get\(k\), v\)/.test(echo.slice(0, 700)));
+    /mergeVary\(res\.headers\.get\(k\), v\)/.test(echo.slice(0, 400)));
+  check('middleware: the response from next() goes through that same helper',
+    /withCors\(res\);/.test(mwSrc));
+}
+
+/* ================================================================== *
+ * A refusal is readable by the storefront that caused it
+ * ================================================================== *
+ *
+ * Every early `return` in the middleware skips the decoration that runs
+ * after next(). A 401/403/429 answered to an allow-listed origin WITHOUT
+ * Access-Control-Allow-Origin is opaque to the browser: the page sees
+ * "blocked by CORS policy" and never the status or the code. That is how a
+ * CSRF refusal on a public form, measured on a live demo storefront, first
+ * looked like a CORS misconfiguration. So each early return, from the
+ * helper's definition to next(), must be one of:
+ *   withCors(...)            the rule
+ *   redirect(...)            page navigations, never /api
+ *   new Response(...)        only if it spreads `...cors` itself
+ * A new refusal added without withCors fails here, not in a storefront.
+ */
+{
+  const mw = code(await readRepo('src/middleware.ts'));
+  const def = mw.indexOf('const withCors = ');
+  const next = mw.indexOf('const res = await next();', def);
+  check('middleware: withCors is defined before the early returns', def > 0 && next > def);
+  const helperEnd = mw.indexOf('\n  };', def);
+  const body = mw.slice(helperEnd + 5, next);
+  const bad = [];
+  let wrapped = 0;
+  // A lookahead, so matches never overlap: a `return` that sits within the
+  // window of the one before it (`return redirect('/'); } ... return new
+  // Response(...)`) is checked on its own instead of being swallowed.
+  for (const m of body.matchAll(/\breturn\b(?=\s*([\s\S]{0,160}))/g)) {
+    const expr = m[1].replace(/\s+/g, ' ');
+    if (/^withCors\(/.test(expr)) { wrapped++; continue; }
+    if (/^redirect\(/.test(expr)) continue;
+    if (/^pathname\.startsWith\('\/api\/'\) \? withCors\(/.test(expr)) { wrapped++; continue; }
+    if (/^new Response\(/.test(expr)) {
+      // Its own span, up to the next statement: does it spread the headers?
+      const span = body.slice(m.index, body.indexOf(');\n', m.index) + 2);
+      if (/\.\.\.cors\b/.test(span)) continue;
+    }
+    bad.push(expr.slice(0, 70));
+  }
+  check(`middleware: every early return carries CORS (bare: ${JSON.stringify(bad)})`, bad.length === 0);
+  // The refusals this was written for: both maintenance 503s (env and
+  // scheduled), 429, 411, 413, scope 403, 401 and CSRF 403. Fewer means the
+  // scan stopped seeing them.
+  check(`middleware: the known /api refusals are all wrapped (saw ${wrapped})`, wrapped >= 8);
+}
+
+/* ================================================================== *
+ * Every public write is reachable from an allow-listed storefront
+ * ================================================================== *
+ *
+ * PUBLIC_API_WRITE lets an anonymous POST past the session gate. A browser on
+ * a headless storefront also needs it on CROSS_ORIGIN_PUBLIC_WRITE (a
+ * cookie-less caller cannot do the double-submit dance), unless the endpoint
+ * authenticates some other way and sits on CSRF_EXEMPT_WRITE. Checkout was
+ * fixed, then contact and newsletter, and the form builder's own forms were
+ * left behind — the "one sibling fixed" shape. This makes the next sibling a
+ * test failure instead of a live 403.
+ *
+ * Plugin routes are outside it by design: a plugin that declares a public
+ * write also declares its own `csrf` decision (pluginRouteAccess).
+ */
+{
+  const mw = code(await readRepo('src/middleware.ts'));
+  const list = (name) => {
+    const start = mw.indexOf(`const ${name} = [`);
+    const src = mw.slice(start, mw.indexOf('];', start));
+    // Each entry is a regex literal `/^...$/` at the start of its line; a
+    // trailing `// note` after the comma must not hide it from the check.
+    return new Set([...src.matchAll(/^\s*(\/\^.*?\$\/)/gm)].map((m) => m[1]));
+  };
+  const publicWrite = list('PUBLIC_API_WRITE');
+  const crossOrigin = list('CROSS_ORIGIN_PUBLIC_WRITE');
+  const exempt = list('CSRF_EXEMPT_WRITE');
+  check(`the three lists were read (${publicWrite.size}/${crossOrigin.size}/${exempt.size})`,
+    publicWrite.size >= 10 && crossOrigin.size >= 5 && exempt.size >= 2);
+  const stranded = [...publicWrite].filter((rx) => !crossOrigin.has(rx) && !exempt.has(rx));
+  check(`every public write is reachable cross-origin or authenticates itself (stranded: ${stranded.join(' ')})`,
+    stranded.length === 0);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
