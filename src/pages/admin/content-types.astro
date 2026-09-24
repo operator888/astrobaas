@@ -175,6 +175,7 @@ import AdminLayout from '../../layouts/AdminLayout.astro';
 <script>
   // @ts-nocheck
   import { api } from '../../lib/apiClient';
+  import { mergeFieldRule } from '../../lib/field-rule-merge';
   import { flash as sharedFlash } from '../../lib/admin-ui';
 
   const FIELD_TYPES = [
@@ -353,6 +354,8 @@ import AdminLayout from '../../layouts/AdminLayout.astro';
     del.addEventListener('click', () => row.remove());
 
     row.append(name, type, options, req, del);
+    // The rule as stored, so a save keeps what these controls do not show.
+    row.__rule = f.rule;
     return row;
   }
 
@@ -364,8 +367,7 @@ import AdminLayout from '../../layouts/AdminLayout.astro';
       rule.values = row.querySelector('.ct-sfopts').value.split(',').map((s) => s.trim()).filter(Boolean);
     }
     if (rule.type === 'ref') rule.to = row.querySelector('.ct-sfopts').value.trim();
-    if (rule.type === 'array') rule.of = 'string';
-    return { name: row.querySelector('.ct-sfname').value.trim(), rule };
+    return { name: row.querySelector('.ct-sfname').value.trim(), rule: mergeFieldRule(row.__rule, rule) };
   }
 
   /* ---- field rows ---- */
@@ -434,10 +436,24 @@ import AdminLayout from '../../layouts/AdminLayout.astro';
     subAdd.textContent = '+ Add field to the group';
     subAdd.className = 'px-2 py-1 text-xs border border-gray-300 rounded text-gray-700 hover:bg-gray-50';
     subAdd.addEventListener('click', () => subList.appendChild(subFieldRow()));
-    sub.append(subList, subAdd);
+    const layouts = Array.isArray(f.rule?.layouts) ? f.rule.layouts : [];
+    if (layouts.length) {
+      // A group that offers a choice of layouts (flexible content). The builder
+      // has no editor for layouts, so it says what is there and leaves them
+      // alone; mergeFieldRule keeps them on save.
+      const note = document.createElement('p');
+      note.className = 'ct-layouts-note text-xs text-gray-500';
+      note.textContent = `This group offers ${layouts.length} layout${layouts.length === 1 ? '' : 's'} `
+        + `(${layouts.map((l) => l.label || l.name).join(', ')}). They are kept as they are; `
+        + 'change them where the type was defined (its theme, plugin or the API).';
+      sub.append(note);
+    } else {
+      sub.append(subList, subAdd);
+    }
     for (const sf of (f.rule?.fields ?? [])) subList.appendChild(subFieldRow(sf));
     const syncSub = () => {
       sub.hidden = type.value !== 'repeater';
+      if (layouts.length) return;
       // A repeater with no fields is refused by the validator, so the editor
       // offers one the moment the kind is chosen rather than letting somebody
       // save an empty group and read an error about it.
@@ -475,6 +491,9 @@ import AdminLayout from '../../layouts/AdminLayout.astro';
     name.addEventListener('input', syncAllConditions);
 
     row.append(name, label, type, options, req, step, cond, condVal, del, sub);
+    // The rule as stored, so a save keeps what these controls do not show
+    // (lengths, number bounds, a list's kind, a group's layouts).
+    row.__rule = f.rule;
     return row;
   }
 
@@ -492,11 +511,10 @@ import AdminLayout from '../../layouts/AdminLayout.astro';
         rule.values = row.querySelector('.ct-fopts').value.split(',').map((s) => s.trim()).filter(Boolean);
       }
       if (rule.type === 'ref') rule.to = row.querySelector('.ct-fopts').value.trim();
-      if (rule.type === 'array') rule.of = 'string';
       if (rule.type === 'repeater') {
         rule.fields = [...row.querySelectorAll('.ct-subfield')].map(readSubField).filter((f) => f.name);
       }
-      const field = { name: row.querySelector('.ct-fname').value.trim(), rule };
+      const field = { name: row.querySelector('.ct-fname').value.trim(), rule: mergeFieldRule(row.__rule, rule) };
       const fieldLabel = row.querySelector('.ct-flabel')?.value.trim();
       if (fieldLabel) field.label = fieldLabel;
       const stepSel = row.querySelector('.ct-fstep');

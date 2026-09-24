@@ -6,7 +6,17 @@ semver yet because the API surface is pre-alpha.
 
 ## [Unreleased]
 
-Nothing yet.
+### Re-saving a content type no longer strips its field rules
+
+The Content types builder rebuilt every field from the few controls it shows,
+so opening a type and pressing Save, without touching anything, dropped text
+lengths (`max: 400`, which is also what makes a field a textarea), number
+bounds and whole-number rules, turned lists of numbers into lists of text, and
+refused to save a type with a flexible-content group at all. Types from themes
+and plugins carry all of these. The builder now keeps everything it doesn't
+show and overwrites only what its controls own; a group with layouts says so
+and keeps them. `tests/field-rule-merge.test.mjs` and an e2e test that re-saves
+a type in the real builder cover it.
 
 ## [0.1.3] — 2026-09-24
 

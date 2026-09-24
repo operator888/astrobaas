@@ -1330,3 +1330,77 @@ test('a form built in the admin works for a stranger, and its entries stay priva
     });
   });
 });
+
+test('re-saving a content type in the builder keeps rule details it does not show', async ({ page }) => {
+  // The builder rebuilt each rule from its own few controls, so opening a type
+  // and pressing Save — touching nothing — dropped `max: 400` (the textarea,
+  // and the length limit), `min`/`max`/`int` on numbers, a list's
+  // `of: 'number'`, and a group's `layouts` (which made the save fail). Themes
+  // and plugins define types with all of these. lib/field-rule-merge.ts.
+  await login(page);
+  await go(page, '/admin/content-types');
+  const def = {
+    name: 'e2e-evening',
+    label: 'E2E evening',
+    visibility: 'public',
+    fields: [
+      { name: 'title', label: 'Title', rule: { type: 'string', min: 2, max: 100 } },
+      { name: 'blurb', label: 'What happens', rule: { type: 'string', max: 400 } },
+      { name: 'seats', label: 'Seats left', rule: { type: 'number', int: true, min: 0, max: 60, optional: true } },
+      { name: 'scores', rule: { type: 'array', of: 'number', max: 5, optional: true } },
+      {
+        name: 'blocks',
+        rule: {
+          type: 'repeater', optional: true, max: 6,
+          layouts: [{ name: 'quote', label: 'Quote', fields: [{ name: 'text', rule: { type: 'string', max: 300 } }] }],
+        },
+      },
+      {
+        name: 'hours',
+        rule: { type: 'repeater', optional: true, fields: [{ name: 'day', rule: { type: 'string', max: 20 } }] },
+      },
+    ],
+  };
+  const put = (body: unknown) => page.evaluate(async (b) => {
+    const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') ?? '';
+    const res = await fetch('/api/content-types', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+      body: JSON.stringify(b),
+    });
+    return res.status;
+  }, body);
+  const stored = async () => page.evaluate(async () => {
+    const res = await fetch('/api/content-types');
+    return ((await res.json()).data as any[]).find((t) => t.name === 'e2e-evening');
+  });
+  const sorted = (v: unknown): unknown => (Array.isArray(v) ? v.map(sorted)
+    : v && typeof v === 'object'
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, sorted(x)]))
+      : v);
+
+  expect(await put([def])).toBe(200);
+  const before = await stored();
+  expect(before?.fields?.length).toBe(6);
+
+  // Open it in the builder and save without changing anything.
+  await go(page, '/admin/content-types');
+  await page.locator('tr', { hasText: 'E2E evening' }).getByRole('button', { name: 'Edit' }).click();
+  await expect(page.locator('.ct-layouts-note')).toContainText('1 layout');
+  await page.locator('#ct-save').click();
+  await expect(page.locator('#ct-notice')).toContainText('Type updated');
+
+  const after = await stored();
+  expect(sorted(after.fields)).toEqual(sorted(before.fields));
+
+  // The controls still decide what they own: ticking "required" on seats.
+  await page.locator('tr', { hasText: 'E2E evening' }).getByRole('button', { name: 'Edit' }).click();
+  await page.locator('.ct-field').nth(2).locator('.ct-freq').check();
+  await page.locator('#ct-save').click();
+  await expect(page.locator('#ct-notice')).toContainText('Type updated');
+  const seats = (await stored()).fields.find((f: any) => f.name === 'seats');
+  expect(sorted(seats.rule)).toEqual(sorted({ type: 'number', int: true, min: 0, max: 60 }));
+
+  // Cleaned up: one shared server, so a type left behind affects later tests.
+  expect(await put([])).toBe(200);
+});
