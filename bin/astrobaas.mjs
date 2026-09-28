@@ -2,6 +2,7 @@
 /**
  * AstroBaaS CLI — project bootstrap for self-hosters and AI-generated apps.
  *
+ *   npx astrobaas create my-site  Download a new AstroBaaS project into ./my-site
  *   npx astrobaas init      Scaffold a .env with a freshly generated AUTH_SECRET
  *   npx astrobaas secret    Print a fresh AUTH_SECRET (openssl rand -hex 32 equiv)
  *   npx astrobaas setup      Create/replace the admin account (interactive)
@@ -15,6 +16,7 @@
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -61,9 +63,70 @@ function withSecret(body, secret) {
   return `AUTH_SECRET=${secret}\n${body}`;
 }
 
+/**
+ * The Node version the project needs, read from package.json's `engines` so it
+ * cannot drift from what npm itself checks. `npx` on an older Node prints a
+ * screenful of EBADENGINE warnings and then runs us anyway; this turns that
+ * into one sentence that says what to do.
+ */
+function minNode() {
+  const m = String(readPkg().engines?.node ?? '').match(/(\d+)\.(\d+)(?:\.(\d+))?/);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] : [22, 12, 0];
+}
+
+function nodeTooOld() {
+  const have = process.versions.node.split('.').map(Number);
+  const need = minNode();
+  for (let i = 0; i < 3; i++) {
+    if ((have[i] ?? 0) !== need[i]) return (have[i] ?? 0) < need[i];
+  }
+  return false;
+}
+
+function nodeAdvice() {
+  const need = minNode().join('.');
+  return `AstroBaaS needs Node ${need} or newer; this is Node ${process.versions.node}.\n`
+    + dim(`  With nvm:  nvm install 22 && nvm use 22   — or download it from https://nodejs.org`);
+}
+
+/** True when `dir` is an AstroBaaS project, i.e. `npm install` / `npm run setup` mean something there. */
+function isProject(dir) {
+  return fs.existsSync(path.join(dir, 'package.json')) && fs.existsSync(path.join(dir, 'scripts', 'setup.mjs'));
+}
+
+/**
+ * Write `<dir>/.env` with a fresh AUTH_SECRET. The template is the project's
+ * own .env.example when it has one (it matches that project's version), then
+ * the one shipped with this CLI, then a minimal built-in.
+ */
+function writeEnv(dir) {
+  let template = FALLBACK_ENV;
+  for (const candidate of [path.join(dir, '.env.example'), path.join(pkgRoot, '.env.example')]) {
+    try {
+      template = fs.readFileSync(candidate, 'utf8');
+      break;
+    } catch {
+      /* try the next one */
+    }
+  }
+  const body = withSecret(template, newSecret());
+  fs.writeFileSync(path.join(dir, '.env'), body.endsWith('\n') ? body : body + '\n');
+}
+
+function printNextSteps(cdInto) {
+  console.log('\nNext steps:');
+  let n = 1;
+  if (cdInto) console.log(`  ${n++}. ` + bold(`cd ${cdInto}`));
+  console.log(`  ${n++}. ` + bold('npm install'));
+  console.log(`  ${n++}. ` + bold('npm run setup') + dim('    # create your admin account'));
+  console.log(`  ${n++}. ` + bold('npm run dev') + dim('      # then open http://localhost:4321/login'));
+  console.log('\n' + dim('Production: set NODE_ENV=production and a DATABASE_URL (e.g. Turso) in .env.'));
+}
+
 function cmdInit(args) {
   const force = args.includes('--force') || args.includes('-f');
-  const envPath = path.join(process.cwd(), '.env');
+  const dir = process.cwd();
+  const envPath = path.join(dir, '.env');
 
   if (fs.existsSync(envPath) && !force) {
     console.error(yellow('.env already exists.') + ' Refusing to overwrite without --force.');
@@ -71,25 +134,110 @@ function cmdInit(args) {
     process.exit(1);
   }
 
-  // Seed from .env.example (kept in sync with documented vars) when available.
-  const examplePath = path.join(pkgRoot, '.env.example');
-  let template = FALLBACK_ENV;
-  try {
-    template = fs.readFileSync(examplePath, 'utf8');
-  } catch {
-    /* use fallback */
+  writeEnv(dir);
+  console.log(green('✓') + ` Wrote ${bold('.env')} with a fresh AUTH_SECRET.`);
+
+  if (nodeTooOld()) console.error('\n' + yellow('Warning: ') + nodeAdvice());
+
+  if (isProject(dir)) {
+    printNextSteps(null);
+    return;
+  }
+  // `init` only writes a .env. Run anywhere but a project, the old "npm install,
+  // npm run setup" advice pointed at commands that cannot work in this folder.
+  console.log('\n' + yellow('This folder is not an AstroBaaS project') + ', so there is nothing to install here yet.');
+  console.log('To start a new site, run this from the folder that should contain it:');
+  console.log('  ' + bold('npx astrobaas create my-site'));
+}
+
+const REPO = 'operator888/astrobaas';
+
+/**
+ * `astrobaas create <dir>` — a new project, from the GitHub release that matches
+ * this CLI's version (so `npx astrobaas@0.1.3 create` gives you 0.1.3's code).
+ *
+ * The npm package carries only the CLI and the libraries, not the site, so the
+ * site comes from the tagged source archive. That is a tarball, unpacked with
+ * the system `tar` (macOS, Linux and Windows 10+ all ship one), so git is not
+ * required and the new folder has no history but yours.
+ *
+ * ASTROBAAS_CREATE_SOURCE points it at a different archive (a URL or a local
+ * .tar.gz) — the tests use it to run without a network.
+ */
+async function cmdCreate(args) {
+  const refAt = args.indexOf('--ref');
+  const ref = refAt >= 0 ? args[refAt + 1] : undefined;
+  const dirArg = args.find((a, i) => !a.startsWith('-') && !(refAt >= 0 && i === refAt + 1));
+  if (!dirArg || (refAt >= 0 && !ref)) {
+    console.error('Usage: astrobaas create <directory> [--ref <tag-or-branch>]');
+    process.exit(1);
+  }
+  if (nodeTooOld()) {
+    console.error(nodeAdvice());
+    process.exit(1);
   }
 
-  const secret = newSecret();
-  const body = withSecret(template, secret);
-  fs.writeFileSync(envPath, body.endsWith('\n') ? body : body + '\n');
+  const target = path.resolve(process.cwd(), dirArg);
+  const existed = fs.existsSync(target);
+  if (existed && (!fs.statSync(target).isDirectory() || fs.readdirSync(target).length > 0)) {
+    console.error(`${dirArg} already exists and is not empty. Pick a new name, or empty it first.`);
+    process.exit(1);
+  }
 
-  console.log(green('✓') + ` Wrote ${bold('.env')} with a fresh AUTH_SECRET.`);
-  console.log('\nNext steps:');
-  console.log('  1. ' + bold('npm install'));
-  console.log('  2. ' + bold('npm run setup') + dim('    # create your admin account'));
-  console.log('  3. ' + bold('npm run dev') + dim('      # then open http://localhost:4321/login'));
-  console.log('\n' + dim('Production: set NODE_ENV=production and a DATABASE_URL (e.g. Turso) in .env.'));
+  const tag = ref ?? `v${readPkg().version}`;
+  const source = process.env.ASTROBAAS_CREATE_SOURCE
+    || `https://github.com/${REPO}/archive/${tag.split('/').map(encodeURIComponent).join('/')}.tar.gz`;
+
+  // On any failure, leave the disk as we found it: a half-unpacked folder would
+  // make the retry refuse with "not empty".
+  const undo = () => {
+    if (!existed) fs.rmSync(target, { recursive: true, force: true });
+    else for (const f of fs.readdirSync(target)) fs.rmSync(path.join(target, f), { recursive: true, force: true });
+  };
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'astrobaas-create-'));
+
+  try {
+    process.stderr.write(`Downloading AstroBaaS ${tag}… `);
+    let bytes;
+    if (/^https?:\/\//.test(source)) {
+      let res;
+      try {
+        res = await fetch(source);
+      } catch (err) {
+        throw new Error(`could not reach ${source} (${err.cause?.code ?? err.message}). Check your connection.`);
+      }
+      if (res.status === 404) {
+        throw new Error(`there is no ${tag} release at github.com/${REPO}.`
+          + (ref ? '' : ' Pass --ref main for the latest code, or --ref v<version> for a release.'));
+      }
+      if (!res.ok) throw new Error(`${source} returned HTTP ${res.status}`);
+      bytes = Buffer.from(await res.arrayBuffer());
+    } else {
+      bytes = fs.readFileSync(source);
+    }
+    process.stderr.write(`${(bytes.length / 1024 / 1024).toFixed(1)} MB\n`);
+
+    const archive = path.join(tmp, 'src.tar.gz');
+    fs.writeFileSync(archive, bytes);
+    fs.mkdirSync(target, { recursive: true });
+    // The archive has one top-level folder (astrobaas-0.1.3/); drop it.
+    const tar = spawnSync('tar', ['-xzf', archive, '--strip-components=1', '-C', target], { encoding: 'utf8' });
+    if (tar.error) throw new Error('this needs the `tar` command, which was not found on your PATH.');
+    if (tar.status !== 0) throw new Error(`could not unpack the archive: ${(tar.stderr || '').trim()}`);
+    if (!isProject(target)) throw new Error('the downloaded archive is not an AstroBaaS project.');
+
+    writeEnv(target);
+  } catch (err) {
+    process.stderr.write('\n');
+    undo();
+    console.error(`Could not create ${dirArg}: ${err.message}`);
+    process.exit(1);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  console.log(green('✓') + ` Created ${bold(dirArg)} (AstroBaaS ${tag}) with a .env and a fresh AUTH_SECRET.`);
+  printNextSteps(dirArg);
 }
 
 function cmdSecret() {
@@ -280,6 +428,7 @@ function help() {
 ${bold('Usage:')} astrobaas <command> [options]
 
 ${bold('Commands:')}
+  create <dir>     Download a new AstroBaaS project into <dir> (needs Node ${minNode().join('.')}+)
   init [--force]   Scaffold a .env with a freshly generated AUTH_SECRET
   secret           Print a fresh AUTH_SECRET (32 bytes, hex) to stdout
   setup            Create/replace the admin account (interactive)
@@ -308,7 +457,10 @@ ${bold('Commands:')}
   version          Print the version
 
 ${bold('Examples:')}
-  ${dim('# In a fresh clone:')}
+  ${dim('# A new site:')}
+  npx astrobaas create my-site && cd my-site && npm install && npm run dev
+
+  ${dim('# In a clone of the repository:')}
   npx astrobaas init && npm install && npm run setup && npm run dev
 
   ${dim('# Capture a secret into an existing .env:')}
@@ -543,6 +695,8 @@ async function cmdBackup(sub, args) {
 function main() {
   const [, , cmd, ...args] = process.argv;
   switch (cmd) {
+    case 'create':
+      return cmdCreate(args);
     case 'init':
       return cmdInit(args);
     case 'secret':
