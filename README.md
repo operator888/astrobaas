@@ -29,8 +29,9 @@ One install, two ways to use it:
 > [What's not done yet](#whats-not-done-yet) is the honest other half. Read
 > [SECURITY.md](./SECURITY.md) before putting it on the internet.
 >
-> **To run the CMS, clone the repository** — that is the supported install. The
-> npm package, `npm install astrobaas@alpha`, is for using `astrobaas/client`,
+> **To run the CMS, start a project with `npx astrobaas create my-site`** (or
+> clone the repository — the same code). Installing the npm package on its own,
+> `npm install astrobaas@alpha`, is for using `astrobaas/client`,
 > `astrobaas/core` and `astrobaas/plugins` from your own project, and for the
 > CLI; it does not give you a running site. The MCP server is its own
 > zero-dependency package, `npx -y astrobaas-mcp`.
@@ -53,14 +54,28 @@ install serves one site.
 
 ## Quick start
 
-Requires **Node 22.12+** (see `.nvmrc`).
+Requires **Node 22.12 or newer** (see `.nvmrc`). Check with `node -v`. On
+Node 20, `npx` prints a screen of `EBADENGINE Unsupported engine` warnings and
+`create` stops with a one-line message; `nvm install 22 && nvm use 22`, or the
+installer from [nodejs.org](https://nodejs.org), fixes both.
+
+```bash
+npx astrobaas create my-site   # downloads this release into ./my-site, writes .env
+cd my-site
+npm install
+npm run dev                    # http://localhost:4321
+```
+
+`create` fetches the tagged release that matches the CLI's version from GitHub
+(`--ref main` for the latest code), needs `tar` but not git, and writes a `.env`
+with a fresh `AUTH_SECRET`. To work on AstroBaaS itself, clone instead:
 
 ```bash
 git clone https://github.com/operator888/astrobaas.git
 cd astrobaas
-cp .env.example .env       # optional in dev; AUTH_SECRET is required in production
+npx astrobaas init         # optional in dev; AUTH_SECRET is required in production
 npm install
-npm run dev                # http://localhost:4321
+npm run dev
 ```
 
 Sign in at `http://localhost:4321/login` with `admin@local` / `admin`, and

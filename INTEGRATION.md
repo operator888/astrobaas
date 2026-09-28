@@ -956,13 +956,16 @@ zero-dependency package, `astrobaas-mcp`, so an MCP client config can name it
 on a machine with no AstroBaaS installed.
 
 ```bash
+npx astrobaas create my-site  # a new project from the matching GitHub release, with .env
 npx astrobaas init      # write .env with a CSPRNG AUTH_SECRET (then: npm install)
 npx astrobaas secret    # print a fresh 32-byte secret to stdout
 npx astrobaas setup      # create/replace the admin account
 npx astrobaas-mcp        # start the MCP server (configure via env, see above)
 ```
 
-`init` refuses to overwrite an existing `.env` without `--force`.
+`init` refuses to overwrite an existing `.env` without `--force`. `create`
+refuses a folder that is not empty, and both need Node 22.12+ (`create` stops on
+an older Node; `init` warns).
 
 ---
 

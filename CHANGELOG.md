@@ -6,6 +6,25 @@ semver yet because the API surface is pre-alpha.
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-09-28
+
+### `npx astrobaas create my-site` starts a new site
+
+Until now `npx astrobaas` could not give anyone a running CMS: the npm package
+carries the CLI and the libraries, and `npx astrobaas init` in an empty folder
+wrote a `.env` and then told you to run `npm install` and `npm run setup`, which
+cannot work there. `create <dir>` downloads the GitHub release that matches the
+CLI's version (`--ref` picks another tag or branch), unpacks it with `tar`, so
+git is not needed, and writes a `.env` with a fresh `AUTH_SECRET`. It refuses a
+folder that is not empty and cleans up after a failed download. `init` run
+outside a project now says so and points at `create`.
+
+Both commands check the Node version against `engines.node`. On Node 20, `npx`
+buried the actual problem under a screen of `EBADENGINE` warnings; `create` now
+stops with one sentence naming the version it needs, and `init` warns. The
+README's quick start leads with `create` and says what Node 20 looks like.
+`tests/cli.test.mjs` covers it against a local archive, so it runs offline.
+
 ### Re-saving a content type no longer strips its field rules
 
 The Content types builder rebuilt every field from the few controls it shows,

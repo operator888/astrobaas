@@ -24,11 +24,14 @@ Three claims in the docs carried a caveat until the first publish:
 | `npx astrobaas-mcp` in an MCP client config 404s (that config is read from your home directory, not the clone) | works from anywhere |
 | `npx astrobaas …` works only from the project directory | works from anywhere |
 
-**What it does NOT fix.** `astrobaas init` is not a project scaffolder — it
-writes a `.env` with a generated `AUTH_SECRET`. Installing from npm still does
-not give you a running CMS; you clone the repo for that. Do not let the README
-imply otherwise, because that is the exact claim this project already had to
-walk back once.
+**What it does NOT fix.** Installing the package does not give you a running
+CMS: the tarball carries the CLI and the libraries, not the site. The site comes
+from `npx astrobaas create <dir>`, which downloads the GitHub release tagged
+`v<version>` — so **push the tag before, or with, every npm publish**, or
+`create` from that version answers "there is no v… release". `astrobaas init`
+is still not a scaffolder; it writes a `.env` with a generated `AUTH_SECRET`,
+and says so when run outside a project. Do not let the README imply more,
+because that is the exact claim this project already had to walk back once.
 
 ## Order of operations
 

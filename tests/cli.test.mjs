@@ -188,6 +188,111 @@ function mkTmp() {
 }
 
 /* ------------------------------------------------------------------ *
+ * `create` — a new project from a release archive
+ * ------------------------------------------------------------------ */
+
+/**
+ * The real source is GitHub; ASTROBAAS_CREATE_SOURCE points it at a local
+ * archive built here, shaped like GitHub's (one top-level folder), so this runs
+ * without a network. The archive's .env.example carries a marker, which proves
+ * the .env is written from the NEW project's template, not the CLI's.
+ */
+{
+  const work = mkTmp();
+  const runIn = (args, extraEnv = {}) => {
+    const r = spawnSync(process.execPath, [BIN, ...args], {
+      cwd: work, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1', ...extraEnv },
+    });
+    return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+  };
+  const makeArchive = (name, files) => {
+    const src = path.join(work, `${name}-src`);
+    for (const [rel, body] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(src, 'astrobaas-9.9.9', rel)), { recursive: true });
+      fs.writeFileSync(path.join(src, 'astrobaas-9.9.9', rel), body);
+    }
+    const out = path.join(work, `${name}.tar.gz`);
+    spawnSync('tar', ['-czf', out, '-C', src, 'astrobaas-9.9.9']);
+    return out;
+  };
+  try {
+    const good = makeArchive('good', {
+      'package.json': '{"name":"astrobaas"}',
+      'scripts/setup.mjs': '',
+      '.env.example': 'AUTH_SECRET=\nCREATE_MARKER=from-the-project\n',
+    });
+    const made = runIn(['create', 'my-site'], { ASTROBAAS_CREATE_SOURCE: good });
+    const site = path.join(work, 'my-site');
+    check('create exits 0', made.status === 0);
+    check('create unpacks WITHOUT the archive\'s top-level folder',
+      fs.existsSync(path.join(site, 'package.json')) && !fs.existsSync(path.join(site, 'astrobaas-9.9.9')));
+    const env = fs.existsSync(path.join(site, '.env')) ? fs.readFileSync(path.join(site, '.env'), 'utf8') : '';
+    check('create writes a .env with a 64-hex AUTH_SECRET', /^AUTH_SECRET=[0-9a-f]{64}$/m.test(env));
+    check('create builds the .env from the NEW project\'s .env.example', /CREATE_MARKER=from-the-project/.test(env));
+    check('create tells you to cd into it first', /cd my-site/.test(made.stdout) && /npm install/.test(made.stdout));
+
+    const again = runIn(['create', 'my-site'], { ASTROBAAS_CREATE_SOURCE: good });
+    check('create REFUSES a folder that is not empty', again.status === 1 && /not empty/.test(again.stderr));
+    check('...and leaves what was there alone', fs.existsSync(path.join(site, '.env')));
+
+    const junk = makeArchive('junk', { 'README.md': 'not a project' });
+    const bad = runIn(['create', 'junk-site'], { ASTROBAAS_CREATE_SOURCE: junk });
+    check('create refuses an archive that is not an AstroBaaS project',
+      bad.status === 1 && /not an AstroBaaS project/.test(bad.stderr));
+    check('...and removes the half-made folder, so a retry is not "not empty"',
+      !fs.existsSync(path.join(work, 'junk-site')));
+
+    fs.mkdirSync(path.join(work, 'empty-dir'));
+    const missing = runIn(['create', 'empty-dir'], { ASTROBAAS_CREATE_SOURCE: path.join(work, 'nope.tar.gz') });
+    check('create fails cleanly when the archive cannot be read',
+      missing.status === 1 && /Could not create/.test(missing.stderr));
+    check('...and keeps a folder that existed before (empty) rather than deleting it',
+      fs.existsSync(path.join(work, 'empty-dir')) && fs.readdirSync(path.join(work, 'empty-dir')).length === 0);
+
+    const noDir = runIn(['create']);
+    check('create without a directory prints usage', noDir.status === 1 && /Usage: astrobaas create/.test(noDir.stderr));
+    check('help lists create', /create <dir>/.test(run(['--help']).stdout));
+
+    // `init` outside a project used to print "npm install, npm run setup" —
+    // commands that cannot work there. It now points at `create`.
+    const outside = path.join(work, 'outside');
+    fs.mkdirSync(outside);
+    const initOut = run(['init'], outside);
+    check('init outside a project still writes the .env', initOut.status === 0 && fs.existsSync(path.join(outside, '.env')));
+    check('init outside a project points at create, not npm install',
+      /npx astrobaas create/.test(initOut.stdout) && !/npm install/.test(initOut.stdout));
+    const initIn = run(['init', '--force'], site);
+    check('init inside a project keeps the npm install steps', initIn.status === 0 && /npm install/.test(initIn.stdout));
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The Node floor comes from package.json's `engines`. A copy of the CLI next to
+ * a package.json that demands a Node from the future plays the part of an old
+ * Node, without a test-only switch in the CLI.
+ */
+{
+  const fake = mkTmp();
+  try {
+    fs.cpSync(path.join(here, '..', 'bin'), path.join(fake, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(fake, 'package.json'),
+      JSON.stringify({ name: 'astrobaas', version: '9.9.9', engines: { node: '>=99.0.0' } }));
+    const runFake = (args) => spawnSync(process.execPath, [path.join(fake, 'bin', 'astrobaas.mjs'), ...args], {
+      cwd: fake, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1' },
+    });
+    const r = runFake(['create', 'x']);
+    check('create REFUSES on a Node older than engines.node, and says which it needs',
+      r.status === 1 && /needs Node 99\.0\.0 or newer/.test(r.stderr) && !fs.existsSync(path.join(fake, 'x')));
+    const init = runFake(['init']);
+    check('init on an old Node still works but warns', init.status === 0 && /needs Node 99\.0\.0/.test(init.stderr));
+  } finally {
+    fs.rmSync(fake, { recursive: true, force: true });
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * THE PACKED TARBALL — the assertion whose absence let a broken CLI ship
  * ------------------------------------------------------------------ */
 
