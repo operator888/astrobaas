@@ -146,12 +146,15 @@ check('stock is refused for a product with variants, which keep their own', () =
 // ───────────────────────────────────────────────── the route
 
 const route = await read('src/pages/api/product-bulk.ts');
+const apply = await read('src/lib/commerce/bulk-apply.ts');
 check('the route previews unless told to apply', () => {
-  ok(/if \(body\?\.apply !== true\) \{\s*return ApiResponseBuilder\.success\(\{ preview: true/.test(route), 'a request without apply:true changes products');
+  ok(/if \(body\?\.apply !== true\) \{\s*return ApiResponseBuilder\.success\(\{\s*preview: true/.test(route), 'a request without apply:true changes products');
 });
-check('each product is saved through saveProduct, with the stock it read as bases', () => {
-  ok(/await saveProduct\(item\.patch, item\.id, String\(session\.id\), bases\)/.test(route), 'not through saveProduct with bases — a concurrent sale would be written back');
-  ok(/variants: new Map\(\(read\.variants \?\? \[\]\)\.map\(\(v\) => \[v\.id, v\.stock \?\? null\]/.test(route), 'variant stock is not passed as a base');
+check('each product is saved through saveProduct, with the stock it read as bases, from a real copy', () => {
+  ok(/applyPlannedUpdates\(toApply, byId,/.test(route), 'the route does not apply through the shared path');
+  ok(/const all = structuredClone\(stored\);/.test(route), 'the route plans from live cached objects (lowdb) — bases would match a sale made meanwhile');
+  ok(/await saveProduct\(plan\.patch, plan\.id, meta\.actor, bases\)/.test(apply), 'not through saveProduct with bases — a concurrent sale would be written back');
+  ok(/variants: new Map\(\(before\.variants \?\? \[\]\)\.map\(\(v\) => \[v\.id, v\.stock \?\? null\]/.test(apply), 'variant stock is not passed as a base');
   ok(!/LocalDB\.updateProduct\(/.test(route), 'a raw storage write');
 });
 check('catalogue staff only, bounded, audited', () => {

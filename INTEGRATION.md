@@ -265,6 +265,13 @@ calls (150–200 ms) and ignore answers for a query that is no longer in the box
 Under 2 characters it answers empty lists. `examples/storefront` has a complete
 accessible combobox (`src/scripts/search-box.ts`).
 
+Ask for `types=searches` too and it adds **popular searches** — queries other
+visitors made that found something, once enough different visitors made them
+(Settings → Reading → Search sets the minimum and a blocklist; nothing that
+looks like an email, web address or number is ever stored). Link one to your
+results page. When the operator switches suggestions off, every list is empty
+and `meta.enabled` is `false`: hide your list rather than waiting on one.
+
 ### Checkout from a storefront
 
 > **A working example:** [`examples/storefront`](./examples/storefront) does

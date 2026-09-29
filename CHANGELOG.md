@@ -6,6 +6,77 @@ semver yet because the API surface is pre-alpha.
 
 ## [Unreleased]
 
+### Bulk edit: several changes, conditions, every page, CSV and undo
+
+- **Several changes at once.** Queue them with **Add another change**. Each
+  kind of change can be queued once, so two price changes cannot silently
+  compound.
+- **Only where…** limits a change to products that meet a condition: status,
+  stock state, on sale, in a category (subcategories included), or a price
+  range. The preview counts the products that do not match.
+- **Select all N matching.** Once a whole page is ticked, the change can
+  apply to every product the search matches, on every page. The server
+  resolves the set with the list's own filter, so it is exactly what the list
+  shows. The limit is 1,000 products per change.
+- **Update from CSV.** Upload a spreadsheet with one row per product or
+  variant:
+  - key columns: `sku`, `slug` or `id`; a variant's SKU updates that variant,
+    which suits a warehouse stock count;
+  - value columns: `price`, `sale_price`, `stock`, `status`, `featured`;
+  - an empty cell changes nothing;
+  - it previews first, and a file with any bad row is refused as a whole;
+  - **Download a CSV of current values** gives the template.
+- **Undo.** Every applied change, from bulk edit or CSV, is recorded with each
+  field's value before and after. The last 20 are listed under **Recent bulk
+  changes**.
+  - Undo puts a field back only while it still holds the change's value.
+  - A price edited since, or stock a checkout sold since, is left alone and
+    listed.
+  - A change can be undone once. The undo is itself recorded, so it can be
+    undone in turn.
+- Numbers such as "1,000" or "1.000" are refused rather than guessed, in the
+  bulk bar and in CSV files. The exception is a currency that really has three
+  decimals.
+- **Fixed, in the bulk edit released just before:** on the JSON driver, a unit
+  a checkout sold while a batch was still saving other products could be
+  written back — an oversell.
+  - The cause: the storage getters there return the live cached objects, so
+    the batch's "snapshot" changed as the sale happened, and so did the stock
+    base it saves against.
+  - The routes now work on a copy.
+  - `tests/bulk-edit-undo.test.mjs` reproduces it through the real route.
+
+### Popular searches, and settings for suggestions
+
+**Settings → Reading → Search** can now:
+- switch suggestions off, which turns the box back into the plain form;
+- set how many of each kind are shown;
+- switch popular searches off;
+- set how many visitors must make a search before it is suggested (at least
+  2, default 5);
+- block words or phrases.
+
+Popular searches are counted with privacy first:
+- Only searches that found something are counted. Counting searches that found
+  nothing is zero-result analytics, which remains the paid search module's.
+- Staff searches are never counted.
+- Each visitor counts once per query per day, tracked in memory only; nothing
+  identifying a visitor is stored.
+- Anything that looks like an email, a web address or a number is never
+  stored.
+- Counts are written every 30 seconds, not on every search.
+
+**Insights → What visitors search for** lists the most frequent searches and
+says whether each one is suggested, and why not if it is not. An
+administrator can clear the counts; clearing is audited.
+
+### Up to 100 content types
+
+The content type builder now accepts up to 100 types per site; the limit was
+20. Several website themes on one AstroBaaS each bring their own collections,
+and the demo server alone needs about 35. Saving more than 100 is refused with
+`too many types (max 100)`, as before with 20.
+
 ### Bulk product edit
 
 Tick products in the admin's product list, choose one change, **Preview**,

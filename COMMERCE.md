@@ -64,8 +64,16 @@ See `/llms.txt` and `/openapi.json` on a running instance. Highlights:
   sale (percent off / end), stock. **Previews unless `apply: true`**, and
   applies through the ordinary product save, so webhooks, price history and
   the audit log see every product. A flat price is refused for products whose
-  variants carry their own prices. In the admin: tick products in the list,
-  choose one change, Preview, Apply.
+  variants carry their own prices. In the admin: tick products in the list (or
+  "Select all N matching" the search), queue one or more changes, optionally
+  "Only where…" a condition, Preview, Apply. Every applied change can be
+  undone from **Recent bulk changes** — only fields that still hold the
+  change's value are put back, so stock sold since is never returned.
+- `POST /api/product-bulk/csv` — the same, from a spreadsheet: one row per
+  product or variant (a variant's SKU updates that variant), columns `price`,
+  `sale_price`, `stock`, `status`, `featured`; an empty cell changes nothing,
+  and a file with any bad row is refused as a whole. `GET
+  /api/product-bulk/template` downloads the current values in that format.
 - `GET /api/search/suggest?q=` (public) — a few matching products, categories,
   posts and pages for a search box that suggests as the shopper types.
   Products follow their catalogue visibility (`search` appears, `catalog`

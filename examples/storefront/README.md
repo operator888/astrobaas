@@ -68,7 +68,7 @@ carry that directive.
 | `/order/placed/` | Confirmation; bank-transfer and cash instructions |
 | `/checkout/success/`, `/checkout/cancelled/` | Where payment providers return the buyer |
 | `/receipt/` | Forwards the emailed receipt link to the CMS |
-| `/search/` | Results for the header search box, which also suggests products and categories as you type |
+| `/search/` | Results for the header search box, which also suggests popular searches, products and categories as you type |
 | `/blog/` | Posts |
 
 The header menu is the CMS's own (**Site → Navigation**) when one is set, so it

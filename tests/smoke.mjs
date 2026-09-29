@@ -317,6 +317,8 @@ async function main() {
     METRICS_ENABLED: '1',
     // Fast scheduled-post sweep so the worker test runs quickly.
     SCHEDULER_INTERVAL_MS: '250',
+    // Popular-search counts flush every 30 s in production; the suite cannot wait.
+    SEARCH_POPULAR_FLUSH_MS: '200',
     // The suite makes many API calls from one IP; lift the per-IP API rate limit
     // so it doesn't cause collateral 429s. (The LOGIN throttle is a separate
     // mechanism and is still exercised in its own test.)
@@ -1710,6 +1712,47 @@ async function main() {
         const ghost = await bulk({ ids: [prodId], ops: { addCategories: [`no-such-${run}`] } });
         if (ghost.status === 400) ok('bulk edit: a category that does not exist is refused');
         else fail('bulk edit unknown category', `status=${ghost.status}`);
+
+        // "All matching": resolved on the server with the list's own filter.
+        const matchAll = await (await bulk({ filter: { q: run }, ops: { addTags: ['smoke-all'] } })).json().catch(() => null);
+        const listed = (await (await fetch(`${BASE}/api/products?all=true&limit=200&search=${run}`, { headers: H })).json().catch(() => null))?.data ?? [];
+        if (matchAll?.data?.preview === true && matchAll.data.selected >= 1 && matchAll.data.selected === listed.length) ok('bulk edit: "all matching" selects what the search matches');
+        else fail('bulk edit all matching', `selected=${matchAll?.data?.selected} listed=${listed.length}`);
+
+        // A condition the product does not meet changes nothing.
+        const cond = await (await bulk({ ids: [prodId], ops: { featured: true }, where: { status: ['draft'] } })).json().catch(() => null);
+        if (cond?.data?.not_matching === 1 && cond.data.will_change === 0) ok('bulk edit: a condition leaves non-matching products alone');
+        else fail('bulk edit condition', JSON.stringify(cond?.data));
+
+        // The price rise above is in the history, and undoing it puts the price back.
+        const hist = await (await fetch(`${BASE}/api/product-bulk/history`, { headers: H })).json().catch(() => null);
+        const batch = (hist?.data ?? []).find((b) => /price \+10%/.test(b.label) && !b.undone_at);
+        const undo = batch ? await fetch(`${BASE}/api/product-bulk/undo`, { method: 'POST', headers: H, body: JSON.stringify({ batch: batch.id, apply: true }) }) : null;
+        const undone = (await (await fetch(`${BASE}/api/products/${prodId}`, { headers: H })).json().catch(() => null))?.data;
+        if (batch && undo?.status === 200 && undone?.price_cents === 4900) ok('bulk edit: undo puts the price back');
+        else fail('bulk edit undo', `batch=${!!batch} status=${undo?.status} price=${undone?.price_cents}`);
+        const again = batch ? await fetch(`${BASE}/api/product-bulk/undo`, { method: 'POST', headers: H, body: JSON.stringify({ batch: batch.id, apply: true }) }) : null;
+        if (again?.status === 409) ok('bulk edit: a change is undone once');
+        else fail('bulk edit undo twice', `status=${again?.status}`);
+
+        // CSV: by slug, preview then apply; a bad row blocks the whole file.
+        const slug = `linen-shirt-${run}`;
+        const csvPost = (csv, apply) => fetch(`${BASE}/api/product-bulk/csv`, { method: 'POST', headers: H, body: JSON.stringify({ csv, apply }) });
+        const csvPrev = await (await csvPost(`slug,stock\n${slug},7\n`)).json().catch(() => null);
+        const csvApply = await csvPost(`slug,stock\n${slug},7\n`, true);
+        const stocked = (await (await fetch(`${BASE}/api/products/${prodId}`, { headers: H })).json().catch(() => null))?.data;
+        if (csvPrev?.data?.will_change === 1 && csvApply.status === 200 && stocked?.stock === 7) ok('bulk edit: a CSV row updates the product it names');
+        else fail('bulk edit csv', `preview=${JSON.stringify(csvPrev?.data)} apply=${csvApply.status} stock=${stocked?.stock}`);
+        const csvBad = await csvPost(`slug,stock\n${slug},9\nno-such-${run},1\n`, true);
+        const unchanged = (await (await fetch(`${BASE}/api/products/${prodId}`, { headers: H })).json().catch(() => null))?.data;
+        if (csvBad.status === 400 && unchanged?.stock === 7) ok('bulk edit: a CSV with a bad row is refused as a whole');
+        else fail('bulk edit csv bad row', `status=${csvBad.status} stock=${unchanged?.stock}`);
+        const tpl = await fetch(`${BASE}/api/product-bulk/template`, { headers: H });
+        if (tpl.status === 200 && /text\/csv/.test(tpl.headers.get('content-type') ?? '') && (await tpl.text()).includes(slug)) ok('bulk edit: the CSV template lists the catalogue');
+        else fail('bulk edit template', `status=${tpl.status}`);
+        const anonTpl = await fetch(`${BASE}/api/product-bulk/template`);
+        if (anonTpl.status === 401 || anonTpl.status === 403 || anonTpl.status === 404) ok('bulk edit: the template is not public');
+        else fail('bulk edit template public', `status=${anonTpl.status}`);
       }
 
       const counted = await fetch(`${BASE}/api/product-categories`);
@@ -5087,6 +5130,25 @@ async function main() {
     } else {
       fail('pipeline fixture', 'could not create the post');
     }
+  }
+
+  // 8h1p. Popular searches: what is counted, what never is, and that one visitor
+  //       alone never reaches the suggestions.
+  {
+    const found = await (await fetch(`${BASE}/api/search?q=welcome`)).json().catch(() => null);
+    await fetch(`${BASE}/api/search?q=zzqqnothing`);
+    await fetch(`${BASE}/api/search?q=${encodeURIComponent('someone@example.com')}`);
+    // A staff search is never counted.
+    await fetch(`${BASE}/api/search?q=staffonlyquery`, { headers: { Cookie: sessionCookie } });
+    await new Promise((r) => setTimeout(r, 700));
+    const insights = await (await fetch(`${BASE}/admin/insights`, { headers: { Cookie: sessionCookie } })).text();
+    if ((found?.data?.length ?? 0) > 0 && /<td[^>]*>welcome<\/td>/.test(insights)) ok('popular searches: a visitor\'s search that found something is counted');
+    else fail('popular searches: counted', `results=${found?.data?.length} listed=${/welcome/.test(insights)}`);
+    if (!/zzqqnothing|someone@example\.com|staffonlyquery/.test(insights)) ok('popular searches: nothing found, personal-looking and staff searches are never stored');
+    else fail('popular searches: leaked', 'a query that must not be stored is listed');
+    const sugg = await (await fetch(`${BASE}/api/search/suggest?q=welc&types=searches`)).json().catch(() => null);
+    if (Array.isArray(sugg?.data?.searches) && sugg.data.searches.length === 0) ok('popular searches: one visitor alone is never suggested to others');
+    else fail('popular searches: threshold', JSON.stringify(sugg?.data));
   }
 
   // 8h1u. /api/search honours ?locale=, and only when it is asked to.

@@ -68,7 +68,7 @@ check('Greek matches without accents or case, as the search page does', () => {
 });
 
 check('a query shorter than two characters suggests nothing', () => {
-  eq(all('s'), { posts: [], pages: [], products: [], categories: [] });
+  eq(all('s'), { searches: [], posts: [], pages: [], products: [], categories: [] });
 });
 
 check('at most eight of each type, however many are asked for', () => {
@@ -82,6 +82,7 @@ check('categories carry the count they are given', () => {
 
 check('?types narrows to what is allowed, and ignores what is not', () => {
   eq(S.parseTypes('products,bogus,posts', S.SUGGEST_TYPES), ['posts', 'products']);
+  eq(S.suggest({ q: 'sun', types: ['searches'], limit: 2, popular: ['sunglasses', 'sun hat', 'sunscreen'] }).searches, ['sunglasses', 'sun hat'], 'popular searches are not capped at the limit');
   eq(S.parseTypes('products', ['posts', 'pages']), [], 'a site that is not a shop offered products');
   eq(S.parseTypes(null, ['posts', 'pages']), ['posts', 'pages']);
 });
@@ -90,7 +91,10 @@ check('?types narrows to what is allowed, and ignores what is not', () => {
   const route = await read('src/pages/api/search/suggest.ts');
   const mw = await read('src/middleware.ts');
   check('the route offers products and categories only while the shop is on', () => {
-    ok(/const allowed: SuggestType\[\] = shop \? \[\.\.\.SUGGEST_TYPES\] : \['posts', 'pages'\];/.test(route), 'the shop is suggested on a site that is not a shop');
+    ok(/\(shop \|\| \(t !== 'products' && t !== 'categories'\)\)/.test(route), 'the shop is suggested on a site that is not a shop');
+    ok(/\(prefs\.popular \|\| t !== 'searches'\)/.test(route), 'popular searches are offered while switched off');
+    ok(/if \(!prefs\.enabled\) \{\s*return withPublicCache\(ApiResponseBuilder\.success\(empty/.test(route), 'suggestions answer while switched off');
+    ok(/Math\.min\(asked, prefs\.limit\)/.test(route), 'a client can ask for more than the operator allows');
   });
   const box = await read('src/components/public/SiteSearch.astro');
   check('a suggested page links to /el/slug, not /elslug', () => {

@@ -923,10 +923,18 @@ const ShippingMethod = {
       },
       '/api/product-bulk': {
         post: {
-          summary: 'Change many products at once (catalogue staff; API keys need `products:write`). Without `apply: true` it is a PREVIEW: it reports, per product, what would change or why it is skipped, and changes nothing. Applying saves each product through the normal product save, so hooks, `product.updated` webhooks, price history and the audit log all see it; one `product.bulk_edit` audit entry records the batch. Prices change on the REGULAR price, in integer minor units, never below zero; a product whose variants have their own prices is skipped for a flat "set" (use percent or amount). At most 500 products; not a transaction — failures are listed and the rest apply. Off while the shop is switched off.',
+          summary: 'Change many products at once (catalogue staff; API keys need `products:write`). Target the ticked products with `ids`, or every product the admin list\'s search matches with `filter: { q }`. `ops` may combine several changes; `where` restricts them to products meeting a condition (those that do not are counted as `not_matching`). Every applied change is recorded and can be undone (POST /api/product-bulk/undo). Without `apply: true` it is a PREVIEW: it reports, per product, what would change or why it is skipped, and changes nothing. Applying saves each product through the normal product save, so hooks, `product.updated` webhooks, price history and the audit log all see it; one `product.bulk_edit` audit entry records the batch. Prices change on the REGULAR price, in integer minor units, never below zero; a product whose variants have their own prices is skipped for a flat "set" (use percent or amount). At most 500 products; not a transaction — failures are listed and the rest apply. Off while the shop is switched off.',
           security: [{ bearerApiKey: [] }],
-          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['ids', 'ops'], properties: {
-            ids: { type: 'array', items: { type: 'string' }, maxItems: 500 },
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['ops'], properties: {
+            ids: { type: 'array', items: { type: 'string' }, maxItems: 1000 },
+            filter: { type: 'object', properties: { q: { type: 'string', description: 'The admin list search. Instead of ids.' } } },
+            where: { type: 'object', description: 'Only change products that meet this condition.', properties: {
+              status: { type: 'array', items: { type: 'string', enum: ['active', 'draft', 'archived'] } },
+              stock: { type: 'string', enum: ['in', 'out', 'untracked'] },
+              on_sale: { type: 'boolean' }, featured: { type: 'boolean' },
+              category: { type: 'string', description: 'Includes its subcategories.' },
+              price_min: { type: 'integer' }, price_max: { type: 'integer' },
+            } },
             apply: { type: 'boolean', description: 'false or absent = preview only.' },
             ops: { type: 'object', properties: {
               status: { type: 'string', enum: ['active', 'draft', 'archived'] },
@@ -952,17 +960,58 @@ const ShippingMethod = {
           },
         },
       },
+      '/api/product-bulk/csv': {
+        post: {
+          summary: 'Update products from CSV text (catalogue staff). One row per product or variant; key columns sku, slug or id (each row uses the first it fills in; a variant\'s SKU updates that variant). Columns price, sale_price (`none` ends the sale), stock (`untracked`), status, featured. An empty cell changes nothing; other columns are ignored and listed. Numbers are plain — no thousands separators; "1,000" is a row error. Previews unless `apply: true`; a file with ANY row error is refused as a whole. Applied like every bulk change: saveProduct per product, stock sold meanwhile kept, the batch undoable. At most 1000 rows, 1.5 MB.',
+          security: [{ bearerApiKey: [] }],
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['csv'], properties: { csv: { type: 'string' }, apply: { type: 'boolean' } } } } } },
+          responses: { '200': ok({ type: 'object' }), '400': { description: 'Row errors on apply, or an unusable file.' } },
+        },
+      },
+      '/api/product-bulk/template': {
+        get: {
+          summary: 'Every product and variant with its current values, as the CSV that POST /api/product-bulk/csv reads (catalogue staff).',
+          security: [{ bearerApiKey: [] }],
+          responses: { '200': { description: 'text/csv', content: { 'text/csv': { schema: { type: 'string' } } } } },
+        },
+      },
+      '/api/product-bulk/history': {
+        get: {
+          summary: 'The 20 most recent bulk changes, newest first, for undo (catalogue staff).',
+          security: [{ bearerApiKey: [] }],
+          responses: { '200': ok({ type: 'array', items: { type: 'object', properties: {
+            id: { type: 'string' }, at: { type: 'string' }, actor: { type: 'string' }, kind: { type: 'string', enum: ['bulk', 'csv', 'undo'] },
+            label: { type: 'string' }, products: { type: 'integer' }, undone_at: { type: ['string', 'null'] },
+          } } }) },
+        },
+      },
+      '/api/product-bulk/undo': {
+        post: {
+          summary: 'Undo a bulk change (catalogue staff). Restores each field only while it still holds the value the change gave it; anything changed since — a later edit, stock a checkout sold — is left as it is and listed. Previews unless `apply: true`. A change is undone once (409 after); the undo is itself recorded and can be undone.',
+          security: [{ bearerApiKey: [] }],
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['batch'], properties: { batch: { type: 'string' }, apply: { type: 'boolean' } } } } } },
+          responses: { '200': ok({ type: 'object' }), '404': { description: 'No such change.' }, '409': { description: 'Already undone.' } },
+        },
+      },
+      '/api/search/popular': {
+        delete: {
+          summary: 'Forget every counted search, so popular-search suggestions start again from nothing (admin). Audited.',
+          security: [{ bearerApiKey: [] }],
+          responses: { '200': ok({ type: 'object', properties: { cleared: { type: 'boolean' } } }) },
+        },
+      },
       '/api/search/suggest': {
         get: {
-          summary: 'Suggestions while someone is typing: a few posts, pages, products and categories whose titles match. Public and cached. Same folding as search (accents, case, Greek matches Latin) and the same synonyms; no typo tolerance. Only what a visitor could open: published posts not hidden from search; active products whose catalogue visibility is `visible` or `search`; categories with their product count. Products and categories only while the shop is switched on. Fewer than 2 characters answers empty lists.',
+          summary: 'Suggestions while someone is typing: popular searches, and a few posts, pages, products and categories whose titles match. Public and cached; its own rate bucket. Popular searches are queries that found something, made by at least the operator\'s minimum number of visitors (default 5), not blocklisted, and never anything that looks like an email, web address or number. The operator can switch suggestions off (then `meta.enabled` is false and every list is empty), set the count per kind, and switch popular searches off. Same folding as search (accents, case, Greek matches Latin) and the same synonyms; no typo tolerance. Only what a visitor could open: published posts not hidden from search; active products whose catalogue visibility is `visible` or `search`; categories with their product count. Products and categories only while the shop is switched on. Fewer than 2 characters answers empty lists.',
           parameters: [
             { name: 'q', in: 'query', required: true, schema: { type: 'string' } },
-            { name: 'types', in: 'query', required: false, schema: { type: 'string' }, description: 'Comma-separated subset of posts,pages,products,categories. Default: all the site has.' },
-            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 5, maximum: 8 }, description: 'Per type.' },
+            { name: 'types', in: 'query', required: false, schema: { type: 'string' }, description: 'Comma-separated subset of searches,posts,pages,products,categories. Default: all the site has.' },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', maximum: 8 }, description: 'Per type; never more than the operator\'s setting (default 5).' },
             { name: 'locale', in: 'query', required: false, schema: { type: 'string' }, description: 'Only posts and pages in this language.' },
           ],
           responses: {
             '200': ok({ type: 'object', properties: {
+              searches: { type: 'array', items: { type: 'string' }, description: 'Popular searches that start with (a word of) the query.' },
               posts: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, slug: { type: 'string' } } } },
               pages: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, slug: { type: 'string' } } } },
               products: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, slug: { type: 'string' }, price_cents: { type: 'integer' }, image: { type: ['string', 'null'] } } } },

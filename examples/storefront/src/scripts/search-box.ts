@@ -63,13 +63,16 @@ export function mountSearchBox(root: HTMLElement, currency: string): void {
   const load = async (q: string) => {
     latest = q;
     try {
-      const params = new URLSearchParams({ q, types: 'products,categories', limit: '6' });
+      const params = new URLSearchParams({ q, types: 'searches,products,categories' });
       const d = await cms.request<{
+        searches?: string[];
         products?: { name: string; slug: string; price_cents: number }[];
         categories?: { name: string; slug: string; count: number }[];
       }>('GET', `/api/search/suggest?${params}`);
       if (q !== latest) return; // a newer keystroke owns the list
       items = [
+        // Popular searches (when the shop has them switched on) lead to /search/.
+        ...(d.searches ?? []).map((s) => ({ label: s, detail: 'Search', href: `/search/?q=${encodeURIComponent(s)}` })),
         ...(d.categories ?? []).map((c) => ({ label: c.name, detail: c.count === 1 ? '1 product' : `${c.count} products`, href: `/shop/${encodeURIComponent(c.slug)}/` })),
         ...(d.products ?? []).map((p) => ({ label: p.name, detail: formatMoney(p.price_cents, currency), href: `/product/${encodeURIComponent(p.slug)}/` })),
       ];

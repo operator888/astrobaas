@@ -45,6 +45,9 @@
  * attributes on the wrapper: the locale and the post and page URL bases.
  */
 import { routeHref } from '../../lib/locale-links';
+import { LocalDB } from '../../lib/localdb';
+import { settingsMap } from '../../lib/settings-map';
+import { resolveSuggestSettings } from '../../lib/search/suggest-settings';
 
 interface Props {
   locale?: string;
@@ -61,6 +64,10 @@ const action = routeHref('/blog', locale);
 const postBase = routeHref('/blog/', locale);
 // `routeHref('/', 'el')` is `/el`, without the slash a slug needs after it.
 const pageBase = routeHref('/', locale).replace(/\/?$/, '/');
+// The operator can switch suggestions off (Settings → Reading → Search). Then
+// the box stays the plain form and the script never asks.
+let suggestOn = true;
+try { suggestOn = resolveSuggestSettings(settingsMap(await LocalDB.getSettings())).enabled; } catch { /* keep the default */ }
 ---
 
 <div class="ab-site-search no-print border-b border-gray-200 bg-white">
@@ -83,7 +90,7 @@ const pageBase = routeHref('/', locale).replace(/\/?$/, '/');
       turns this input into an ARIA 1.2 combobox. Without JavaScript it is the
       plain form it always was, and Enter still searches.
     */}
-    <div class="relative flex-1 min-w-0" data-ab-suggest data-locale={locale ?? ''} data-post-base={postBase} data-page-base={pageBase}>
+    <div class="relative flex-1 min-w-0" data-ab-suggest data-suggest={suggestOn ? 'on' : 'off'} data-results={action} data-locale={locale ?? ''} data-post-base={postBase} data-page-base={pageBase}>
       <input
         id="ab-site-search-q"
         type="search"
@@ -117,7 +124,7 @@ const pageBase = routeHref('/', locale).replace(/\/?$/, '/');
   const input = document.getElementById('ab-site-search-q') as HTMLInputElement | null;
   const list = document.getElementById('ab-site-search-list') as HTMLUListElement | null;
   const status = document.getElementById('ab-site-search-status');
-  if (box && input && list && status) {
+  if (box && input && list && status && box.dataset.suggest !== 'off') {
     input.setAttribute('role', 'combobox');
     input.setAttribute('aria-autocomplete', 'list');
     input.setAttribute('aria-controls', list.id);
@@ -171,13 +178,15 @@ const pageBase = routeHref('/', locale).replace(/\/?$/, '/');
     const fetchSuggestions = async (q: string) => {
       inflight?.abort();
       inflight = new AbortController();
-      const params = new URLSearchParams({ q, types: 'posts,pages', limit: '6' });
+      const params = new URLSearchParams({ q, types: 'searches,posts,pages' });
       if (box.dataset.locale) params.set('locale', box.dataset.locale);
       try {
         const res = await fetch(`/api/search/suggest?${params}`, { signal: inflight.signal, headers: { Accept: 'application/json' } });
         const body = await res.json();
         const d = body?.data ?? {};
         items = [
+          // A popular search leads to the results page for it.
+          ...(d.searches ?? []).map((s: string) => ({ label: s, kind: 'Search', href: `${box.dataset.results}?q=${encodeURIComponent(s)}` })),
           ...(d.posts ?? []).map((p: { title: string; slug: string }) => ({ label: p.title, kind: 'Post', href: `${box.dataset.postBase}${encodeURIComponent(p.slug)}` })),
           ...(d.pages ?? []).map((p: { title: string; slug: string }) => ({ label: p.title, kind: 'Page', href: `${box.dataset.pageBase}${encodeURIComponent(p.slug)}` })),
         ];

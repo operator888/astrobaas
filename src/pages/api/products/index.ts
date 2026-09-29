@@ -13,6 +13,9 @@ import { contentLocale } from '../../../lib/i18n/resolve';
 import { withProductEmbeds } from '../../../lib/embeds';
 import { withOmnibusReference } from '../../../lib/commerce/price-history';
 import { withPublicCache } from '../../../lib/http-cache';
+import { resolveSuggestSettings } from '../../../lib/search/suggest-settings';
+import { notePopularSearch } from '../../../lib/search/popular-store';
+import { settingsMap } from '../../../lib/settings-map';
 
 /** GET /api/products — public product listing with filters + pagination. */
 export const GET: APIRoute = async ({ url, locals, request }) => {
@@ -35,6 +38,16 @@ export const GET: APIRoute = async ({ url, locals, request }) => {
       limit: Number(q.get('limit') ?? 24),
       offset: Number(q.get('offset') ?? 0),
     });
+    // Popular searches: a shopper's product search that found something.
+    // Never staff, never when switched off — see lib/search/popular.ts.
+    // Counted by what a shopper could FIND: a query that matches only hidden
+    // or shelf-only products must not become a public suggestion.
+    const searched = q.get('search');
+    const findable = products.filter((p) => ['visible', 'search', undefined].includes(p.catalog_visibility)).length;
+    if (searched && !locals.user && findable > 0
+      && resolveSuggestSettings(settingsMap(await LocalDB.getSettings())).popular) {
+      notePopularSearch(searched, findable, locals.ip, new Date(), request.headers.get('user-agent'));
+    }
     // Publish the order limits alongside the catalogue so a storefront can
     // render a quantity selector that matches what checkout will actually
     // accept, instead of discovering the cap by getting a 400.

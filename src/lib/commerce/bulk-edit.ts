@@ -25,9 +25,71 @@
  * "set the price" meant for them.
  */
 import type { Product, ProductVariant } from '../../core/models';
+import { descendantSlugs } from './category-tree';
 
-/** Most products one request may touch — a full page of the admin list is 100. */
-export const MAX_BULK = 500;
+/**
+ * Most products one request may touch. "Select all N matching" can reach it,
+ * so it bounds the request too: every product is its own save, and on the JSON
+ * driver every save rewrites the database file.
+ */
+export const MAX_BULK = 1000;
+
+/**
+ * "Only where…": a condition each selected product must meet to be changed.
+ * Products that do not meet it are left alone and counted as not matching —
+ * "publish the drafts among these", "discount what is in stock".
+ */
+export interface BulkWhere {
+  status?: Array<'active' | 'draft' | 'archived'>;
+  /** in = tracked and above 0; out = tracked and 0; untracked = no count kept. */
+  stock?: 'in' | 'out' | 'untracked';
+  on_sale?: boolean;
+  featured?: boolean;
+  /** A category slug; its subcategories count as inside it. Stored membership, not automatic rules. */
+  category?: string;
+  /** Effective price bounds, in minor units, inclusive. */
+  price_min?: number;
+  price_max?: number;
+}
+
+export function whereProblem(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'object' || Array.isArray(raw)) return 'The condition must be an object.';
+  const w = raw as Record<string, unknown>;
+  const known = ['status', 'stock', 'on_sale', 'featured', 'category', 'price_min', 'price_max'];
+  const unknown = Object.keys(w).filter((k) => !known.includes(k));
+  if (unknown.length) return `Unknown condition: ${unknown.join(', ')}.`;
+  if (w.status !== undefined && (!Array.isArray(w.status) || !w.status.length || w.status.some((x) => !['active', 'draft', 'archived'].includes(x as string)))) {
+    return 'A status condition lists active, draft or archived.';
+  }
+  if (w.stock !== undefined && !['in', 'out', 'untracked'].includes(w.stock as string)) return 'A stock condition is in, out or untracked.';
+  for (const k of ['on_sale', 'featured']) if (w[k] !== undefined && typeof w[k] !== 'boolean') return `${k} must be true or false.`;
+  if (w.category !== undefined && (typeof w.category !== 'string' || !w.category.trim())) return 'A category condition names one category.';
+  for (const k of ['price_min', 'price_max']) {
+    if (w[k] !== undefined && (!Number.isInteger(w[k]) || (w[k] as number) < 0)) return `${k} must be a whole, non-negative number of minor units.`;
+  }
+  if (typeof w.price_min === 'number' && typeof w.price_max === 'number' && w.price_min > w.price_max) return 'The lowest price is above the highest.';
+  return null;
+}
+
+export function matchesWhere(p: Product, where: BulkWhere | undefined, categories: readonly { slug: string; parent_slug?: string | null }[] = []): boolean {
+  if (!where) return true;
+  if (where.status && !where.status.includes(p.status)) return false;
+  if (where.stock) {
+    const s = p.stock ?? null;
+    const state = s === null ? 'untracked' : s > 0 ? 'in' : 'out';
+    if (state !== where.stock) return false;
+  }
+  if (where.on_sale !== undefined && !!p.on_sale !== where.on_sale) return false;
+  if (where.featured !== undefined && !!p.featured !== where.featured) return false;
+  if (where.category) {
+    const within = descendantSlugs(where.category, categories);
+    if (!(p.categories ?? []).some((c) => within.has(c))) return false;
+  }
+  if (where.price_min !== undefined && p.price_cents < where.price_min) return false;
+  if (where.price_max !== undefined && p.price_cents > where.price_max) return false;
+  return true;
+}
 
 export type PriceOp =
   | { mode: 'set'; value: number }
@@ -60,6 +122,8 @@ export interface PlannedProduct {
   changes: string[];
   /** Why this product is left out, if it is. */
   skipped?: string;
+  /** It does not meet the "only where" condition, so nothing happens to it. */
+  unmatched?: boolean;
 }
 
 const uniq = (xs: readonly string[]) => [...new Set(xs)];
@@ -127,13 +191,17 @@ function variantRegular(v: ProductVariant): number | null {
 export function planBulkEdit(
   products: readonly Product[],
   ops: BulkOps,
-  opts: { money?: (cents: number) => string } = {},
+  opts: { money?: (cents: number) => string; where?: BulkWhere; categories?: readonly { slug: string; parent_slug?: string | null }[] } = {},
 ): PlannedProduct[] {
   const money = opts.money ?? ((c: number) => (c / 100).toFixed(2));
   return products.map((p) => {
     const patch: Partial<Product> = {};
     const changes: string[] = [];
     const out: PlannedProduct = { id: p.id, name: p.name, patch, changes };
+    if (!matchesWhere(p, opts.where, opts.categories)) {
+      out.unmatched = true;
+      return out;
+    }
 
     if (ops.status && ops.status !== p.status) {
       patch.status = ops.status;

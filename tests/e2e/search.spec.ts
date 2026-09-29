@@ -47,3 +47,32 @@ test('suggestions: Enter with nothing highlighted still searches, and Escape clo
   await box.press('Enter');
   await page.waitForURL(/\/blog\?q=welc/);
 });
+
+test('suggestions: switched off in Settings, the box is a plain search form again', async ({ page }) => {
+  await page.goto('/login');
+  await page.fill('input[name="email"]', 'admin@local');
+  await page.fill('input[name="password"]', 'e2e-admin-not-the-default');
+  await page.click('button[type="submit"]');
+  await page.waitForURL('**/admin');
+  const csrf = await page.locator('meta[name="csrf-token"]').first().getAttribute('content');
+  const set = (on: boolean) => page.request.post('/api/settings/update', { headers: { 'X-CSRF-Token': csrf ?? '' }, data: { search_suggestions_enabled: on } });
+  expect((await set(false)).status()).toBe(200);
+  try {
+    await page.context().clearCookies();
+    await page.goto('/about');
+    await expect(page.getByRole('combobox', { name: 'Search this site' })).toHaveCount(0);
+    await expect(page.getByRole('searchbox', { name: 'Search this site' })).toBeVisible();
+    const api = await (await page.request.get('/api/search/suggest?q=welc')).json();
+    expect(api.meta?.enabled).toBe(false);
+    expect(api.data.posts).toEqual([]);
+  } finally {
+    await page.goto('/login');
+    await page.fill('input[name="email"]', 'admin@local');
+    await page.fill('input[name="password"]', 'e2e-admin-not-the-default');
+    await page.click('button[type="submit"]');
+    await page.waitForURL('**/admin');
+    const csrf2 = await page.locator('meta[name="csrf-token"]').first().getAttribute('content');
+    await page.request.post('/api/settings/update', { headers: { 'X-CSRF-Token': csrf2 ?? '' }, data: { search_suggestions_enabled: true } });
+  }
+});
+

@@ -35,6 +35,16 @@ const okDef = (over = {}) => ({
   ...over,
 });
 
+/* ---- how many ---- */
+{
+  const many = (n) => Array.from({ length: n }, (_, i) => okDef({ name: `type-${i}`, label: `Type ${i}` }));
+  check('the limit is 100 types', C.MAX_ADMIN_TYPES === 100);
+  check('35 types pass (the demo server: several themes, each with its own collections)', v(many(35)).ok);
+  check('exactly the limit passes', v(many(C.MAX_ADMIN_TYPES)).ok);
+  const over = v(many(C.MAX_ADMIN_TYPES + 1));
+  check('one over the limit is refused, and says the limit', !over.ok && over.errors.some((e) => e.includes(`max ${C.MAX_ADMIN_TYPES}`)));
+}
+
 /* ---- accepts ---- */
 check('a plain valid definition passes', v([okDef()]).ok);
 check('public visibility passes', v([okDef({ visibility: 'public' })]).ok);

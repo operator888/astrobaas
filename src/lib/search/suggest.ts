@@ -27,7 +27,7 @@
  */
 import { rankBy, PRODUCT_WEIGHTS, POST_WEIGHTS, queryTerms, type TermExpander } from './rank';
 
-export const SUGGEST_TYPES = ['posts', 'pages', 'products', 'categories'] as const;
+export const SUGGEST_TYPES = ['searches', 'posts', 'pages', 'products', 'categories'] as const;
 export type SuggestType = (typeof SUGGEST_TYPES)[number];
 
 /** The most of one type a request may ask for. */
@@ -40,6 +40,8 @@ interface ProductLike { id: string; name: string; slug: string; sku?: string; br
 interface CategoryLike { slug: string; name: string }
 
 export interface Suggestions {
+  /** Popular searches that start with what was typed — see popular.ts for who may appear here. */
+  searches: string[];
   posts: { title: string; slug: string }[];
   pages: { title: string; slug: string }[];
   products: { name: string; slug: string; price_cents: number; image: string | null }[];
@@ -62,12 +64,16 @@ export function suggest(input: {
   /** Products per category slug, from the same counting the category list uses. */
   categoryCounts?: ReadonlyMap<string, number>;
   expand?: TermExpander;
+  /** Popular searches already chosen for this query (popularFor), most searched first. */
+  popular?: readonly string[];
 }): Suggestions {
-  const out: Suggestions = { posts: [], pages: [], products: [], categories: [] };
+  const out: Suggestions = { searches: [], posts: [], pages: [], products: [], categories: [] };
   if (queryTerms(input.q).join('').length < MIN_QUERY) return out;
   const limit = Math.max(1, Math.min(MAX_PER_TYPE, Math.trunc(input.limit) || 5));
   const want = new Set(input.types);
   const opts = { expand: input.expand };
+
+  if (want.has('searches')) out.searches = (input.popular ?? []).slice(0, limit);
 
   const visiblePosts = (input.posts ?? []).filter((p) => p.status === 'published' && !p.noindex);
   if (want.has('posts')) {

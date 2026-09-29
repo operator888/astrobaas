@@ -11,6 +11,8 @@ import type { TermExpander } from '../../lib/search/rank';
 import { articlesOnly } from '../../lib/post-kind';
 import { filterByLocale } from '../../lib/i18n';
 import { withPublicCache } from '../../lib/http-cache';
+import { resolveSuggestSettings } from '../../lib/search/suggest-settings';
+import { notePopularSearch } from '../../lib/search/popular-store';
 
 /**
  * Site search over published posts.
@@ -96,6 +98,12 @@ export const GET: APIRoute = async ({ url, request, locals }) => {
         excerpt: r.item.excerpt ?? '',
         created_at: r.item.created_at,
       }));
+
+    // Popular searches: counted only when it found something, never for staff,
+    // and only if the operator has not switched them off. See search/popular.ts.
+    if (!locals.user && resolveSuggestSettings(settingsMap(settingsRows)).popular) {
+      notePopularSearch(q, matches.length, locals.ip, new Date(), request.headers.get('user-agent'));
+    }
 
     // Shared-cache headers for anonymous callers — see lib/http-cache.ts. A
     // search is the most repeated GET a storefront makes, and each one is a

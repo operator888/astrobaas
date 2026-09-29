@@ -57,7 +57,7 @@ export function requiredScopeFor(method: string, pathname: string): string | nul
   if (pathname.startsWith('/api/shipping-methods')) return `products:${action}`;
   if (pathname.startsWith('/api/coupons')) return `products:${action}`;
   // Bulk product edit is N product edits in one request: the same scope.
-  if (pathname === '/api/product-bulk' || pathname === '/api/product-bulk/') return `products:${action}`;
+  if (pathname === '/api/product-bulk' || pathname.startsWith('/api/product-bulk/')) return `products:${action}`;
   // The contact form. A headless storefront should be able to POST it with a
   // scoped key instead of performing the CSRF-cookie handshake.
   if (pathname === '/api/contact' || pathname.startsWith('/api/contact/')) return `messages:${action}`;

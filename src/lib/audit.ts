@@ -83,6 +83,7 @@ export const AUDIT = {
   PRODUCT_UPDATE: 'product.update',
   PRODUCT_DELETE: 'product.delete',
   PRODUCT_BULK_EDIT: 'product.bulk_edit',
+  SEARCH_POPULAR_CLEAR: 'search.popular_clear',
   // A category move or delete changes what every storefront menu and filter
   // shows, and a delete untags products — worth a line in the log.
   PRODUCT_CATEGORY_CREATE: 'product_category.create',
