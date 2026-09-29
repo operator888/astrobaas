@@ -1,0 +1,389 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { LocalDB } from '../../lib/localdb';
+import { locales, defaultLocale } from '../../lib/i18n';
+import { NAV_LIMITS } from '../../lib/navigation';
+
+/**
+ * The site menu — the links in the public header.
+ *
+ * Before this screen, every bundled theme hard-coded Home, Blog, About and
+ * Contact in its Header component, and the only way to add "Shop" was to edit
+ * the theme and redeploy. The menu is now one setting (`navigation`), written
+ * through the ordinary settings endpoint, which refuses any link that is not a
+ * path, an anchor, an http(s) address, mailto: or tel: (src/lib/navigation.ts).
+ *
+ * ## Built for the keyboard, not only the mouse
+ *
+ * Reordering is Up / Down / Indent / Outdent buttons, not drag and drop. A
+ * drag-only list is one a keyboard or screen-reader user cannot reorder at all.
+ * Each button's accessible name includes the item it acts on ("Move Shop up"),
+ * and focus stays on the same control after a move, so pressing it again keeps
+ * moving the same item — the thing a sighted mouse user gets for free.
+ *
+ * ## What the server renders, and why only that
+ *
+ * The page list (for link suggestions) is a <datalist> and the site's other
+ * languages are a data attribute. No inline script and no inline JSON: the
+ * production CSP is hash-based, and an inline data block is exactly what left
+ * the collection-entries editor blank in production while it worked in dev.
+ */
+
+await LocalDB.init();
+
+// Published pages, as suggestions for the link field. Suggestions only: any
+// valid link can be typed.
+const posts = await LocalDB.getPosts().catch(() => []);
+const pages = posts
+  .filter((p) => p.kind === 'page' && p.status === 'published' && p.slug)
+  .sort((a, b) => a.title.localeCompare(b.title));
+
+// Languages other than the default get their own label box on every item.
+const otherLocales = locales().filter((l) => l !== defaultLocale());
+---
+
+<AdminLayout title="Navigation">
+  <div
+    class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8"
+    id="nav-editor"
+    data-locales={otherLocales.join(',')}
+    data-max-items={NAV_LIMITS.items}
+    data-max-children={NAV_LIMITS.children}
+  >
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">Navigation</h1>
+    <p class="text-sm text-gray-600 mb-6 max-w-2xl">
+      The links in your site's header, in order. Indent an item to put it in the submenu of the
+      one above it. Leave the menu empty to keep your theme's own links. Changes go live when you
+      save — no deploy.
+    </p>
+
+    <datalist id="nav-link-suggestions">
+      <option value="/">Home</option>
+      <option value="/blog">Blog</option>
+      <option value="/about">About</option>
+      <option value="/contact">Contact</option>
+      {pages.map((p) => <option value={`/${p.slug}`}>{p.title}</option>)}
+    </datalist>
+
+    <ol id="nav-list" class="space-y-3" aria-describedby="nav-help"></ol>
+    <p id="nav-empty" class="hidden rounded-lg border border-dashed border-gray-300 bg-white p-6 text-sm text-gray-600">
+      No menu yet — your theme is showing its own links. Add a link to start your own menu.
+    </p>
+    <p id="nav-help" class="sr-only">
+      Each item has a label and a link. Use the Up, Down, Indent and Outdent buttons to arrange them.
+    </p>
+
+    <div class="mt-4 flex flex-wrap items-center gap-3">
+      <button id="nav-add" type="button" class="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-800 hover:bg-gray-50">
+        Add a link
+      </button>
+    </div>
+
+    <div class="mt-8 flex flex-wrap items-center gap-3 border-t border-gray-200 pt-6">
+      <button id="nav-save" type="button" class="rounded-lg bg-blue-600 px-5 py-2 text-sm font-semibold text-white hover:bg-blue-700">
+        Save menu
+      </button>
+      <button id="nav-reset" type="button" class="rounded-lg px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">
+        Use the theme's own links
+      </button>
+      <p id="nav-status" class="text-sm text-gray-700" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  type Item = {
+    id: number;
+    label: string;
+    href: string;
+    newTab: boolean;
+    labels: Record<string, string>;
+    children: Item[];
+  };
+
+  const root = document.getElementById('nav-editor') as HTMLElement;
+  const list = document.getElementById('nav-list') as HTMLOListElement;
+  const empty = document.getElementById('nav-empty') as HTMLElement;
+  const status = document.getElementById('nav-status') as HTMLElement;
+  const otherLocales = (root.dataset.locales || '').split(',').filter(Boolean);
+  const maxItems = Number(root.dataset.maxItems) || 30;
+  const maxChildren = Number(root.dataset.maxChildren) || 12;
+
+  let items: Item[] = [];
+  let nextId = 1;
+  let dirty = false;
+
+  const csrf = () =>
+    (window as any).__ASTROBAAS__?.csrf
+    || document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+    || '';
+
+  async function api(path: string, method = 'GET', body?: unknown) {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (method !== 'GET') {
+      headers['Content-Type'] = 'application/json';
+      headers['X-CSRF-Token'] = csrf();
+    }
+    const res = await fetch(path, {
+      method,
+      headers,
+      credentials: 'same-origin',
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, json };
+  }
+
+  function fromStored(raw: any): Item {
+    return {
+      id: nextId++,
+      label: String(raw?.label ?? ''),
+      href: String(raw?.href ?? ''),
+      newTab: raw?.newTab === true,
+      labels: raw?.labels && typeof raw.labels === 'object' ? { ...raw.labels } : {},
+      children: Array.isArray(raw?.children) ? raw.children.map(fromStored) : [],
+    };
+  }
+
+  /** What is sent: nothing transient, nothing empty. */
+  function toStored(item: Item): Record<string, unknown> {
+    const out: Record<string, unknown> = { label: item.label.trim(), href: item.href.trim() };
+    const labels = Object.fromEntries(
+      Object.entries(item.labels).filter(([, v]) => v && v.trim()).map(([k, v]) => [k, v.trim()]),
+    );
+    if (Object.keys(labels).length) out.labels = labels;
+    if (item.newTab) out.newTab = true;
+    if (item.children.length) out.children = item.children.map(toStored);
+    return out;
+  }
+
+  function setStatus(text: string, tone: 'ok' | 'error' | 'info' = 'info') {
+    status.textContent = text;
+    status.className = 'text-sm ' + (tone === 'error' ? 'text-red-700' : tone === 'ok' ? 'text-green-700' : 'text-gray-700');
+  }
+
+  function markDirty() {
+    dirty = true;
+    setStatus('Unsaved changes.');
+  }
+
+  /** Where an item lives: its list, and its index in that list. */
+  function locate(id: number): { list: Item[]; index: number; parent: Item | null } | null {
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].id === id) return { list: items, index: i, parent: null };
+      const kids = items[i].children;
+      for (let j = 0; j < kids.length; j++) {
+        if (kids[j].id === id) return { list: kids, index: j, parent: items[i] };
+      }
+    }
+    return null;
+  }
+
+  function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Record<string, any> = {}, ...kids: (Node | string)[]) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (k === 'class') node.className = v;
+      else if (k.startsWith('aria-') || k.startsWith('data-') || k === 'for' || k === 'list') node.setAttribute(k, String(v));
+      else (node as any)[k] = v;
+    }
+    // Text is appended as TEXT. A label is operator input, and this screen
+    // never builds markup from it.
+    for (const kid of kids) node.append(kid);
+    return node;
+  }
+
+  function button(text: string, name: string, action: string, id: number, disabled = false) {
+    const b = el('button', {
+      type: 'button',
+      class: 'rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40',
+      'aria-label': name,
+      'data-action': action,
+      'data-id': id,
+      disabled,
+    }, text);
+    return b;
+  }
+
+  function renderItem(item: Item, depth: number, index: number, siblings: Item[]): HTMLLIElement {
+    const shown = item.label.trim() || 'this item';
+    const li = el('li', {
+      class: depth === 0 ? 'rounded-xl border border-gray-200 bg-white p-4' : 'rounded-lg border border-gray-100 bg-gray-50 p-3',
+      'data-id': item.id,
+    });
+
+    const labelId = `nav-label-${item.id}`;
+    const hrefId = `nav-href-${item.id}`;
+    const fields = el('div', { class: 'grid gap-3 sm:grid-cols-2' },
+      el('div', {},
+        el('label', { for: labelId, class: 'block text-xs font-medium text-gray-700 mb-1' }, 'Label'),
+        el('input', {
+          id: labelId, type: 'text', value: item.label, maxLength: 60,
+          class: 'w-full rounded-md border border-gray-300 px-3 py-2 text-sm',
+          'data-field': 'label', 'data-id': item.id,
+        }),
+      ),
+      el('div', {},
+        el('label', { for: hrefId, class: 'block text-xs font-medium text-gray-700 mb-1' }, 'Link'),
+        el('input', {
+          id: hrefId, type: 'text', value: item.href, maxLength: 500, list: 'nav-link-suggestions',
+          placeholder: '/about or https://…',
+          class: 'w-full rounded-md border border-gray-300 px-3 py-2 text-sm font-mono',
+          'data-field': 'href', 'data-id': item.id,
+        }),
+      ),
+    );
+    li.append(fields);
+
+    const tabId = `nav-tab-${item.id}`;
+    li.append(el('div', { class: 'mt-2 flex items-center gap-2' },
+      el('input', { id: tabId, type: 'checkbox', checked: item.newTab, 'data-field': 'newTab', 'data-id': item.id }),
+      el('label', { for: tabId, class: 'text-xs text-gray-600' }, 'Open in a new tab (links to other sites only)'),
+    ));
+
+    if (otherLocales.length) {
+      const details = el('details', { class: 'mt-2' }, el('summary', { class: 'cursor-pointer text-xs text-gray-600' }, 'Label in other languages'));
+      const grid = el('div', { class: 'mt-2 grid gap-2 sm:grid-cols-2' });
+      for (const loc of otherLocales) {
+        const id = `nav-l-${item.id}-${loc}`;
+        grid.append(el('div', {},
+          el('label', { for: id, class: 'block text-xs text-gray-600 mb-1' }, `Label (${loc})`),
+          el('input', {
+            id, type: 'text', value: item.labels[loc] ?? '', maxLength: 60,
+            placeholder: 'Same as the default if left empty',
+            class: 'w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm',
+            'data-field': `labels.${loc}`, 'data-id': item.id,
+          }),
+        ));
+      }
+      details.append(grid);
+      li.append(details);
+    }
+
+    const canIndent = depth === 0 && index > 0 && item.children.length === 0
+      && siblings[index - 1].children.length < maxChildren;
+    li.append(el('div', { class: 'mt-3 flex flex-wrap gap-2' },
+      button('Up', `Move ${shown} up`, 'up', item.id, index === 0),
+      button('Down', `Move ${shown} down`, 'down', item.id, index === siblings.length - 1),
+      depth === 0
+        ? button('Indent', `Put ${shown} in the submenu of the item above`, 'indent', item.id, !canIndent)
+        : button('Outdent', `Move ${shown} out of the submenu`, 'outdent', item.id, items.length >= maxItems),
+      button('Remove', `Remove ${shown}`, 'remove', item.id),
+    ));
+
+    if (item.children.length) {
+      const ol = el('ol', { class: 'mt-3 ml-4 space-y-2 border-l-2 border-gray-200 pl-4', 'aria-label': `Submenu of ${shown}` });
+      item.children.forEach((c, i) => ol.append(renderItem(c, 1, i, item.children)));
+      li.append(ol);
+    }
+    return li;
+  }
+
+  function render(focus?: { id: number; action?: string; field?: string }) {
+    list.replaceChildren(...items.map((it, i) => renderItem(it, 0, i, items)));
+    empty.classList.toggle('hidden', items.length > 0);
+    (document.getElementById('nav-add') as HTMLButtonElement).disabled = items.length >= maxItems;
+    if (!focus) return;
+    const sel = focus.action
+      ? `[data-id="${focus.id}"][data-action="${focus.action}"]`
+      : `[data-id="${focus.id}"][data-field="${focus.field ?? 'label'}"]`;
+    const target = list.querySelector<HTMLElement>(sel);
+    // A move that disabled the pressed button (Up at the top) leaves focus on
+    // the item's label instead of on nothing.
+    (target && !(target as HTMLButtonElement).disabled ? target : list.querySelector<HTMLElement>(`[data-id="${focus.id}"][data-field="label"]`))?.focus();
+  }
+
+  list.addEventListener('input', (e) => {
+    const t = e.target as HTMLInputElement;
+    const id = Number(t.dataset.id);
+    const field = t.dataset.field;
+    const where = locate(id);
+    if (!where || !field) return;
+    const item = where.list[where.index];
+    if (field === 'label') item.label = t.value;
+    else if (field === 'href') item.href = t.value;
+    else if (field === 'newTab') item.newTab = t.checked;
+    else if (field.startsWith('labels.')) item.labels[field.slice(7)] = t.value;
+    markDirty();
+  });
+  // Older engines fire only `change` for a checkbox, so it is handled here too.
+  list.addEventListener('change', (e) => {
+    const t = e.target as HTMLInputElement;
+    const where = locate(Number(t.dataset.id));
+    if (where && t.dataset.field === 'newTab') { where.list[where.index].newTab = t.checked; markDirty(); }
+  });
+
+  list.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-action]');
+    if (!b || b.disabled) return;
+    const id = Number(b.dataset.id);
+    const action = b.dataset.action!;
+    const where = locate(id);
+    if (!where) return;
+    const { list: arr, index, parent } = where;
+    const item = arr[index];
+
+    if (action === 'up' && index > 0) [arr[index - 1], arr[index]] = [arr[index], arr[index - 1]];
+    else if (action === 'down' && index < arr.length - 1) [arr[index + 1], arr[index]] = [arr[index], arr[index + 1]];
+    else if (action === 'indent' && !parent && index > 0) {
+      arr.splice(index, 1);
+      arr[index - 1].children.push(item);
+    } else if (action === 'outdent' && parent) {
+      arr.splice(index, 1);
+      items.splice(items.indexOf(parent) + 1, 0, item);
+    } else if (action === 'remove') {
+      arr.splice(index, 1);
+      markDirty();
+      render();
+      setStatus(`Removed ${item.label.trim() || 'the item'}. Save to publish the change.`);
+      (document.getElementById('nav-add') as HTMLButtonElement).focus();
+      return;
+    }
+    markDirty();
+    render({ id, action });
+  });
+
+  document.getElementById('nav-add')!.addEventListener('click', () => {
+    if (items.length >= maxItems) return;
+    const item: Item = { id: nextId++, label: '', href: '', newTab: false, labels: {}, children: [] };
+    items.push(item);
+    markDirty();
+    render({ id: item.id, field: 'label' });
+  });
+
+  document.getElementById('nav-save')!.addEventListener('click', async () => {
+    setStatus('Saving…');
+    const payload = items.length ? { items: items.map(toStored) } : null;
+    const { ok, json } = await api('/api/settings/update', 'POST', { navigation: payload });
+    if (!ok) {
+      // The server's sentence names the item and the rule ("Item 3 (Shop):
+      // the link must start with / …") — shown as-is.
+      setStatus(json?.error?.message || 'The menu could not be saved.', 'error');
+      return;
+    }
+    dirty = false;
+    setStatus(items.length ? 'Menu saved — it is live on the site now.' : "Saved — your theme's own links are back.", 'ok');
+  });
+
+  document.getElementById('nav-reset')!.addEventListener('click', async () => {
+    if (items.length && !window.confirm("Remove your menu and show the theme's own links again?")) return;
+    const { ok, json } = await api('/api/settings/update', 'POST', { navigation: null });
+    if (!ok) { setStatus(json?.error?.message || 'Could not reset the menu.', 'error'); return; }
+    items = [];
+    dirty = false;
+    render();
+    setStatus("Your theme's own links are back.", 'ok');
+  });
+
+  window.addEventListener('beforeunload', (e) => {
+    if (dirty) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  (async () => {
+    const { ok, json } = await api('/api/settings/get');
+    const stored = ok ? json?.data?.navigation : null;
+    let value = stored;
+    if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = null; } }
+    items = Array.isArray(value?.items) ? value.items.map(fromStored) : [];
+    render();
+  })();
+</script>

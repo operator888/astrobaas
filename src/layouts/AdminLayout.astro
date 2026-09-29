@@ -19,7 +19,7 @@ const i18nHash = catalogueHash(uiLocale);
 const user = Astro.locals.user;
 ---
 
-<BaseLayout title={`${title} - Admin`} description={description}>
+<BaseLayout title={`${title} - Admin`} description={description} skipLabel={Astro.locals.t('admin.chrome.skipToContent')}>
   <Fragment slot="head">
     <meta name="csrf-token" content={csrf} />
     <meta name="astrobaas-user" content={user ? JSON.stringify(user) : ''} />
@@ -62,7 +62,7 @@ const user = Astro.locals.user;
           includes not obviously being themselves. */}
       <SwitchBanner />
       <CommandPalette />
-      <main class="flex-1 relative overflow-y-auto focus:outline-none">
+      <main id="main-content" tabindex="-1" class="flex-1 relative overflow-y-auto focus:outline-none">
         <slot />
       </main>
     </div>

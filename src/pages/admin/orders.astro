@@ -297,6 +297,7 @@ const statusColor: Record<string, string> = {
                       canWrite ? 'border-gray-300' : 'border-gray-200 bg-gray-100 text-gray-500 cursor-not-allowed']}
                     data-id={o.id}
                     data-current={o.status}
+                    aria-label={t('admin.orders.statusOf', { number: String(o.number) })}
                     disabled={!canWrite}
                     title={canWrite ? undefined : t('admin.orders.statusLocked')}
                   >

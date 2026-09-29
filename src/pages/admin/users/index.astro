@@ -146,7 +146,7 @@ const statusLabel = (v: string) => labelled(`admin.users.status.${v}`, capitalis
 
         <!-- Filters -->
         <div class="flex items-center space-x-4">
-          <select id="role-filter" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+          <select id="role-filter" aria-label={t('admin.users.filterByRole')} class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
             <option value="">{t('admin.users.allRoles')}</option>
             {/* Rendered from ROLES so a role added to the union shows up here
                 instead of being invisible in the filter. */}
@@ -155,7 +155,7 @@ const statusLabel = (v: string) => labelled(`admin.users.status.${v}`, capitalis
             ))}
           </select>
           
-          <select id="status-filter" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+          <select id="status-filter" aria-label={t('admin.users.filterByStatus')} class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
             <option value="">{t('admin.users.allStatuses')}</option>
             <option value="active">{t('admin.users.status.active')}</option>
             <option value="inactive">{t('admin.users.status.inactive')}</option>

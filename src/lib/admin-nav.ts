@@ -57,6 +57,7 @@ export const NAV: NavGroup[] = [
     heading: "groupShop",
     items: [
       { href: "/admin/products", key: "products", paths: ["M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"] },
+      { href: "/admin/product-categories", key: "productCategories", paths: ["M3 7h7l2 2h9v10H3z", "M3 7V5h6l2 2"] },
       { href: "/admin/orders", key: "orders", paths: ["M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"] },
       { href: "/admin/customers", key: "customers", paths: ["M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"] },
     ],
@@ -77,6 +78,7 @@ export const NAV: NavGroup[] = [
     heading: "groupSite",
     items: [
       { href: "/admin/themes", key: "themes", paths: ["M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zM21 5a2 2 0 00-2-2h-4a2 2 0 00-2 2v12a4 4 0 004 4h4a2 2 0 002-2V5z"] },
+      { href: "/admin/navigation", key: "navigation", paths: ["M4 6h16", "M4 12h10", "M4 18h13"] },
       { href: "/admin/insights", key: "insights", paths: ["M4 19h16", "M7 16V9", "M12 16V5", "M17 16v-4"] },
       { href: "/admin/redirects", key: "redirects", paths: ["M13 5l7 7-7 7M4 12h16"] },
       { href: "/admin/legal", key: "legalPages", paths: ["M12 3l7 4v5c0 4.5-3 8.6-7 9.7C8 20.6 5 16.5 5 12V7l7-4z", "M9 12l2 2 4-4"] },

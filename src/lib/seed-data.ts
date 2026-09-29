@@ -237,7 +237,7 @@ export function makeDefaultData(): DatabaseSchema {
         author: 'AstroBaaS Team',
         status: 'active',
         settings: {
-          colors: { primary: '#3B82F6', secondary: '#8B5CF6', accent: '#10B981', background: '#FFFFFF', text: '#1F2937' },
+          colors: { primary: '#2563EB', secondary: '#7C3AED', accent: '#047857', background: '#FFFFFF', text: '#1F2937' },
           typography: { headingFont: 'Inter', bodyFont: 'Inter', fontSize: '16px' },
         },
         created_at: now,

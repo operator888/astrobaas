@@ -175,7 +175,7 @@ export function trustedForwardedIp(
  * Route buckets (S3.4)
  * ================================================================== */
 
-export type RouteBucket = 'checkout' | 'quote' | 'payment-start' | 'search' | 'webhook';
+export type RouteBucket = 'checkout' | 'quote' | 'payment-start' | 'search' | 'suggest' | 'webhook';
 
 export type RouteLimits = Record<RouteBucket, number>;
 
@@ -205,6 +205,9 @@ export const DEFAULT_ROUTE_LIMITS: Readonly<RouteLimits> = Object.freeze({
   quote: 30,
   'payment-start': 10,
   search: 30,
+  // Search suggestions. A person typing sends a handful per query after the
+  // debounce; this bounds a script without getting in a typist's way.
+  suggest: 40,
   webhook: 600,
 });
 
@@ -213,6 +216,7 @@ const ROUTE_LIMIT_ENV: Record<RouteBucket, string> = {
   quote: 'RATE_LIMIT_QUOTE_PER_MIN',
   'payment-start': 'RATE_LIMIT_PAYMENT_START_PER_MIN',
   search: 'RATE_LIMIT_SEARCH_PER_MIN',
+  suggest: 'RATE_LIMIT_SUGGEST_PER_MIN',
   webhook: 'RATE_LIMIT_WEBHOOK_PER_MIN',
 };
 
@@ -252,6 +256,7 @@ export function routeBucketFor(
   }
   if (m === 'GET') {
     if (/^\/api\/search\/?$/.test(pathname)) return 'search';
+    if (/^\/api\/search\/suggest\/?$/.test(pathname)) return 'suggest';
     if (/^\/api\/products\/?$/.test(pathname) && (searchParams?.get('search') ?? '').trim() !== '') {
       return 'search';
     }

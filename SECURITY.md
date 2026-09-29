@@ -169,9 +169,13 @@ particular:
   IPv6 ULA/loopback, CGNAT). It does **not** resolve DNS, so a public hostname
   that resolves to a private address (DNS rebinding) is out of scope; set
   `WEBHOOK_ALLOW_PRIVATE=1` to disable the guard for trusted internal use.
-- **Backup export/import is lowdb-only.** On the libSQL/Turso drivers the
-  built-in JSON backup endpoints refuse to run (they'd read/write the wrong
-  store); back up the database with your DB tooling instead.
+- **Backup export/import is same-driver only.** The JSON backup covers the
+  default lowdb store; a local SQLite file (`file:` `DATABASE_URL`) is exported
+  and restored as a snapshot of that file. A remote libSQL/Turso database is
+  refused, since there is no local file to copy: back it up with that
+  provider's tooling. Restoring into a different driver is refused rather than
+  reported as a success that changed nothing. See
+  [STORAGE.md](./STORAGE.md#moving-between-drivers).
 - **Settings are public only by explicit opt-in.** `GET /api/settings/get` is an
   unauthenticated endpoint (decoupled storefronts read the site title from it),
   but settings are a *schemaless* key/value bucket — `POST /api/settings/update`

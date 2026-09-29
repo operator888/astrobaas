@@ -48,6 +48,9 @@ export const chrome = {
   // Sidebar group headings. The sidebar is grouped by what a person is
   // trying to DO, so these are verbs-in-noun-form rather than technical
   // categories, and they are the first words a new operator reads.
+  'admin.chrome.navigation': 'Navigation',
+  'admin.chrome.skipToContent': 'Skip to content',
+  'admin.chrome.productCategories': 'Product categories',
   'admin.chrome.redirects': 'Redirects',
   'admin.chrome.groupShop': 'Shop',
   'admin.chrome.groupContent': 'Content',

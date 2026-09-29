@@ -1,0 +1,140 @@
+---
+import Shop from '../layouts/Shop.astro';
+import { allProducts } from '../lib/cms';
+
+// Names as of the last build, so the cart can say WHICH item is the problem
+// even after the CMS has stopped serving it. Display only — never a price.
+const names = Object.fromEntries((await allProducts()).map((p) => [p.id, p.name]));
+---
+<Shop title="Your cart" noindex>
+  <h1>Your cart</h1>
+  <div data-cart-status data-names={JSON.stringify(names)} role="status" class="muted">Loading your cart…</div>
+  <div data-cart-body hidden>
+    <div class="table-scroll">
+      <table class="lines">
+        <caption class="visually-hidden">Items in your cart</caption>
+        <thead>
+          <tr><th scope="col">Item</th><th scope="col">Quantity</th><th scope="col" class="num">Price</th><th scope="col"><span class="visually-hidden">Remove</span></th></tr>
+        </thead>
+        <tbody data-cart-lines></tbody>
+      </table>
+    </div>
+    <dl class="totals" data-cart-totals></dl>
+    <p class="muted">Shipping and tax are confirmed at checkout, once we know where it is going.</p>
+    <p><a class="btn" href="/checkout/">Check out</a></p>
+  </div>
+</Shop>
+
+<script>
+  import { readCart, setQty, clearCart, browserStorage, type CartLine } from '../lib/cart';
+  import { cms, quote, problem, AstroBaasError, type Quote } from '../scripts/shop-api';
+  import { formatMoney } from '../lib/money';
+
+  const store = browserStorage();
+  const status = document.querySelector<HTMLElement>('[data-cart-status]')!;
+  const body = document.querySelector<HTMLElement>('[data-cart-body]')!;
+  const tbody = document.querySelector<HTMLElement>('[data-cart-lines]')!;
+  const totals = document.querySelector<HTMLElement>('[data-cart-totals]')!;
+
+  const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLElementTagNameMap[K]> = {}, ...kids: (Node | string)[]) => {
+    const n = Object.assign(document.createElement(tag), props);
+    n.append(...kids);
+    return n;
+  };
+
+  function row(line: Quote['lines'][number], currency: string, stored: CartLine) {
+    const qty = el('input', { type: 'number', min: '1', max: '99', value: String(line.qty), id: `qty-${line.product_id}-${line.variant_id ?? ''}` });
+    qty.setAttribute('aria-label', `Quantity of ${line.name}`);
+    qty.addEventListener('change', () => {
+      setQty(store, stored.product_id, Number(qty.value), stored.variant_id);
+      document.dispatchEvent(new Event('cart:changed'));
+      void render();
+    });
+    const remove = el('button', { type: 'button', className: 'link-btn', textContent: 'Remove' });
+    remove.setAttribute('aria-label', `Remove ${line.name}`);
+    remove.addEventListener('click', () => {
+      setQty(store, stored.product_id, 0, stored.variant_id);
+      document.dispatchEvent(new Event('cart:changed'));
+      void render();
+    });
+    return el('tr', {},
+      el('td', {}, line.name),
+      el('td', {}, qty),
+      el('td', { className: 'num' }, formatMoney(line.line_subtotal_cents, currency)),
+      el('td', {}, remove));
+  }
+
+  function total(label: string, value: string, grand = false) {
+    totals.append(el('dt', { className: grand ? 'grand' : '' }, label), el('dd', { className: grand ? 'grand' : '' }, value));
+  }
+
+  async function render() {
+    const lines = readCart(store);
+    if (!lines.length) {
+      body.hidden = true;
+      status.textContent = 'Your cart is empty.';
+      status.append(' ', el('a', { href: '/shop/', textContent: 'Browse the shop' }), '.');
+      return;
+    }
+    try {
+      const q = await quote(lines);
+      tbody.replaceChildren(...q.lines.map((l) => {
+        const stored = lines.find((s) => s.product_id === l.product_id && (s.variant_id ?? '') === (l.variant_id ?? '')) ?? { product_id: l.product_id, variant_id: l.variant_id, qty: l.qty };
+        return row(l, q.currency, stored);
+      }));
+      totals.replaceChildren();
+      total('Subtotal', formatMoney(q.subtotal_cents, q.currency));
+      if (q.discount_cents) total('Discount', `−${formatMoney(q.discount_cents, q.currency)}`);
+      total('Total so far', formatMoney(q.total_cents, q.currency), true);
+      status.textContent = '';
+      body.hidden = false;
+    } catch (err) {
+      body.hidden = true;
+      status.textContent = problem(err);
+      // A refusal (not a network failure) usually means one line is no longer
+      // for sale — deleted, sold out, or over the shop's per-product limit —
+      // and the CMS refuses the WHOLE quote for it. Find which, and offer to
+      // remove just those, rather than making the buyer start again.
+      if (err instanceof AstroBaasError && err.status >= 400 && err.status < 500) void explain(lines);
+    }
+  }
+
+  const knownNames: Record<string, string> = (() => {
+    try { return JSON.parse(status.dataset.names ?? '{}'); } catch { return {}; }
+  })();
+
+  async function explain(lines: CartLine[]) {
+    const bad: { line: CartLine; why: string; name: string }[] = [];
+    for (const line of lines) {
+      try {
+        await quote([line]);
+      } catch (err) {
+        if (!(err instanceof AstroBaasError) || err.status < 400 || err.status >= 500) return; // not a line problem
+        const name = knownNames[line.product_id]
+          ?? await cms.products.get(line.product_id).then((p) => p.name, () => 'An item that is no longer sold');
+        bad.push({ line, why: problem(err), name });
+      }
+    }
+    if (!bad.length) {
+      const reset = el('button', { type: 'button', className: 'btn btn-quiet', textContent: 'Empty the cart' });
+      reset.addEventListener('click', () => { clearCart(store); document.dispatchEvent(new Event('cart:changed')); void render(); });
+      status.append(' ', reset);
+      return;
+    }
+    status.replaceChildren(el('span', { textContent: bad.length === 1 ? 'One item in your cart cannot be bought right now:' : `${bad.length} items in your cart cannot be bought right now:` }));
+    const list = el('ul');
+    for (const b of bad) {
+      const remove = el('button', { type: 'button', className: 'link-btn', textContent: 'Remove' });
+      remove.setAttribute('aria-label', `Remove ${b.name}`);
+      remove.addEventListener('click', () => {
+        setQty(store, b.line.product_id, 0, b.line.variant_id);
+        document.dispatchEvent(new Event('cart:changed'));
+        void render();
+      });
+      list.append(el('li', {}, el('strong', { textContent: b.name }), ` — ${b.why} `, remove));
+    }
+    status.append(list);
+  }
+
+  void render();
+</script>

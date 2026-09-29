@@ -1,0 +1,64 @@
+---
+/*
+ * Search results. Static like every page here, so the results are fetched in
+ * the browser from the CMS — the same ranked search the CMS's own
+ * `/api/products?search=` gives, filtered by catalogue visibility: "search
+ * only" products belong here, "shelves only" and "hidden" ones do not.
+ */
+import Shop from '../layouts/Shop.astro';
+import { shopCurrency } from '../lib/cms';
+const currency = await shopCurrency();
+---
+<Shop title="Search" noindex>
+  <h1 data-search-title>Search</h1>
+  <p class="muted" data-search-status role="status">Type what you are looking for in the search box.</p>
+  <ul class="grid" data-search-results data-currency={currency}></ul>
+</Shop>
+
+<script>
+  import { cms, problem } from '../scripts/shop-api';
+  import { formatMoney } from '../lib/money';
+
+  const q = (new URLSearchParams(location.search).get('q') ?? '').trim().slice(0, 200);
+  const status = document.querySelector<HTMLElement>('[data-search-status]')!;
+  const results = document.querySelector<HTMLElement>('[data-search-results]')!;
+  const title = document.querySelector<HTMLElement>('[data-search-title]')!;
+  const currency = results.dataset.currency || 'EUR';
+  const box = document.getElementById('site-q') as HTMLInputElement | null;
+  if (box) box.value = q;
+
+  if (q.length >= 2) {
+    title.textContent = `Results for “${q}”`;
+    status.textContent = 'Searching…';
+    try {
+      const found = (await cms.products.list({ search: q, limit: 48 }))
+        .filter((p) => ['visible', 'search', undefined].includes(p.catalog_visibility));
+      results.replaceChildren(...found.map((p) => {
+        const li = document.createElement('li');
+        li.className = 'card';
+        const a = document.createElement('a');
+        a.href = `/product/${encodeURIComponent(p.slug)}/`;
+        const img = p.images?.find((i) => (i.kind ?? 'image') === 'image');
+        const frame = document.createElement('div');
+        frame.className = 'card-img';
+        if (img) {
+          const el = document.createElement('img');
+          el.src = img.src; el.alt = img.alt ?? ''; el.loading = 'lazy'; el.width = 400; el.height = 400;
+          frame.append(el);
+        }
+        const name = document.createElement('span');
+        name.className = 'card-name';
+        name.textContent = p.name;
+        a.append(frame, name);
+        const price = document.createElement('span');
+        price.className = 'price';
+        price.textContent = formatMoney(p.price_cents, currency);
+        li.append(a, price);
+        return li;
+      }));
+      status.textContent = found.length ? (found.length === 1 ? '1 product' : `${found.length} products`) : 'Nothing matches. Try another word, or browse the shop.';
+    } catch (err) {
+      status.textContent = problem(err);
+    }
+  }
+</script>

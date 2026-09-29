@@ -11,6 +11,8 @@
  */
 export { LocalDB } from '../../src/lib/localdb';
 export { saveProduct, setOrderStatus } from '../../src/lib/commerce-service';
+// Bulk edit's planner, so the race test saves exactly the patch it builds.
+export { planBulkEdit } from '../../src/lib/commerce/bulk-edit';
 // The order-status race counts how many times the "status changed" side
 // effects ran (plugin action, webhook event and audit are fired together), so
 // it registers a probe on THIS graph's plugin manager — a second copy would

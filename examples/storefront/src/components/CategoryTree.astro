@@ -1,0 +1,17 @@
+---
+import type { CategoryNode, CategoryLike } from '../lib/categories';
+
+interface Props { nodes: CategoryNode<CategoryLike>[]; current?: string }
+const { nodes, current } = Astro.props;
+---
+<ul>
+  {nodes.map((n) => (
+    <li>
+      <a href={`/shop/${n.cat.slug}/`} aria-current={n.cat.slug === current ? 'page' : undefined}>{n.cat.name}</a>
+      {typeof n.cat.product_count_total === 'number' && (
+        <span class="count"> ({n.cat.product_count_total})</span>
+      )}
+      {n.children.length > 0 && <Astro.self nodes={n.children} current={current} />}
+    </li>
+  ))}
+</ul>

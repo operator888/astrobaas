@@ -118,7 +118,7 @@ const posts = pagePosts.map(post => {
         </div>
 
         <div class="flex items-center space-x-2">
-          <select name="status" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+          <select name="status" aria-label="Filter by status" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
             <option value="" selected={!statusFilter}>All Status</option>
             <option value="published" selected={statusFilter === 'published'}>Published</option>
             <option value="draft" selected={statusFilter === 'draft'}>Draft</option>
@@ -126,14 +126,14 @@ const posts = pagePosts.map(post => {
             <option value="trashed" selected={statusFilter === 'trashed'}>Trashed</option>
           </select>
 
-          <select name="kind" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+          <select name="kind" aria-label="Filter by type" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
             <option value="" selected={!kindFilter}>All types</option>
             <option value="post" selected={kindFilter === 'post'}>Posts</option>
             <option value="page" selected={kindFilter === 'page'}>Pages</option>
           </select>
 
           {siteIsMultilingual && (
-            <select name="locale" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+            <select name="locale" aria-label="Filter by language" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
               <option value="" selected={!localeFilter}>All languages</option>
               {siteLocales.map((l) => (
                 <option value={l} selected={localeFilter === l}>{l}</option>
@@ -141,7 +141,7 @@ const posts = pagePosts.map(post => {
             </select>
           )}
 
-          <select name="category" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+          <select name="category" aria-label="Filter by category" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
             <option value="" selected={!categoryFilter}>All Categories</option>
             {allCategories.map((c) => (
               <option value={c.id} selected={categoryFilter === c.id}>{c.name}</option>
@@ -167,7 +167,7 @@ const posts = pagePosts.map(post => {
           <thead class="bg-gray-50">
             <tr>
               <th class="px-6 py-3 text-left">
-                <input type="checkbox" id="select-all" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <input type="checkbox" id="select-all" aria-label="Select all posts" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
               </th>
               <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Post</th>
               <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Author</th>
@@ -183,7 +183,7 @@ const posts = pagePosts.map(post => {
             {posts.map((post) => (
               <tr class="hover:bg-gray-50 post-row" data-post-id={post.id}>
                 <td class="px-6 py-4 whitespace-nowrap">
-                  <input type="checkbox" class="post-checkbox rounded border-gray-300 text-blue-600 focus:ring-blue-500" value={post.id} />
+                  <input type="checkbox" class="post-checkbox rounded border-gray-300 text-blue-600 focus:ring-blue-500" value={post.id} aria-label={`Select "${post.title || 'Untitled'}"`} />
                 </td>
                 <td class="px-6 py-4">
                   <div class="flex items-center">

@@ -67,8 +67,14 @@ async function read(p) {
   }
 
   const box = await read('src/components/public/SiteSearch.astro');
+  // The box now has a script — suggestions as you type — so "no <script>"
+  // stopped being the right proxy. What it stood for still holds and is checked
+  // directly: the markup is a complete GET form on its own, and the script
+  // enhances it without ever taking submission over.
   check('the box is a plain GET form — it works with scripting off',
-    /method="get"/.test(box) && !/<script/.test(box));
+    /<form[\s\S]*?method="get"[\s\S]*?action=\{action\}/.test(box) && /<input[\s\S]*?name="q"/.test(box));
+  check('...and the suggestions script never intercepts submitting it',
+    !/addEventListener\(\s*'submit'/.test(box) && !/\.submit\(\)/.test(box));
   check('...with a real <label>, not a placeholder standing in for one',
     /<label[^>]*for="ab-site-search-q"/.test(box));
   check('...and a submit BUTTON, so nobody has to guess that Enter works',

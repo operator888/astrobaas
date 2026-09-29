@@ -52,6 +52,7 @@ export const orders = {
   'admin.orders.refundedAmount': '−{amount} erstattet',
   'admin.orders.refundRemaining': '{amount} verbleibend',
   'admin.orders.statusLocked': 'Ihre Rolle erlaubt das Ansehen von Bestellungen, aber nicht das Ändern des Bestellstatus. Ein Administrator oder Redakteur kann dies tun.',
+  'admin.orders.statusOf': 'Status der Bestellung {number}',
   'admin.orders.refund': 'Erstatten…',
   'admin.orders.refundInProviderDashboard': 'Erstattung im Dashboard von {provider} vornehmen',
 

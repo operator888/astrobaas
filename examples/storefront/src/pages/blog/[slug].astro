@@ -1,0 +1,31 @@
+---
+import Shop from '../../layouts/Shop.astro';
+import { allPosts, type Post } from '../../lib/cms';
+
+export async function getStaticPaths() {
+  const posts = await allPosts();
+  return posts.map((p) => ({ params: { slug: p.slug }, props: { post: p } }));
+}
+
+interface Props { post: Post }
+const { post } = Astro.props;
+/*
+ * `content_rendered` is the article exactly as the CMS's own theme renders it —
+ * sanitised against the CMS's allow-list on save, with heading anchors and
+ * image dimensions added. Rendering it as HTML trusts the CMS, which is the
+ * point of having one; never pass anything ELSE to set:html here.
+ */
+const html = (post as Post & { content_rendered?: string }).content_rendered ?? post.content;
+const when = (post as { published_at?: string }).published_at ?? post.created_at;
+---
+<Shop title={post.meta_title || post.title} description={post.meta_description || post.excerpt}>
+  <nav class="crumbs" aria-label="Breadcrumb">
+    <ol><li><a href="/blog/">Blog</a></li><li><span aria-current="page">{post.title}</span></li></ol>
+  </nav>
+  <article class="prose">
+    <h1>{post.title}</h1>
+    {when && <p class="muted"><time datetime={when}>{new Date(when).toLocaleDateString('en', { year: 'numeric', month: 'long', day: 'numeric' })}</time></p>}
+    {post.featured_image && <img src={post.featured_image} alt="" width="1200" height="630" />}
+    <div set:html={html} />
+  </article>
+</Shop>

@@ -55,7 +55,7 @@
   :root {
     --primary-color: #2563eb;   /* blue-600 */
     --secondary-color: #7c3aed; /* purple-600 */
-    --accent-color: #059669;    /* green-600 */
+    --accent-color: #047857;    /* green-700: 5.48:1 on white; green-600 is 3.77 */
     --background-color: #ffffff;
     --text-color: #1f2937;
     --heading-font: 'Inter';
@@ -65,7 +65,7 @@
        hardcoded Tailwind look, so a site that never opens the customizer is
        pixel-unchanged by this work. */
     --surface-color: #ffffff;
-    --muted-color: #6b7280;
+    --muted-color: #4b5563;     /* gray-600: 6.8:1 on the grey page; gray-500 was 4.3 */
     --border-color: #e5e7eb;
     --on-primary: #ffffff;
     --success-color: #059669;
@@ -231,7 +231,7 @@
    that needs more than a colour uses a scoped <style> in its own .astro file;
    Astro hashes those. */
 .ab-ink { color: var(--text-color, #111827); }
-.ab-muted { color: var(--muted-color, #6b7280); }
+.ab-muted { color: var(--muted-color, #4b5563); }
 .ab-accent { color: var(--accent-color, #2563eb); }
 .ab-on-accent { color: var(--on-primary, #ffffff); }
 .ab-inherit { color: inherit; }
@@ -240,6 +240,38 @@
 .ab-border-ink { border-color: var(--text-color, #111827); }
 .ab-border-on-accent { border-color: var(--on-primary, #ffffff); }
 .ab-heading-font { font-family: var(--heading-font, inherit); }
+
+/* The skip link (WCAG 2.4.1). Off-screen until it has focus, then the first
+   thing on the page. Fixed colours rather than theme tokens: it must be legible
+   on every theme, including one whose accent fails contrast, and it is on
+   screen only for the moment a keyboard user needs it. `inset-inline-start`
+   so it sits on the reading side in right-to-left languages too. */
+.ab-skip-link {
+  position: absolute;
+  inset-inline-start: 0.5rem;
+  top: -100px;
+  z-index: 1000;
+  padding: 0.75rem 1rem;
+  background: #111827;
+  color: #ffffff;
+  font-weight: 600;
+  border-radius: 0.375rem;
+  text-decoration: underline;
+}
+.ab-skip-link:focus { top: 0.5rem; outline: 3px solid #fbbf24; outline-offset: 2px; }
+
+/* A link inside a sentence is underlined (WCAG 1.4.1, Use of Color). The admin
+   styled them `text-blue-600 hover:underline`, so until hover the only thing
+   marking a link was its colour — invisible to anyone who cannot tell that
+   blue from the text around it. Scoped to links inside running text: nav
+   items, buttons and table actions are recognisable by their position.
+   The EXACT classes, not a substring: `[class*="text-blue-"]` also matched
+   `hover:text-blue-600`, which is on every header menu and table-of-contents
+   link, and underlined all of them permanently. */
+:where(p, li, dd, figcaption, blockquote) a:is(.text-blue-600, .text-blue-700):not(:where(nav a)) {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 
 /* Keyboard focus, in the theme's own accent.
 
@@ -373,7 +405,10 @@
    --------------------------------------------------------------------------- */
 .bg-blue-500, .bg-blue-600, .bg-blue-700 { background-color: var(--primary-color) !important; }
 .hover\:bg-blue-600:hover, .hover\:bg-blue-700:hover { background-color: var(--primary-color) !important; filter: brightness(0.92); }
-.text-blue-600, .text-blue-700, .text-blue-800 { color: var(--primary-color) !important; }
+.text-blue-600, .text-blue-700 { color: var(--primary-color) !important; }
+/* blue-800 sits on blue-100 badges, which are lighter than the page, so it is
+   the primary darkened — the brand colour itself is 4.2:1 there and fails AA. */
+.text-blue-800 { color: color-mix(in srgb, var(--primary-color) 78%, #000) !important; }
 .hover\:text-blue-600:hover, .hover\:text-blue-700:hover { color: var(--primary-color) !important; filter: brightness(0.92); }
 .border-blue-500, .border-blue-600 { border-color: var(--primary-color) !important; }
 .focus\:ring-blue-500:focus { --tw-ring-color: var(--primary-color) !important; }
@@ -400,6 +435,21 @@
 .bg-gray-100 { background-color: color-mix(in srgb, var(--text-color) 6%, var(--background-color)) !important; }
 .border-gray-100, .border-gray-200, .border-gray-300 { border-color: var(--border-color) !important; }
 .text-gray-500, .text-gray-600 { color: var(--muted-color) !important; }
+/* gray-400 as TEXT is 2.6:1 on white and fails WCAG 2.1 AA, and it was the
+   admin's hint and section-label colour on every screen — so on a light surface
+   it becomes the muted colour too. NOT on the dark footer, where gray-400 on
+   gray-900 is 7:1 and correct as it is: a remap that ignores the surface
+   under it trades one contrast failure for another.
+
+   In Tailwind's utilities layer, with no !important and the same specificity
+   as `.text-gray-400` itself (the :where() adds nothing). Later in the layer,
+   so it replaces the plain utility; but `hover:text-red-600` and
+   `group-hover:…` are more specific and still win. As an unlayered
+   !important rule it beat them too, and every delete button stopped turning
+   red on hover — the one warning that it deletes something. */
+@layer utilities {
+  .text-gray-400:where(:not(.bg-gray-800 *, .bg-gray-900 *)) { color: var(--muted-color); }
+}
 .text-gray-700, .text-gray-800, .text-gray-900 { color: var(--text-color) !important; }
 
 /* Gradient washes were fixed blue→purple, so every preset still looked blue
@@ -685,6 +735,7 @@
   [dir="rtl"] .mr-4 { margin-right: 0; margin-left: 1rem; }
   [dir="rtl"] .pl-10 { padding-left: 0; padding-right: 2.5rem; }
   [dir="rtl"] .pl-12 { padding-left: 0; padding-right: 3rem; }
+  [dir="rtl"] .pl-2 { padding-left: 0; padding-right: 0.5rem; }
   [dir="rtl"] .pl-3 { padding-left: 0; padding-right: 0.75rem; }
   [dir="rtl"] .pl-4 { padding-left: 0; padding-right: 1rem; }
   [dir="rtl"] .pl-5 { padding-left: 0; padding-right: 1.25rem; }

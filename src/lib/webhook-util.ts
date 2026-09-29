@@ -12,11 +12,13 @@ export const WEBHOOK_EVENTS = [
   'content.created',
   'content.updated',
   'content.deleted',
+  // A stranger submitting a public form (`writable: 'public'`). Separate from
+  // content.created so a "rebuild the site on publish" hook can leave it out.
+  'content.submitted',
   'product.created',
   'product.updated',
   'product.deleted',
   'order.created',
-  'order.updated',
   'order.status_changed',
   'customer.created',
   /**

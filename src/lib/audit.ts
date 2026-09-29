@@ -82,6 +82,12 @@ export const AUDIT = {
   PRODUCT_CREATE: 'product.create',
   PRODUCT_UPDATE: 'product.update',
   PRODUCT_DELETE: 'product.delete',
+  PRODUCT_BULK_EDIT: 'product.bulk_edit',
+  // A category move or delete changes what every storefront menu and filter
+  // shows, and a delete untags products — worth a line in the log.
+  PRODUCT_CATEGORY_CREATE: 'product_category.create',
+  PRODUCT_CATEGORY_UPDATE: 'product_category.update',
+  PRODUCT_CATEGORY_DELETE: 'product_category.delete',
   /** Value matches what is already stored — renaming it would orphan history. */
   ORDER_STATUS: 'order.status_changed',
   /** An operator sent money back through the provider. */

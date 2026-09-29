@@ -1,0 +1,116 @@
+---
+import '../styles/shop.css';
+import { siteMenu, shopCurrency, type MenuItem } from '../lib/cms';
+
+interface Props {
+  title: string;
+  description?: string;
+  /** Keep this page out of search results (cart, checkout, order pages). */
+  noindex?: boolean;
+}
+const { title, description, noindex = false } = Astro.props;
+const SHOP_NAME = import.meta.env.PUBLIC_SHOP_NAME || 'Shop';
+const path = Astro.url.pathname.replace(/\/+$/, '') || '/';
+
+/*
+ * The CMS's own menu when the operator has set one (Site → Navigation), so the
+ * storefront and the CMS agree without a redeploy of this code. Otherwise the
+ * links a shop needs. Internal CMS links are paths on THIS site — edit the menu
+ * with the storefront's pages in mind.
+ */
+const fromCms: MenuItem[] = await siteMenu();
+const currency = await shopCurrency();
+const fallback = [
+  { label: 'Shop', href: '/shop/' },
+  { label: 'Blog', href: '/blog/' },
+];
+type Link = { label: string; href: string; newTab: boolean; children: Link[] };
+const toLink = (i: MenuItem): Link => ({ label: i.label, href: i.href, newTab: i.newTab, children: (i.children ?? []).map(toLink) });
+const items: Link[] = fromCms.length
+  ? fromCms.map(toLink)
+  : fallback.map((i) => ({ ...i, newTab: false, children: [] }));
+const isCurrent = (href: string) => {
+  const h = href.replace(/\/+$/, '') || '/';
+  return h === path || (h !== '/' && path.startsWith(`${h}/`));
+};
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title === SHOP_NAME ? title : `${title} · ${SHOP_NAME}`}</title>
+    {description && <meta name="description" content={description} />}
+    {noindex && <meta name="robots" content="noindex" />}
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="masthead">
+      <div class="wrap">
+        <a class="brand" href="/">{SHOP_NAME}</a>
+        <nav aria-label="Main">
+          <ul class="menu">
+            {items.map((i) => (
+              <li class="menu-item">
+                <a
+                  href={i.href}
+                  aria-current={isCurrent(i.href) ? 'page' : undefined}
+                  {...(i.newTab ? { target: '_blank', rel: 'noopener' } : {})}
+                >{i.label}{i.newTab && <span class="visually-hidden"> (opens in a new tab)</span>}</a>
+                {i.children.length > 0 && (
+                  <ul class="submenu">
+                    {i.children.map((c) => (
+                      <li>
+                        <a
+                          href={c.href}
+                          aria-current={isCurrent(c.href) ? 'page' : undefined}
+                          {...(c.newTab ? { target: '_blank', rel: 'noopener' } : {})}
+                        >{c.label}{c.newTab && <span class="visually-hidden"> (opens in a new tab)</span>}</a>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ul>
+        </nav>
+        <form class="site-search" role="search" action="/search/" method="get" data-search data-currency={currency}>
+          <label for="site-q" class="visually-hidden">Search the shop</label>
+          <input id="site-q" type="search" name="q" placeholder="Search the shop…" autocomplete="off" />
+          <ul id="site-suggest" role="listbox" aria-label="Suggestions" class="suggest" hidden></ul>
+          <p class="visually-hidden" role="status" aria-live="polite"></p>
+        </form>
+        <a class="cart-link" href="/cart/" aria-current={path === '/cart' ? 'page' : undefined}>
+          Cart <span class="badge" data-cart-count aria-label="0 items">0</span>
+        </a>
+      </div>
+    </header>
+    <main id="main" tabindex="-1" class="wrap">
+      <slot />
+    </main>
+    <footer class="footer">
+      <div class="wrap">
+        <span>© {new Date().getFullYear()} {SHOP_NAME}</span>
+        <span>Powered by <a href="https://astrobaas.com">AstroBaaS</a></span>
+      </div>
+    </footer>
+    <script>
+      import { readCart, cartCount, browserStorage } from '../lib/cart';
+      import { mountSearchBox } from '../scripts/search-box';
+      const search = document.querySelector<HTMLElement>('[data-search]');
+      if (search) mountSearchBox(search, search.dataset.currency || 'EUR');
+      // The header badge. Kept in step across tabs by the `storage` event.
+      const paint = () => {
+        const n = cartCount(readCart(browserStorage()));
+        for (const el of document.querySelectorAll<HTMLElement>('[data-cart-count]')) {
+          el.textContent = String(n);
+          el.setAttribute('aria-label', n === 1 ? '1 item' : `${n} items`);
+        }
+      };
+      paint();
+      window.addEventListener('storage', paint);
+      document.addEventListener('cart:changed', paint);
+    </script>
+  </body>
+</html>

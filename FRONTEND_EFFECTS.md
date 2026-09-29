@@ -55,9 +55,10 @@ CSP_ALLOW_WASM=1                           # draco/basis/physics WASM
 ```
 
 `worker-src 'self' blob:` is already on by default (OffscreenCanvas, draco
-workers). Use `CSP_REPORT_ONLY=1` while tuning so violations are logged, not
-blocked. Bundling libraries through Vite (npm import) instead of a CDN needs no
-CSP change at all — that's the simplest path.
+workers). These variables are read when the site is built, so rebuild after
+changing them. While tuning, the browser console names every blocked request
+and the directive that blocked it. Bundling libraries through Vite (npm import)
+instead of a CDN needs no CSP change at all — that's the simplest path.
 
 ## Accessibility & performance
 

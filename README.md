@@ -145,13 +145,15 @@ publishes absolute URLs so a frontend on another host resolves images against
 the CMS.
 
 **Commerce, in the core and off by default.** Products, brands, categories,
-orders and customers, with server-side pricing in integer cents and atomic stock
-reservation, so concurrent checkouts cannot oversell the last unit. A fresh
+orders and customers, with categories nested up to five levels (browsing a
+category includes its subcategories), server-side pricing in integer cents and
+atomic stock reservation, so concurrent checkouts cannot oversell the last unit. A fresh
 install is not a shop: the master switch starts off and the admin has no Shop
 section until you turn it on. See [COMMERCE.md](./COMMERCE.md).
 
-**Payments.** Stripe, PayPal and Klarna, plus bank transfer and cash on
-delivery — hosted checkout only, so card data never touches your server and a
+**Payments — free, in the core.** Stripe, PayPal and Klarna ship in the GPL
+core at no cost, alongside bank transfer and cash on delivery; none of them is a
+paid add-on. Hosted checkout only, so card data never touches your server and a
 self-hosted install stays outside PCI scope. The buyer gets a receipt at a
 signed URL, as a page and as a downloadable PDF. Webhooks are signature- or
 fetch-back-verified with no bypass, and a verified event still has to match the
@@ -167,7 +169,19 @@ message has gone. See [Email](#email) and [docs/EMAIL.md](./docs/EMAIL.md).
 theme can also replace templates — `Header`, `Footer`, `Home`, `PostCard`,
 `PostArticle`, `PageArticle`, `Sidebar`, `Breadcrumbs`, `TableOfContents` — and
 inherits the default for every slot it doesn't override, so adding a slot never
-breaks an existing theme. See [THEME_DEVELOPMENT.md](./THEME_DEVELOPMENT.md).
+breaks an existing theme. The site menu is edited in the admin (**Site →
+Navigation**), with one level of submenu and a label per language, and every
+theme's header renders it. See [THEME_DEVELOPMENT.md](./THEME_DEVELOPMENT.md).
+
+**Accessibility, checked on every build.** The end-to-end suite runs axe-core
+against WCAG 2.1 A and AA on the public pages and the main admin screens, and a
+serious or critical finding fails the build. Every page opens with a
+skip-to-content link, the menus work by keyboard and mark the current page, and
+the default palette passes AA contrast. Automated checks find some failures and
+not others — they cannot judge whether alt text is accurate or a flow makes sense
+with a screen reader — so this is a floor that stops regressions, **not a
+conformance claim**. If your shop falls under the European Accessibility Act,
+your own theme, content and an audit are still yours to do.
 
 **Plugins.** 23 filter and action hooks across content, commerce, search,
 crawler policy and payments, with persisted activation, error isolation, a
@@ -255,15 +269,22 @@ of good behaviour:
 - **Nothing here refuses to run.** There is no licence check anywhere in this
   codebase.
 
-**Commerce is not one of these.** It is core and stays core — 42 of the 131
-methods on the `Storage` interface are commerce, and splitting it would buy an
-abstraction nobody needs. The full reasoning is in
+**Commerce is not one of these, and neither are the payment gateways.** Stripe,
+PayPal and Klarna ship free in the core. Commerce is core and stays core — 42 of
+the 131 methods on the `Storage` interface are commerce, and splitting it would
+buy an abstraction nobody needs. The full reasoning is in
 [LICENSING.md](./LICENSING.md).
 
 ## Use it as a backend
 
 > Full walkthrough: **[INTEGRATION.md](./INTEGRATION.md)** — keys, CORS, SDK,
 > webhooks, MCP, CLI.
+
+**Selling from a separate frontend?** Start from
+[`examples/storefront`](./examples/storefront): a static Astro shop — catalogue
+with nested categories, cart, checkout with every payment method the CMS
+offers, order confirmation and blog — that needs no API key, computes no
+prices, and ships with a strict Content-Security-Policy.
 
 Mint an API key in the admin (or `POST /api/keys`), then from any origin:
 
@@ -354,7 +375,7 @@ means "installable there".
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `AUTH_SECRET` | HMAC key for session cookies. **≥ 16 chars.** | A dev-only insecure value (warns) |
-| `NODE_ENV` | When `production`, a missing `AUTH_SECRET` is fatal. | unset |
+| `NODE_ENV` | Not needed for a deployment: a production build (`npm run build`) already runs as production, where a missing or placeholder `AUTH_SECRET` is fatal and the seeded `admin` password is refused. Setting `production` makes a dev server behave the same way. | unset |
 
 ### Optional
 

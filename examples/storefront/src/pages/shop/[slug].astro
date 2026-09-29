@@ -1,0 +1,44 @@
+---
+/*
+ * One page per category. Its products include every subcategory's — the CMS
+ * expands `?category=` down the tree, so "Clothing" shows the shirts too.
+ */
+import Shop from '../../layouts/Shop.astro';
+import ProductCard from '../../components/ProductCard.astro';
+import CategoryTree from '../../components/CategoryTree.astro';
+import { allCategories, productsIn, shopCurrency, listed, type ProductCategory } from '../../lib/cms';
+import { buildTree, pathTo } from '../../lib/categories';
+
+export async function getStaticPaths() {
+  const categories = await allCategories();
+  return categories.map((c) => ({ params: { slug: c.slug }, props: { category: c } }));
+}
+
+interface Props { category: ProductCategory }
+const { category } = Astro.props;
+const [categories, products, currency] = await Promise.all([allCategories(), productsIn(category.slug), shopCurrency()]);
+const shown = products.filter(listed);
+const trail = pathTo(category.slug, categories);
+---
+<Shop title={category.name} description={`${category.name} — ${shown.length} products.`}>
+  <nav class="crumbs" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="/shop/">Shop</a></li>
+      {trail.map((c) => c.slug === category.slug
+        ? <li><span aria-current="page">{c.name}</span></li>
+        : <li><a href={`/shop/${c.slug}/`}>{c.name}</a></li>)}
+    </ol>
+  </nav>
+  <h1>{category.name}</h1>
+  <div class="shop">
+    <nav class="cats" aria-label="Categories">
+      <CategoryTree nodes={buildTree(categories)} current={category.slug} />
+    </nav>
+    <section aria-label="Products">
+      <p class="muted">{shown.length === 1 ? '1 product' : `${shown.length} products`}</p>
+      {shown.length
+        ? <ul class="grid">{shown.map((p) => <ProductCard product={p} currency={currency} />)}</ul>
+        : <p class="muted">Nothing in this category yet.</p>}
+    </section>
+  </div>
+</Shop>

@@ -254,10 +254,14 @@ function loginRateCheck(ip: string, email: string): Promise<boolean> {
  * "why is your shop endpoint reachable on non-shops?".
  */
 const COMMERCE_API =
-  /^\/api\/(products|product-categories|brands|coupons|customers|orders|shipping-methods|payments|commerce)(\/|$)/;
+  /^\/api\/(products|product-categories|product-bulk|brands|coupons|customers|orders|shipping-methods|payments|commerce)(\/|$)/;
 
 /** Paths the public can read without a session. */
 const PUBLIC_API_GET = [
+  // The site menu. As public as the header it renders in on every page; a
+  // headless storefront needs it to draw its own. Exact path, so it cannot
+  // widen anything that might later sit under /api/navigation/.
+  /^\/api\/navigation\/?$/,
   // The form SCHEMA for one type, and only when that type accepts public
   // writes — the route itself enforces that and 404s otherwise. Public because
   // the form builder is useless to a headless storefront without it: the
@@ -290,6 +294,8 @@ const PUBLIC_API_GET = [
   // them does not. Only the admin UI ever called this.
   // /^\/api\/media\/get$/,
   /^\/api\/search\/?$/,
+  // Search suggestions: the same public data as search, a few titles at a time.
+  /^\/api\/search\/suggest\/?$/,
   // Completing a newsletter double opt-in. Opened from a mail client by
   // clicking a link, so there is no session by definition and none to protect:
   // the signed, expiring, single-purpose token IS the authorisation, exactly as

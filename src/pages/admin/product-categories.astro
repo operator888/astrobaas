@@ -1,0 +1,252 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { MAX_CATEGORY_DEPTH } from '../../lib/commerce/category-tree';
+
+/**
+ * Product categories — the screen that did not exist.
+ *
+ * Categories could be created through the API or a WooCommerce import, and no
+ * other way. The product form said "create them under Categories first" and
+ * linked to /admin/categories, which manages BLOG categories — so a manager
+ * who followed the admin's own instruction ended up back at an empty list.
+ * Nothing could rename a category, move it under another, or delete it: the
+ * storage layer supported all three and no route exposed them.
+ *
+ * ## What it does, and what it deliberately does not
+ *
+ * Create, rename, move under a parent, reorder, delete. The SLUG is shown and
+ * never edited — products are filed under it, so changing it would empty the
+ * category of every product in it (see the note in
+ * src/pages/api/product-categories/[id].ts).
+ *
+ * The parent picker offers only choices the server would accept: never the
+ * category itself or anything inside it (a loop). It computes that with the
+ * same module the server uses, so the two cannot disagree.
+ */
+---
+
+<AdminLayout title="Product categories">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8" id="pc-root" data-max-depth={MAX_CATEGORY_DEPTH}>
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">Product categories</h1>
+    <p class="text-sm text-gray-600 mb-6 max-w-2xl">
+      Group your products for the shop's menus and filters. Put a category inside another to make a
+      subcategory — browsing a category shows the products in all of its subcategories too.
+    </p>
+
+    <p id="pc-off" class="hidden rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" role="status">
+      Commerce is switched off, so there are no product categories to manage. Turn it on in
+      <a href="/admin/settings" class="underline">Settings</a>.
+    </p>
+
+    <form id="pc-create" class="mb-8 grid gap-4 rounded-xl border border-gray-200 bg-white p-6 md:grid-cols-4">
+      <div class="md:col-span-2">
+        <label for="pc-name" class="mb-1 block text-sm font-medium text-gray-700">Name</label>
+        <input id="pc-name" required maxlength="120" class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm" />
+      </div>
+      <div>
+        <label for="pc-slug" class="mb-1 block text-sm font-medium text-gray-700">
+          Slug <span class="font-normal text-gray-500">(optional)</span>
+        </label>
+        <input id="pc-slug" maxlength="120" pattern="[a-z0-9-]+" placeholder="from the name"
+          aria-describedby="pc-slug-help"
+          class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm font-mono" />
+        <p id="pc-slug-help" class="mt-1 text-xs text-gray-500">Lowercase letters, digits and dashes. Fixed once created.</p>
+      </div>
+      <div>
+        <label for="pc-parent" class="mb-1 block text-sm font-medium text-gray-700">Inside</label>
+        <select id="pc-parent" class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"></select>
+      </div>
+      <div class="md:col-span-4">
+        <button type="submit" class="rounded-lg bg-blue-600 px-5 py-2 text-sm font-semibold text-white hover:bg-blue-700">
+          Add category
+        </button>
+      </div>
+    </form>
+
+    <p id="pc-status" class="mb-4 min-h-[1.25rem] text-sm text-gray-700" role="status" aria-live="polite"></p>
+
+    <div class="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+      <table class="min-w-full divide-y divide-gray-200 text-sm">
+        <caption class="sr-only">Product categories, parents before their subcategories</caption>
+        <thead class="bg-gray-50">
+          <tr>
+            <th scope="col" class="px-4 py-3 text-left font-medium text-gray-700">Name</th>
+            <th scope="col" class="px-4 py-3 text-left font-medium text-gray-700">Slug</th>
+            <th scope="col" class="px-4 py-3 text-left font-medium text-gray-700">Inside</th>
+            <th scope="col" class="px-4 py-3 text-left font-medium text-gray-700">Order</th>
+            <th scope="col" class="px-4 py-3 text-right font-medium text-gray-700">Products</th>
+            <th scope="col" class="px-4 py-3 text-right font-medium text-gray-700"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody id="pc-rows" class="divide-y divide-gray-100"></tbody>
+      </table>
+      <p id="pc-empty" class="hidden p-6 text-sm text-gray-600">No categories yet. Add the first one above.</p>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  import { flattenTree, descendantSlugs, categoryDepth } from '../../lib/commerce/category-tree';
+
+  type Cat = {
+    id: string;
+    name: string;
+    slug: string;
+    parent_slug: string | null;
+    position: number;
+    product_count: number;
+    product_count_total?: number;
+  };
+
+  const root = document.getElementById('pc-root') as HTMLElement;
+  const rows = document.getElementById('pc-rows') as HTMLTableSectionElement;
+  const status = document.getElementById('pc-status') as HTMLElement;
+  const createParent = document.getElementById('pc-parent') as HTMLSelectElement;
+  const maxDepth = Number(root.dataset.maxDepth) || 5;
+  let cats: Cat[] = [];
+
+  const csrf = () =>
+    (window as any).__ASTROBAAS__?.csrf
+    || document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+    || '';
+
+  async function api(path: string, method = 'GET', body?: unknown) {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (method !== 'GET') {
+      headers['Content-Type'] = 'application/json';
+      headers['X-CSRF-Token'] = csrf();
+    }
+    const res = await fetch(path, { method, headers, credentials: 'same-origin', body: body === undefined ? undefined : JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, json };
+  }
+
+  function say(text: string, tone: 'ok' | 'error' | 'info' = 'info') {
+    status.textContent = text;
+    status.className = 'mb-4 min-h-[1.25rem] text-sm ' + (tone === 'error' ? 'text-red-700' : tone === 'ok' ? 'text-green-700' : 'text-gray-700');
+  }
+
+  function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Record<string, any> = {}, ...kids: (Node | string)[]) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (k === 'class') node.className = v;
+      else if (k.startsWith('aria-') || k.startsWith('data-') || k === 'for') node.setAttribute(k, String(v));
+      else (node as any)[k] = v;
+    }
+    for (const kid of kids) node.append(kid); // names are operator text: appended as text, never parsed
+    return node;
+  }
+
+  /**
+   * Parent options for `self` (or for a new category when `self` is null):
+   * top level, then every category that is neither `self` nor inside it, and
+   * that would not push the tree past the depth limit.
+   */
+  function parentOptions(select: HTMLSelectElement, self: Cat | null) {
+    const excluded = self ? descendantSlugs(self.slug, cats) : new Set<string>();
+    select.replaceChildren(el('option', { value: '' }, '— Top level —'));
+    for (const { cat, depth } of flattenTree(cats)) {
+      if (excluded.has(cat.slug)) continue;
+      if (categoryDepth(cat.slug, cats) >= maxDepth) continue;
+      select.append(el('option', { value: cat.slug, selected: self?.parent_slug === cat.slug }, `${'— '.repeat(depth)}${cat.name}`));
+    }
+  }
+
+  function render(focusId?: string) {
+    const tree = flattenTree(cats);
+    rows.replaceChildren(...tree.map(({ cat, depth }) => {
+      const nameId = `pc-n-${cat.id}`;
+      const parentId = `pc-p-${cat.id}`;
+      const posId = `pc-o-${cat.id}`;
+      const parent = el('select', { id: parentId, class: 'w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm', 'data-field': 'parent' });
+      parentOptions(parent as HTMLSelectElement, cat);
+      const total = cat.product_count_total ?? cat.product_count;
+      const tr = el('tr', { 'data-id': cat.id },
+        el('td', { class: 'px-4 py-3' },
+          el('div', { class: 'flex items-center gap-2' },
+            el('span', { class: 'text-gray-400', 'aria-hidden': 'true' }, '— '.repeat(depth)),
+            el('label', { for: nameId, class: 'sr-only' }, `Name of ${cat.name}`),
+            el('input', { id: nameId, value: cat.name, maxLength: 120, class: 'w-full min-w-[10rem] rounded-md border border-gray-300 px-2 py-1.5 text-sm', 'data-field': 'name' }),
+          ),
+        ),
+        el('td', { class: 'px-4 py-3 font-mono text-xs text-gray-600' }, cat.slug),
+        el('td', { class: 'px-4 py-3' },
+          el('label', { for: parentId, class: 'sr-only' }, `Put ${cat.name} inside`),
+          parent,
+        ),
+        el('td', { class: 'px-4 py-3' },
+          el('label', { for: posId, class: 'sr-only' }, `Order of ${cat.name}`),
+          el('input', { id: posId, type: 'number', value: String(cat.position ?? 0), step: '1', class: 'w-20 rounded-md border border-gray-300 px-2 py-1.5 text-sm', 'data-field': 'position' }),
+        ),
+        el('td', { class: 'px-4 py-3 text-right tabular-nums text-gray-700' },
+          total === cat.product_count ? String(total) : `${total} (${cat.product_count} directly)`),
+        el('td', { class: 'px-4 py-3 text-right whitespace-nowrap' },
+          el('button', { type: 'button', 'data-action': 'save', 'aria-label': `Save ${cat.name}`, class: 'rounded border border-gray-300 bg-white px-3 py-1 text-xs text-gray-800 hover:bg-gray-50' }, 'Save'),
+          ' ',
+          el('button', { type: 'button', 'data-action': 'delete', 'aria-label': `Delete ${cat.name}`, class: 'rounded px-3 py-1 text-xs text-red-700 hover:bg-red-50' }, 'Delete'),
+        ),
+      );
+      return tr;
+    }));
+    (document.getElementById('pc-empty') as HTMLElement).classList.toggle('hidden', cats.length > 0);
+    parentOptions(createParent, null);
+    if (focusId) rows.querySelector<HTMLElement>(`tr[data-id="${focusId}"] [data-field="name"]`)?.focus();
+  }
+
+  async function load() {
+    const { ok, status: code, json } = await api('/api/product-categories');
+    if (!ok) {
+      // Commerce off: the catalogue routes answer 404 by design.
+      if (code === 404) {
+        document.getElementById('pc-off')!.classList.remove('hidden');
+        document.getElementById('pc-create')!.classList.add('hidden');
+      } else say('Could not load the categories.', 'error');
+      return;
+    }
+    cats = Array.isArray(json?.data) ? json.data : [];
+    render();
+  }
+
+  rows.addEventListener('click', async (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-action]');
+    if (!b) return;
+    const tr = b.closest('tr')!;
+    const id = tr.dataset.id!;
+    const cat = cats.find((c) => c.id === id);
+    if (!cat) return;
+
+    if (b.dataset.action === 'save') {
+      const name = (tr.querySelector('[data-field="name"]') as HTMLInputElement).value.trim();
+      const parent = (tr.querySelector('[data-field="parent"]') as HTMLSelectElement).value || null;
+      const position = Number((tr.querySelector('[data-field="position"]') as HTMLInputElement).value) || 0;
+      const { ok, json } = await api(`/api/product-categories/${encodeURIComponent(id)}`, 'PUT', { name, parent_slug: parent, position });
+      if (!ok) { say(json?.error?.message || 'Could not save.', 'error'); return; }
+      say(`Saved ${name}.`, 'ok');
+      await load();
+      render(id);
+    } else if (b.dataset.action === 'delete') {
+      if (!window.confirm(`Delete "${cat.name}"? Products in it are not deleted — they just leave this category.`)) return;
+      const { ok, json } = await api(`/api/product-categories/${encodeURIComponent(id)}`, 'DELETE');
+      if (!ok) { say(json?.error?.message || 'Could not delete.', 'error'); return; }
+      say(json?.message || 'Deleted.', 'ok');
+      await load();
+    }
+  });
+
+  document.getElementById('pc-create')!.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = (document.getElementById('pc-name') as HTMLInputElement).value.trim();
+    const slug = (document.getElementById('pc-slug') as HTMLInputElement).value.trim();
+    const parent = createParent.value;
+    const { ok, json } = await api('/api/product-categories', 'POST', {
+      name, ...(slug ? { slug } : {}), ...(parent ? { parent_slug: parent } : {}),
+    });
+    if (!ok) { say(json?.error?.message || 'Could not add the category.', 'error'); return; }
+    (document.getElementById('pc-create') as HTMLFormElement).reset();
+    say(`Added ${name}.`, 'ok');
+    await load();
+    (document.getElementById('pc-name') as HTMLInputElement).focus();
+  });
+
+  load();
+</script>

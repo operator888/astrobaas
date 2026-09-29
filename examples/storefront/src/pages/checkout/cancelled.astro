@@ -1,0 +1,17 @@
+---
+/* Where a payment provider sends a buyer who backed out: `<Site URL>/checkout/cancelled?order=…`. */
+import Shop from '../../layouts/Shop.astro';
+---
+<Shop title="Payment not completed" noindex>
+  <h1>Payment not completed</h1>
+  <p>Nothing was charged. Your order is held for a while in case you want to finish paying.</p>
+  <p data-retry hidden><a class="btn" href="/order/placed/">Try paying again</a></p>
+  <p><a href="/cart/">Back to the cart</a> · <a href="/shop/">Continue shopping</a></p>
+</Shop>
+
+<script>
+  import { readLastOrder } from '../../scripts/last-order';
+  // "Try again" only when this tab placed the order and can pay for it.
+  const o = readLastOrder();
+  if (o?.online && o.provider && o.email) document.querySelector<HTMLElement>('[data-retry]')!.hidden = false;
+</script>

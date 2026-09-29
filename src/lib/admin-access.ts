@@ -57,12 +57,19 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
   { href: '/admin/categories', prefix: '/admin/categories', label: 'Categories', roles: ['admin', 'editor', 'author', 'manager'] },
   { href: '/admin/media', prefix: '/admin/media', label: 'Media', roles: STAFF },
   { href: '/admin/products', prefix: '/admin/products', label: 'Products', roles: ['admin', 'editor', 'manager'] },
+  // Same three as Products: categories are catalogue structure, and the API
+  // behind this screen checks the same capability (manage_catalog).
+  { href: '/admin/product-categories', prefix: '/admin/product-categories', label: 'Product categories', roles: ['admin', 'editor', 'manager'] },
   // Read-only for a manager; the API refuses the writes (order status, refunds,
   // customer records) regardless of the page being reachable.
   { href: '/admin/orders', prefix: '/admin/orders', label: 'Orders', roles: ['admin', 'manager'] },
   { href: '/admin/customers', prefix: '/admin/customers', label: 'Customers', roles: ['admin', 'manager'] },
   { href: '/admin/messages', prefix: '/admin/messages', label: 'Messages', roles: ['admin'] },
   { href: '/admin/themes', prefix: '/admin/themes', label: 'Themes', roles: ['admin'] },
+  // Admin only, because the menu is saved through the settings endpoint and
+  // that endpoint is admin only — the door matches the room. It is also the
+  // WordPress default: editing menus there needs edit_theme_options.
+  { href: '/admin/navigation', prefix: '/admin/navigation', label: 'Navigation', roles: ['admin'] },
   { href: '/admin/plugins', prefix: '/admin/plugins', label: 'Plugins', roles: ['admin'] },
   { href: '/admin/users', prefix: '/admin/users', label: 'Users', roles: ['admin'] },
   { href: '/admin/api-keys', prefix: '/admin/api-keys', label: 'API Keys', roles: ['admin'] },

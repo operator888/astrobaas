@@ -349,7 +349,8 @@ const emailTransport = emailChannelLabel();
           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
         <p class="text-xs text-gray-500 mt-1">
           The web address your uploaded images are served from — set this if your shop runs on a
-          different domain than this CMS, or its product photos will not load.
+          different domain than this CMS, or its product photos will not load. Receipt links in
+          order emails point here too, because the receipt page is served by this CMS.
         </p>
       </div>
 
@@ -1827,9 +1828,11 @@ const emailTransport = emailChannelLabel();
     name.placeholder = 'field_name';
     name.value = f.name ?? '';
     name.className = 'sg-fname px-2 py-1 border border-gray-300 rounded w-36 text-sm';
+    name.setAttribute('aria-label', 'Field name');
 
     const type = document.createElement('select');
     type.className = 'sg-ftype px-2 py-1 border border-gray-300 rounded text-sm';
+    type.setAttribute('aria-label', 'Field type');
     for (const [v, label] of SG_FIELD_TYPES) {
       const o = document.createElement('option');
       o.value = v; o.textContent = label;
@@ -2125,6 +2128,7 @@ const emailTransport = emailChannelLabel();
         choice.className = 'py-2 text-right';
         const sel = document.createElement('select');
         sel.className = 'px-2 py-1 border border-gray-300 rounded text-sm';
+        sel.setAttribute('aria-label', `${c.label} — what robots.txt tells it`);
         for (const [val, label] of [['default', 'Default'], ['allow', 'Allow'], ['disallow', 'Block']]) {
           const o = document.createElement('option');
           o.value = val; o.textContent = label;

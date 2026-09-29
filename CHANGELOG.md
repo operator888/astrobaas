@@ -6,6 +6,212 @@ semver yet because the API surface is pre-alpha.
 
 ## [Unreleased]
 
+### Bulk product edit
+
+Tick products in the admin's product list, choose one change, **Preview**,
+then **Apply**. The changes available:
+
+- status, and featured;
+- add to or remove from a category;
+- add or remove a tag;
+- price: set it, or change it by a percentage or an amount;
+- sale: a percentage off, or end the sale;
+- stock.
+
+The API is `POST /api/product-bulk`.
+
+- **It always previews first.** The server reports, product by product, what
+  will change or why the product is skipped. Nothing is written until
+  `apply: true`.
+- **It is N ordinary edits.** Each product is saved through `saveProduct`, so
+  validation, after-save hooks, `product.updated` webhooks, price history and
+  the audit log all see it. One `product.bulk_edit` audit entry records the
+  batch.
+- **Money is careful:**
+  - Prices change on the *regular* price, in integer minor units, and never go
+    below zero. A percentage rounds half away from zero.
+  - The effective price and the sale state are re-derived as for any edit, so a
+    product on sale stays on sale.
+  - Variants with their own prices move with a percentage or amount change.
+  - A flat "set to X" is refused for those products rather than flattening
+    their different variant prices into one.
+- **It skips rather than guesses.** A product is skipped, with the reason shown
+  in the preview, when:
+  - a change would make it free ("−20.00" does not zero everything under 20;
+    only an explicit "set 0" does);
+  - a product-level sale could not reach variants that have their own prices;
+  - a stock count is set on a product with variants.
+
+  "End the sale" ends variant sales too. Prices typed with a thousands
+  separator ("1,000") are refused rather than guessed at.
+- **It does not undo sales made while it runs.** Each save passes the stock it
+  read as a base, so a unit that a checkout sells mid-batch stays sold.
+  `tests/stock-race.test.mjs` D9 reproduces the oversell without bases.
+- It is bounded: at most 500 products, and percentages from −99.99% to +500%.
+  A category must exist. It is off while the shop is switched off. API keys
+  need `products:write`.
+
+### Search suggestions as you type
+
+`GET /api/search/suggest?q=` answers a few matching posts, pages, products and
+categories. It is public, cached, and ranked by the same code as search, so
+accents, case, Greek-matches-Latin and your synonyms all behave the same.
+
+- It suggests only what the visitor could open:
+  - published posts and pages that are not hidden from search;
+  - active products whose catalogue visibility is `visible` or `search`
+    (`catalog` and `hidden` are left out);
+  - categories, with their product counts.
+- Products and categories are suggested only while the shop is switched on.
+- **The site's search box suggests posts and pages** on every theme. It is an
+  ARIA 1.2 combobox: arrow keys, Enter and Escape work, the highlighted option
+  is announced, and a visible outline marks it. Without JavaScript it is the
+  plain search form it was before.
+- **The storefront starter's header suggests products and categories**, and
+  gains a `/search/` results page.
+- There is no typo tolerance: that belongs to the paid Advanced Search module,
+  which plugs into the same expander hook.
+- It has its own rate bucket: 40 per minute per address by default, set with
+  `RATE_LIMIT_SUGGEST_PER_MIN`, on top of the general anonymous limit.
+
+Also: the public category list and suggestions now share one product counter
+(`src/lib/commerce/category-counts.ts`), so their numbers cannot disagree.
+
+### `npm run dev` loads `.env`; docs that disagreed with the code
+
+- **`npm run dev` now reads `.env` (and `.env.local`).** It ran plain
+  `astro dev`, which leaves `process.env` empty, so the README's
+  `cp .env.example .env` step did nothing in development: `SITE_LOCALES` and the
+  rest were silently ignored. It now runs `scripts/dev.mjs`, which was written
+  for exactly this and never wired up. Variables set in the shell still win, and
+  arguments pass through (`npm run dev -- --port 5000`).
+- **Webhook events:** the published list offered `order.updated`, which nothing
+  sends, and left out `content.submitted`, which every public form submission
+  fires. Both are fixed, and `tests/webhook-events.test.mjs` compares the list
+  with every `fireEvent` call in both directions.
+- **Docs corrected to match the code:** `CSP_REPORT_ONLY` and `CSP_DISABLE` were
+  listed but never read (removed; `CSP_FRAME_SRC` and `CSP_CHILD_SRC`, which are
+  read, are now listed, and all `CSP_*` are noted as build-time); the seeded
+  password and the `AUTH_SECRET` check apply on any production build, not only
+  with `NODE_ENV=production` (README, UPGRADE U-6); backups are same-driver, not
+  lowdb-only (SECURITY.md); the SDK is on npm under `alpha` (INTEGRATION §4).
+
+### A storefront starter, and receipt links that work on headless shops
+
+**`examples/storefront`** is a complete shop front for an AstroBaaS backend,
+built with Astro as a static site. It has:
+
+- a home page and the catalogue;
+- category pages that include their subcategories, with a category tree;
+- product pages, with variants as a required choice;
+- a cart priced by the CMS on every open;
+- checkout with every payment method the CMS offers;
+- order confirmation with manual-payment instructions;
+- the return pages payment providers send buyers to;
+- the blog.
+
+It holds no API key and computes no prices, and every page carries a
+Content-Security-Policy with no `unsafe-inline`. A checkout pressed twice
+places one order: the idempotency key survives a reload. Products set to
+*search only* or *hidden* stay off the shelves but keep their pages.
+
+`examples/storefront/scripts/e2e.mjs` tests it end to end. It starts a CMS from
+this repository, builds the starter against it on a second origin, and has
+Chromium place an order by bank transfer. It also runs axe and watches for CSP
+violations on every page. `tests/storefront-starter.test.mjs` runs in the unit
+suite.
+
+**Fixed: receipt links on headless shops were 404s.**
+- Order-confirmation emails built the receipt link from Site URL.
+- A headless shop has to set Site URL to its storefront, because that is where
+  payment providers send buyers back. But `/receipt` is served by the CMS.
+- The link now uses **Address of this CMS** (Settings → General) when it is
+  set, and falls back to Site URL as before. The starter also forwards
+  `/receipt?token=…` to the CMS, for shops that have not set it.
+
+### Accessibility: WCAG 2.1 AA, checked in CI
+
+`tests/e2e/a11y.spec.ts` runs axe-core (WCAG 2.1 A and AA rules) against the
+built server on six public pages and nine admin screens; a **serious or
+critical** finding fails the build, and moderate or minor ones are printed.
+The first run found 15 of 15 pages failing. What was fixed:
+
+- **A skip link on every page.** The first Tab on any public or admin page now
+  lands on "Skip to content" (in the page's language), which moves focus to
+  `<main id="main-content">`. `BaseLayout` takes a `skipLabel` prop; only
+  a layout that renders that `<main>` may pass one.
+- **The default palette passes AA.** The default theme's primary, secondary and
+  accent were 3.67, 4.23 and 2.53:1 against white, so every primary button on a
+  fresh install failed. They are now `#2563EB`, `#7C3AED` and `#047857`
+  (5.17, 5.70 and 5.48:1), and the muted text colour is `#4B5563`.
+  **Existing sites keep the primary, secondary and accent they have stored**
+  — but not the muted colour: a theme that never stored one (the seeded
+  default and editorial do not) now renders hint and secondary text in
+  `#4B5563` instead of `#6B7280`, darker and within AA. To adopt the new
+  brand colours as well,
+  open Themes and apply the **Clean** preset (updated to match) or set the
+  colours by hand. The other seven presets are unchanged; four of them have
+  a colour below AA as text on their own surface — optical, boutique and bold
+  (accent), and soft (primary, accent and muted). A known follow-up.
+- `text-gray-400` — the admin's hint and section-label colour, 2.6:1 on white
+  — renders in the muted colour on light surfaces; the dark footer is unchanged.
+- Links inside running text are underlined, not marked by colour alone.
+- Names for every control that had none: the posts and users filters, the
+  select-all and per-row checkboxes, the order-status select, the crawler
+  policy selects, the Themes font pickers, the media-picker close button and the
+  article share links (which also gained `rel="noopener noreferrer"`).
+- **Removed:** the admin header's notifications bell. It had no handler and a
+  red "unread" dot that was always on.
+
+`tests/accessibility-static.test.mjs` holds the same rules for every file
+without a browser: the skip link has a target, the default palette's contrast
+is computed, and no `<button>` is an unnamed icon. This is a floor that stops
+regressions, not a conformance claim; README says so in the same words.
+
+Dev dependency added: `@axe-core/playwright` (MPL-2.0, test-only — not in the
+build or the npm package).
+
+### The site menu is edited in the admin
+
+Every bundled theme hard-coded Home, Blog, About and Contact in its Header, so
+adding "Shop" meant editing a theme and redeploying. **Site → Navigation**
+(`/admin/navigation`) now edits the menu: labels, links, one level of submenu,
+labels per language, and new-tab for links to other sites.
+
+- A link is **checked, not trusted**: only `/path`, `#anchor`, `http(s)://`,
+  `mailto:` and `tel:` are accepted, because the menu renders on every page and
+  a `javascript:` link there would be stored XSS site-wide. `//evil.example` is
+  refused too — a path to the eye, another origin to the browser.
+- **A site that never saves a menu is unchanged.** No menu means every theme
+  keeps its own links.
+- The menu is one setting, `navigation`, written through
+  `POST /api/settings/update` (admin only), which validates it.
+  `GET /api/navigation?locale=` serves it to headless storefronts.
+- Themes receive it as `HeaderProps.navigation` (`ResolvedNavItem[]`, exported
+  from `astrobaas/core`). The three bundled headers also gained a named
+  `<nav>`, `aria-current="page"`, submenus that open on keyboard focus, and a
+  mobile menu button with a name and `aria-expanded`.
+
+### Product categories you can manage, and browse as a tree
+
+- **There is a Product categories screen.** There was none: the product form
+  sent managers to *blog* categories, and no route could rename, move or
+  delete a product category at all. `PUT` and `DELETE
+  /api/product-categories/{id}` now exist.
+- **Behaviour change: `?category=` includes subcategories.** A shirt tagged
+  "shirts" now appears when browsing "clothing" — what every platform a
+  merchant has used before does. A storefront that relied on exact matching
+  will now see more products under a parent.
+- A parent is checked on create and on move: it must exist, a category cannot
+  sit inside its own subtree, and the tree is at most 5 levels deep. Before,
+  `parent_slug` was any string.
+- `GET /api/product-categories` adds `product_count_total`, counting every
+  subcategory; `product_count` keeps its meaning.
+- The slug is fixed once created, because products are filed under it.
+  Deleting a category untags its products and never deletes one; it is
+  refused while the category has subcategories.
+
+
 ## [0.1.4] — 2026-09-28
 
 ### `npx astrobaas create my-site` starts a new site

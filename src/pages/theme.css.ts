@@ -56,7 +56,7 @@ function lightTokens(settings: ThemeConfig): Record<string, string> {
     // Semantic colours. `onPrimary` is derived when unset so a light brand
     // colour never ends up with white text on it.
     '--surface-color': safe(c.surface) || '#ffffff',
-    '--muted-color': safe(c.muted) || '#6b7280',
+    '--muted-color': safe(c.muted) || '#4b5563',
     '--border-color': safe(c.border) || '#e5e7eb',
     '--on-primary': safe(c.onPrimary) || (/^#[0-9a-f]{6}$/i.test(primary) ? readableOn(primary) : '#ffffff'),
     '--success-color': safe(c.success) || '#059669',

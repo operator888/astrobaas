@@ -1638,6 +1638,181 @@ async function main() {
       ok('audit meta lists actors with display labels');
     } else fail('audit actor labels', JSON.stringify(ordered.meta?.actors)?.slice(0, 120));
 
+    // --- PRODUCT CATEGORIES: a tree that works, end to end ---------------
+    //
+    // Three things were broken and each is asked of a running server here:
+    // browsing a parent showed none of its subcategories' products; nothing
+    // checked a parent, so a typo or a loop went straight into the data; and no
+    // route could rename, move or delete a category at all. Self-contained:
+    // it makes its own categories and product, with unique slugs per run.
+    {
+      const H = {
+        Cookie: `${sessionCookie}; astrobaas_csrf=${csrfToken}`,
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': csrfToken,
+      };
+      const run = Date.now().toString(36);
+      const post = (body) => fetch(`${BASE}/api/product-categories`, { method: 'POST', headers: H, body: JSON.stringify(body) });
+      const put = (id, body) => fetch(`${BASE}/api/product-categories/${id}`, { method: 'PUT', headers: H, body: JSON.stringify(body) });
+      const del = (id) => fetch(`${BASE}/api/product-categories/${id}`, { method: 'DELETE', headers: H });
+      const idOf = async (res) => (await res.json().catch(() => null))?.data?.id;
+
+      const parentSlug = `clothing-${run}`;
+      const childSlug = `shirts-${run}`;
+      const parentId = await idOf(await post({ name: 'Clothing', slug: parentSlug }));
+      const childRes = await post({ name: 'Shirts', slug: childSlug, parent_slug: parentSlug });
+      const childId = await idOf(childRes);
+      if (parentId && childId) ok('categories: a subcategory is created under its parent');
+      else fail('category create', `parent=${parentId} child=${childId} status=${childRes.status}`);
+
+      const typo = await post({ name: 'Orphan', slug: `orphan-${run}`, parent_slug: `clohting-${run}` });
+      if (typo.status === 400) ok('categories: a parent that does not exist is refused');
+      else fail('category parent typo accepted', `status=${typo.status}`);
+
+      const blank = await post({ name: '   ', slug: `blank-${run}` });
+      if (blank.status === 400) ok('categories: a name of spaces is refused');
+      else fail('category blank name accepted', `status=${blank.status}`);
+
+      // A shirt tagged only "shirts" must appear when browsing "clothing".
+      const prodRes = await fetch(`${BASE}/api/products`, {
+        method: 'POST', headers: H,
+        body: JSON.stringify({ name: `Linen shirt ${run}`, slug: `linen-shirt-${run}`, price_cents: 4900, status: 'active', categories: [childSlug] }),
+      });
+      const prodId = (await prodRes.json().catch(() => null))?.data?.id;
+      const listed = await fetch(`${BASE}/api/products?category=${parentSlug}&limit=100`);
+      const listedJson = await listed.json().catch(() => ({}));
+      const found = (listedJson.data || []).some((p) => p.id === prodId);
+      if (prodId && found) ok('categories: browsing a parent includes its subcategories\' products');
+      else fail('descendant filter', `product=${prodId} in parent listing=${found} status=${listed.status}`);
+
+      // Bulk edit, through the real route and saveProduct.
+      if (prodId) {
+        const bulk = (body) => fetch(`${BASE}/api/product-bulk`, { method: 'POST', headers: H, body: JSON.stringify(body) });
+        const ops = { price: { mode: 'percent', value: 10 }, };
+        const prev = await bulk({ ids: [prodId], ops });
+        const prevJson = await prev.json().catch(() => null);
+        const afterPreview = (await (await fetch(`${BASE}/api/products/${prodId}`, { headers: H })).json().catch(() => null))?.data;
+        if (prev.status === 200 && prevJson?.data?.preview === true && prevJson.data.will_change === 1 && afterPreview?.price_cents === 4900) {
+          ok('bulk edit: a preview reports the change and changes nothing');
+        } else fail('bulk edit preview', `status=${prev.status} body=${JSON.stringify(prevJson?.data)} price=${afterPreview?.price_cents}`);
+
+        const applied = await bulk({ ids: [prodId], ops, apply: true });
+        const appliedJson = await applied.json().catch(() => null);
+        const after = (await (await fetch(`${BASE}/api/products/${prodId}`, { headers: H })).json().catch(() => null))?.data;
+        if (applied.status === 200 && appliedJson?.data?.updated === 1 && after?.price_cents === 5390 && after?.regular_price_cents === 5390) {
+          ok('bulk edit: applying raises the regular price and the effective price follows');
+        } else fail('bulk edit apply', `status=${applied.status} body=${JSON.stringify(appliedJson?.data)} price=${after?.price_cents}/${after?.regular_price_cents}`);
+
+        const anon = await fetch(`${BASE}/api/product-bulk`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [prodId], ops, apply: true }) });
+        if (anon.status === 401 || anon.status === 403) ok('bulk edit: refused without a staff session');
+        else fail('bulk edit anonymous', `status=${anon.status}`);
+
+        const ghost = await bulk({ ids: [prodId], ops: { addCategories: [`no-such-${run}`] } });
+        if (ghost.status === 400) ok('bulk edit: a category that does not exist is refused');
+        else fail('bulk edit unknown category', `status=${ghost.status}`);
+      }
+
+      const counted = await fetch(`${BASE}/api/product-categories`);
+      const parentRow = ((await counted.json().catch(() => ({}))).data || []).find((c) => c.slug === parentSlug);
+      if (parentRow && parentRow.product_count === 0 && parentRow.product_count_total >= 1) {
+        ok('categories: the list reports direct and total counts separately');
+      } else fail('category counts', JSON.stringify(parentRow));
+
+      if (parentId && childId) {
+        const loop = await put(parentId, { parent_slug: childSlug });
+        if (loop.status === 400) ok('categories: moving a parent into its own subcategory is refused');
+        else fail('category loop accepted', `status=${loop.status}`);
+
+        const slugChange = await put(parentId, { slug: `renamed-${run}` });
+        if (slugChange.status === 400) ok('categories: a slug cannot be changed once products are filed under it');
+        else fail('category slug change accepted', `status=${slugChange.status}`);
+
+        const rename = await put(parentId, { name: 'Clothes' });
+        const renamed = (await rename.json().catch(() => null))?.data?.name;
+        if (rename.status === 200 && renamed === 'Clothes') ok('categories: a category can be renamed');
+        else fail('category rename', `status=${rename.status} name=${renamed}`);
+
+        const anon = await fetch(`${BASE}/api/product-categories/${parentId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'x' }) });
+        if (anon.status === 401 || anon.status === 403) ok('categories: an anonymous edit is refused');
+        else fail('anonymous category edit', `status=${anon.status}`);
+
+        const blocked = await del(parentId);
+        if (blocked.status === 409) ok('categories: a category with subcategories cannot be deleted');
+        else fail('category delete with children', `status=${blocked.status}`);
+
+        const gone = await del(childId);
+        const goneJson = await gone.json().catch(() => ({}));
+        if (gone.status === 200 && goneJson?.data?.untagged === 1) ok('categories: deleting one untags its products and says how many');
+        else fail('category delete', `status=${gone.status} body=${JSON.stringify(goneJson).slice(0, 160)}`);
+
+        if (prodId) {
+          const after = await fetch(`${BASE}/api/products/${prodId}`, { headers: { Cookie: sessionCookie } });
+          const afterJson = await after.json().catch(() => ({}));
+          const cats = afterJson?.data?.categories ?? [];
+          if (after.status === 200 && !cats.includes(childSlug)) ok('categories: the product survives, without the deleted category');
+          else fail('product after category delete', `status=${after.status} categories=${JSON.stringify(cats)}`);
+        }
+        await del(parentId);
+      }
+    }
+
+    // --- NAVIGATION: the menu is edited in the admin and rendered live ------
+    //
+    // Unit tests pin the rules; only a running server shows the header really
+    // renders what was saved, and really goes back to the theme's own links
+    // when the menu is cleared — the promise that makes this safe to ship.
+    {
+      const H = {
+        Cookie: `${sessionCookie}; astrobaas_csrf=${csrfToken}`,
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': csrfToken,
+      };
+      const save = (navigation) => fetch(`${BASE}/api/settings/update`, { method: 'POST', headers: H, body: JSON.stringify({ navigation }) });
+      const marker = `Shop-${Date.now().toString(36)}`;
+
+      const bad = await save({ items: [{ label: 'Evil', href: 'javascript:alert(1)' }] });
+      const badJson = await bad.json().catch(() => ({}));
+      if (bad.status === 400 && /Item 1/.test(badJson?.error?.message || '')) ok('navigation: a javascript: link is refused, naming the item');
+      else fail('navigation javascript: accepted', `status=${bad.status} ${JSON.stringify(badJson).slice(0, 160)}`);
+
+      const good = await save({ items: [
+        { label: marker, href: '/shop-probe' },
+        { label: 'About', href: '/about' },
+        { label: 'Elsewhere', href: 'https://example.com', newTab: true },
+      ] });
+      if (good.status === 200) ok('navigation: a valid menu is saved');
+      else fail('navigation save', `status=${good.status}`);
+
+      const api = await fetch(`${BASE}/api/navigation`);
+      const apiJson = await api.json().catch(() => ({}));
+      const items = apiJson?.data?.items ?? [];
+      if (api.status === 200 && items[0]?.label === marker && items[2]?.newTab === true && items[2]?.external === true) {
+        ok('navigation: GET /api/navigation serves the menu publicly, resolved');
+      } else fail('navigation api', `status=${api.status} ${JSON.stringify(apiJson).slice(0, 200)}`);
+
+      const home = await (await fetch(`${BASE}/`)).text();
+      if (home.includes(marker) && home.includes('href="/shop-probe"')) ok('navigation: the public header renders the saved menu');
+      else fail('navigation not rendered', 'the saved item is not in the home page header');
+      if (/target="_blank"[^>]*rel="noopener"|rel="noopener"[^>]*target="_blank"/.test(home) && home.includes('opens in a new tab')) {
+        ok('navigation: a new-tab link carries rel=noopener and says so');
+      } else fail('navigation new tab', 'no rel=noopener or no announcement');
+
+      const about = await (await fetch(`${BASE}/about`)).text();
+      if (/href="\/about"[^>]*aria-current="page"|aria-current="page"[^>]*href="\/about"/.test(about)) {
+        ok('navigation: the current page is marked aria-current');
+      } else fail('navigation aria-current', 'the About item is not marked current on /about');
+
+      const reset = await save(null);
+      const back = await (await fetch(`${BASE}/`)).text();
+      if (reset.status === 200 && !back.includes(marker) && />\s*Contact\s*</.test(back)) {
+        ok('navigation: clearing the menu brings back the theme\'s own links');
+      } else fail('navigation reset', `status=${reset.status} marker still shown=${back.includes(marker)}`);
+
+      const anon = await fetch(`${BASE}/api/settings/update`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ navigation: { items: [] } }) });
+      if (anon.status === 401 || anon.status === 403) ok('navigation: an anonymous save is refused');
+      else fail('navigation anonymous save', `status=${anon.status}`);
+    }
+
     // --- CONTENT AND COMMERCE edits are audited, not just security events ---
     //
     // The log used to record logins, keys and role changes and nothing else, so

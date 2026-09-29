@@ -23,6 +23,7 @@ import { totalsReconcile } from './commerce/totals'
 import { normalizeAddress, formatAddressOneLine, isEmptyAddress } from './commerce/address'
 import { brandKey, buildBrandDirectory, normalizeBrand, type BrandDirectory } from './commerce/brand'
 import { effectiveCategories } from './commerce/collections'
+import { descendantSlugs } from './commerce/category-tree'
 import { scoreOrder, riskFields, hashIp } from './commerce/order-risk'
 import { resolveTaxSettings } from './commerce/tax'
 import {
@@ -451,27 +452,39 @@ export async function listProducts(opts: {
      * same array lookup it has always been.
      */
     const cat = opts.category
-    const withRules = (await LocalDB.getProductCategories()).filter(
+    const allCategories = await LocalDB.getProductCategories()
+    const withRules = allCategories.filter(
       (c) => (c as { rule?: unknown }).rule,
     )
+    /*
+     * The requested category AND everything beneath it.
+     *
+     * A shop with Clothing › Shirts tags a shirt "shirts". This matched only
+     * products tagged "clothing" itself, so browsing Clothing on the storefront
+     * showed nothing — while every platform a merchant has used before includes
+     * the subcategories. The set always contains `cat` itself, so a slug with no
+     * category behind it still means "products tagged cat", as it did before.
+     */
+    const wanted = descendantSlugs(cat, allCategories)
     // A rule on `brand` may name a brand by its published slug, and must mean
-    // what `?brand=<slug>` means — so it gets the directory. Only the REQUESTED
-    // category's rule decides whether a product is in it, so only that rule is
-    // checked. One clock for the whole request, so a `within-days` rule cannot
-    // flip mid-list.
+    // what `?brand=<slug>` means — so it gets the directory. Only the rules of
+    // the REQUESTED categories decide membership, so only those are checked.
+    // One clock for the whole request, so a `within-days` rule cannot flip
+    // mid-list.
     const now = Date.now()
-    const targetRule = (withRules.find((c) => c.slug === cat) as
-      { rule?: { conditions?: { field?: unknown }[] } } | undefined)?.rule
-    const brands = (targetRule?.conditions ?? []).some((k) => k?.field === 'brand')
+    const brands = withRules
+      .filter((c) => wanted.has(c.slug))
+      .some((c) => ((c as { rule?: { conditions?: { field?: unknown }[] } }).rule?.conditions ?? [])
+        .some((k) => k?.field === 'brand'))
       ? await brandDirectory()
       : undefined
     products = withRules.length
-      ? products.filter(p => effectiveCategories(p, withRules, now, brands).includes(cat))
+      ? products.filter(p => effectiveCategories(p, withRules, now, brands).some((s) => wanted.has(s)))
       // `?? []`: `categories` is typed as always present, but a row written
       // around saveProduct (a plugin, a direct storage client, an importer, a
       // row older than the field) can lack it, and one such row made every
       // `?category=` request a 500. The rule branch above guards the same way.
-      : products.filter(p => (p.categories ?? []).includes(cat))
+      : products.filter(p => (p.categories ?? []).some((s) => wanted.has(s)))
   }
   if (opts.brand) {
     /*
@@ -1729,6 +1742,10 @@ async function confirmToCustomer(order: Order): Promise<void> {
     siteUrl: typeof settings.site_url === 'string' && settings.site_url.trim()
       ? settings.site_url.trim()
       : process.env.SITE_URL,
+    // "Address of this CMS" (Settings → General), when the shop is headless.
+    receiptBaseUrl: typeof settings.public_site_url === 'string' && settings.public_site_url.trim()
+      ? settings.public_site_url.trim()
+      : undefined,
     allowSend: allowConfirmation,
   })
 }

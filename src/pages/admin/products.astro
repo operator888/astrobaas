@@ -7,8 +7,10 @@ import { canOpenAdminPage } from '../../lib/admin-access';
 import { formatMoney } from '../../lib/money-format';
 import RichTextEditor from '../../components/admin/RichTextEditor.astro';
 import { mainImage } from '../../lib/product-fields';
-import { getProductFieldDefs } from '../../lib/commerce-service';
+import { getProductFieldDefs, getShopCurrency } from '../../lib/commerce-service';
+import { flattenTree } from '../../lib/commerce/category-tree';
 import Pagination from '../../components/admin/Pagination.astro';
+import BulkProductBar from '../../components/admin/BulkProductBar.astro';
 import { readPaging, listHref } from '../../lib/admin-paging';
 
 await LocalDB.init();
@@ -119,38 +121,13 @@ const imgSrc = (src: string) => (/^https?:\/\//.test(src) ? src : mediaBase + sr
  *  - **An orphan.** A `parent_slug` naming a category that was since deleted
  *    means that branch is never reached from the root, and the category would
  *    silently vanish from the form — leaving a product uncategorisable with no
- *    error. Anything unvisited is appended at the top level instead.
+ *    error. An orphan is shown at the top level, with its own subtree intact.
  */
-const categoryTree: { cat: (typeof categories)[number]; depth: number }[] = (() => {
-  const byParent = new Map<string, typeof categories>();
-  for (const c of categories) {
-    const key = c.parent_slug || '';
-    const list = byParent.get(key) ?? [];
-    list.push(c);
-    byParent.set(key, list);
-  }
-  for (const list of byParent.values()) {
-    list.sort((a, b) =>
-      (a.position ?? Number.MAX_SAFE_INTEGER) - (b.position ?? Number.MAX_SAFE_INTEGER) ||
-      a.name.localeCompare(b.name, 'el'));
-  }
-  const out: { cat: (typeof categories)[number]; depth: number }[] = [];
-  const seen = new Set<string>();
-  const walk = (parent: string, depth: number) => {
-    // Depth is bounded as well as cycle-guarded: a chain 50 deep is data
-    // corruption, and indenting it would wreck the layout regardless.
-    if (depth > 6) return;
-    for (const c of byParent.get(parent) ?? []) {
-      if (seen.has(c.slug)) continue;
-      seen.add(c.slug);
-      out.push({ cat: c, depth });
-      walk(c.slug, depth + 1);
-    }
-  };
-  walk('', 0);
-  for (const c of categories) if (!seen.has(c.slug)) out.push({ cat: c, depth: 0 });
-  return out;
-})();
+// One walker for the whole admin (src/lib/commerce/category-tree.ts), so the
+// product form and the categories screen cannot disagree about a loop or an
+// orphan. 'el' keeps the collation this form has always used.
+const categoryTree = flattenTree(categories, { collation: 'el' });
+const shopCurrency = await getShopCurrency();
 ---
 
 <AdminLayout title="Products">
@@ -220,12 +197,15 @@ const categoryTree: { cat: (typeof categories)[number]; depth: number }[] = (() 
       )}
     </form>
 
+    <BulkProductBar categories={categories} currency={shopCurrency} />
+
     <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
     <div class="overflow-x-auto">
       <table class="min-w-full divide-y divide-gray-200 text-sm">
         <thead class="bg-gray-50">
           <tr>
-            <th class="px-4 py-3 text-left font-medium text-gray-500"></th>
+            <th class="px-4 py-3 w-10"><input type="checkbox" id="bulk-all" aria-label="Select every product on this page" class="rounded border-gray-300" /></th>
+            <th class="px-4 py-3 text-left font-medium text-gray-500"><span class="sr-only">Image</span></th>
             <th class="px-4 py-3 text-left font-medium text-gray-500">Name</th>
             <th class="px-4 py-3 text-left font-medium text-gray-500">Brand</th>
             <th class="px-4 py-3 text-right font-medium text-gray-500">Price</th>
@@ -236,7 +216,7 @@ const categoryTree: { cat: (typeof categories)[number]; depth: number }[] = (() 
         </thead>
         <tbody class="divide-y divide-gray-100" id="rows">
           {pageProducts.length === 0 && (
-            <tr><td colspan="7" class="px-4 py-10 text-center text-gray-500">
+            <tr><td colspan="8" class="px-4 py-10 text-center text-gray-500">
               {qRaw ? `No products match “${qRaw}”.` : 'No products yet.'}
             </td></tr>
           )}
@@ -244,6 +224,7 @@ const categoryTree: { cat: (typeof categories)[number]; depth: number }[] = (() 
           const thumb = mainImage(p.images);
           return (
             <tr class="product-row group hover:bg-gray-50">
+              <td class="px-4 py-2"><input type="checkbox" class="bulk-pick rounded border-gray-300" value={p.id} aria-label={`Select ${p.name}`} /></td>
               {/*
                 The cell has to be wider than the padding plus the image, or the
                 image loses.
@@ -401,7 +382,7 @@ const categoryTree: { cat: (typeof categories)[number]; depth: number }[] = (() 
               {categoryTree.length === 0 ? (
                 <p class="text-gray-500 text-xs px-1 py-2">
                   No product categories yet — create them under
-                  <a href="/admin/categories" class="text-blue-600 hover:underline"> Categories</a> first.
+                  <a href="/admin/product-categories" class="text-blue-600 hover:underline"> Product categories</a> first.
                 </p>
               ) : categoryTree.map(({ cat, depth }) => (
                 <label

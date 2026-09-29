@@ -3,6 +3,9 @@ import BaseLayout from './BaseLayout.astro';
 import EmbedRuntime from '../components/public/EmbedRuntime.astro';
 import { getSiteSettings } from '../lib/site';
 import { resolveActiveTheme } from '../lib/theme-runtime';
+import { LocalDB } from '../lib/localdb';
+import { NAVIGATION_SETTING, readNavigation, resolveNavigation } from '../lib/navigation';
+import { publicStrings } from '../lib/i18n/public-strings';
 import type { BreadcrumbItem } from '../core/theme-slots';
 import type { LocaleOption } from '../lib/locale-links';
 
@@ -54,6 +57,16 @@ const Footer = slots.Footer as any;
 const Sidebar = slots.Sidebar as any;
 const Breadcrumbs = slots.Breadcrumbs as any;
 const locale = Astro.locals.locale;
+
+// The operator's menu, resolved for this reader. Empty when none was ever
+// saved, which every theme reads as "use your own links" — so a site nobody has
+// touched renders exactly as before. A storage hiccup must never cost the
+// whole page its header, hence the catch.
+let navigation: ReturnType<typeof resolveNavigation> = [];
+try {
+  const stored = (await LocalDB.getSetting(NAVIGATION_SETTING))?.value;
+  navigation = resolveNavigation(readNavigation(stored), { locale, currentPath: Astro.url.pathname });
+} catch { /* no menu rather than no page */ }
 ---
 
 <BaseLayout
@@ -64,6 +77,7 @@ const locale = Astro.locals.locale;
   siteUrl={site.siteUrl}
   noindex={noindex}
   canonical={canonical}
+  skipLabel={publicStrings(locale).skipToContent}
 >
   {/* Forward the head slot. BaseLayout renders `<slot name="head" />`, but
       PublicLayout did not pass one through — so anything a page tried to put in
@@ -71,7 +85,7 @@ const locale = Astro.locals.locale;
       using this layout are every public page on the site. */}
   <slot name="head" slot="head" />
   <div class="min-h-screen flex flex-col bg-gray-50">
-    <Header siteTitle={site.siteTitle} locale={locale} localeOptions={localeOptions} />
+    <Header siteTitle={site.siteTitle} locale={locale} localeOptions={localeOptions} navigation={navigation} />
     {/*
       Beside the Header slot, deliberately NOT inside it.
 
@@ -83,7 +97,7 @@ const locale = Astro.locals.locale;
       `.ab-site-search`.
     */}
     <SiteSearch locale={locale} value={Astro.url.searchParams.get('q') ?? ''} />
-    <main class="flex-1">
+    <main id="main-content" tabindex="-1" class="flex-1 focus:outline-none">
       <Breadcrumbs items={breadcrumbs ?? []} locale={locale} />
       <slot />
     </main>
