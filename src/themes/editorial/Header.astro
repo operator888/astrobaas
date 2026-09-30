@@ -8,18 +8,22 @@
 import type { HeaderProps } from '../../core/theme-slots';
 import LocaleSwitcher from '../../components/public/LocaleSwitcher.astro';
 import { routeHref } from '../../lib/locale-links';
+import type { ResolvedNavItem } from '../../lib/navigation';
 
-const { siteTitle = 'AstroBaaS', localeOptions } = Astro.props as HeaderProps;
+const { siteTitle = 'AstroBaaS', localeOptions, navigation = [] } = Astro.props as HeaderProps;
 
 // Built through routeHref so the masthead keeps the reader in their language.
 // A theme that hardcodes these is the bug this shipped with.
 const loc = Astro.locals.locale;
-const nav = [
+const here = Astro.url.pathname.replace(/\/+$/, '') || '/';
+const builtIn: ResolvedNavItem[] = [
   { href: routeHref('/', loc), label: 'Home' },
   { href: routeHref('/blog', loc), label: 'Journal' },
   { href: routeHref('/about', loc), label: 'About' },
   { href: routeHref('/contact', loc), label: 'Contact' },
-];
+].map((l) => ({ ...l, external: false, newTab: false, current: (l.href.replace(/\/+$/, '') || '/') === here, children: [] }));
+// The operator's menu replaces the masthead's own links, never sits beside them.
+const nav: ResolvedNavItem[] = navigation.length > 0 ? navigation : builtIn;
 ---
 
 <header class="editorial-header bg-white border-b border-gray-900">
@@ -27,9 +31,44 @@ const nav = [
     <a href={routeHref('/', loc)} class="inline-block">
       <span class="font-serif text-3xl md:text-4xl tracking-tight text-gray-900">{siteTitle}</span>
     </a>
-    <nav class="no-print mt-5 flex justify-center gap-8 text-xs uppercase tracking-widest text-gray-600">
+    {/*
+      Utilities, not a <style> block. The layout imports every bundled theme's
+      Header, so this component's CSS ships on every page whatever theme is
+      active — a style block here put editorial selectors into the default
+      theme's pages, which tests/smoke.mjs caught. The submenu opens on
+      group-hover AND group-focus-within, so a keyboard reaches it; the current
+      page is underlined, never marked by colour alone.
+    */}
+    <nav class="no-print mt-5 flex flex-wrap justify-center gap-x-8 gap-y-2 text-xs uppercase tracking-widest text-gray-600" aria-label="Main">
       {nav.map((item) => (
-        <a href={item.href} class="hover:text-gray-900">{item.label}</a>
+        <span class="group relative">
+          <a
+            href={item.href}
+            class="hover:text-gray-900 aria-[current=page]:text-gray-900 aria-[current=page]:underline aria-[current=page]:underline-offset-[0.35em]"
+            aria-current={item.current ? 'page' : undefined}
+            target={item.newTab ? '_blank' : undefined}
+            rel={item.newTab ? 'noopener' : undefined}
+          >
+            {item.label}{item.newTab && <span class="sr-only"> (opens in a new tab)</span>}
+          </a>
+          {item.children.length > 0 && (
+            <ul class="absolute left-1/2 top-full z-20 mt-2 hidden min-w-[11rem] -translate-x-1/2 border border-gray-900 bg-white py-2 text-left normal-case tracking-normal group-hover:block group-focus-within:block">
+              {item.children.map((child) => (
+                <li>
+                  <a
+                    href={child.href}
+                    class="block px-4 py-1.5 text-sm text-gray-700 hover:text-gray-900 aria-[current=page]:underline"
+                    aria-current={child.current ? 'page' : undefined}
+                    target={child.newTab ? '_blank' : undefined}
+                    rel={child.newTab ? 'noopener' : undefined}
+                  >
+                    {child.label}{child.newTab && <span class="sr-only"> (opens in a new tab)</span>}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
+        </span>
       ))}
     </nav>
     <LocaleSwitcher options={localeOptions} class="mt-4 justify-center" />

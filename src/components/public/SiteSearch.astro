@@ -33,14 +33,21 @@
  * means every theme — including ones written after this — inherits a working
  * search box, and a theme that genuinely wants it gone can hide `.ab-site-search`.
  *
- * ## No JavaScript
+ * ## A plain form first, suggestions on top
  *
- * A plain GET form. It works with scripting off, the browser's own history and
- * autofill apply, and — the practical part — a `<script>` block in an `.astro`
- * file is a separate module scope from this frontmatter, which is the single
- * most repeated bug in this codebase. There is nothing here to get that wrong.
+ * The markup is a complete GET form: it works with scripting off, and the
+ * browser's own history and autofill apply. The script at the bottom only
+ * ENHANCES it — suggestions as you type, as an ARIA 1.2 combobox — and never
+ * takes submission over, which tests/search-affordance.test.mjs checks.
+ *
+ * That script is a separate module scope from this frontmatter (the single most
+ * repeated bug in this codebase), so everything it needs arrives as data-*
+ * attributes on the wrapper: the locale and the post and page URL bases.
  */
 import { routeHref } from '../../lib/locale-links';
+import { LocalDB } from '../../lib/localdb';
+import { settingsMap } from '../../lib/settings-map';
+import { resolveSuggestSettings } from '../../lib/search/suggest-settings';
 
 interface Props {
   locale?: string;
@@ -52,6 +59,15 @@ const { locale, value = '' } = Astro.props as Props;
 // Locale-aware, like every other link in the chrome. A search box that dropped
 // a Greek reader onto the English blog would be worse than none.
 const action = routeHref('/blog', locale);
+// Where a suggested post or page lives, in the reader's language. Passed to the
+// script as data, because the script is a separate module and cannot see this.
+const postBase = routeHref('/blog/', locale);
+// `routeHref('/', 'el')` is `/el`, without the slash a slug needs after it.
+const pageBase = routeHref('/', locale).replace(/\/?$/, '/');
+// The operator can switch suggestions off (Settings → Reading → Search). Then
+// the box stays the plain form and the script never asks.
+let suggestOn = true;
+try { suggestOn = resolveSuggestSettings(settingsMap(await LocalDB.getSettings())).enabled; } catch { /* keep the default */ }
 ---
 
 <div class="ab-site-search no-print border-b border-gray-200 bg-white">
@@ -69,18 +85,138 @@ const action = routeHref('/blog', locale);
       the form must never depend on the reader knowing to press Enter.
     */}
     <label for="ab-site-search-q" class="sr-only">Search this site</label>
-    <input
-      id="ab-site-search-q"
-      type="search"
-      name="q"
-      value={value}
-      placeholder="Search…"
-      autocomplete="off"
-      class="flex-1 min-w-0 px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-    />
+    {/*
+      Suggestions as you type, as progressive enhancement: the script below
+      turns this input into an ARIA 1.2 combobox. Without JavaScript it is the
+      plain form it always was, and Enter still searches.
+    */}
+    <div class="relative flex-1 min-w-0" data-ab-suggest data-suggest={suggestOn ? 'on' : 'off'} data-results={action} data-locale={locale ?? ''} data-post-base={postBase} data-page-base={pageBase}>
+      <input
+        id="ab-site-search-q"
+        type="search"
+        name="q"
+        value={value}
+        placeholder="Search…"
+        autocomplete="off"
+        class="w-full px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+      <ul id="ab-site-search-list" role="listbox" aria-label="Suggestions" hidden
+        class="absolute left-0 right-0 top-full z-30 mt-1 max-h-80 overflow-y-auto rounded-md border border-gray-200 bg-white py-1 text-sm shadow-lg"></ul>
+      <p id="ab-site-search-status" class="sr-only" role="status" aria-live="polite"></p>
+    </div>
     <button
       type="submit"
       class="px-3 py-1.5 rounded-md bg-gray-900 text-white text-sm font-medium hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
     >Search</button>
   </form>
 </div>
+
+<script>
+  /*
+   * The combobox. ARIA 1.2 "list autocomplete": focus stays in the input, the
+   * highlighted option is announced through aria-activedescendant, Up/Down
+   * move, Enter opens the highlighted suggestion (or searches when there is
+   * none), Escape closes the list and then clears the box.
+   *
+   * Everything is built with textContent — suggestion titles are site content.
+   */
+  const box = document.querySelector<HTMLElement>('[data-ab-suggest]');
+  const input = document.getElementById('ab-site-search-q') as HTMLInputElement | null;
+  const list = document.getElementById('ab-site-search-list') as HTMLUListElement | null;
+  const status = document.getElementById('ab-site-search-status');
+  if (box && input && list && status && box.dataset.suggest !== 'off') {
+    input.setAttribute('role', 'combobox');
+    input.setAttribute('aria-autocomplete', 'list');
+    input.setAttribute('aria-controls', list.id);
+    input.setAttribute('aria-expanded', 'false');
+
+    type Item = { label: string; kind: string; href: string };
+    let items: Item[] = [];
+    let active = -1;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let inflight: AbortController | null = null;
+
+    const close = () => {
+      list.hidden = true;
+      input.setAttribute('aria-expanded', 'false');
+      input.removeAttribute('aria-activedescendant');
+      active = -1;
+    };
+    const highlight = (i: number) => {
+      active = i;
+      [...list.children].forEach((li, n) => li.setAttribute('aria-selected', String(n === i)));
+      if (i >= 0) {
+        input.setAttribute('aria-activedescendant', `ab-suggest-${i}`);
+        (list.children[i] as HTMLElement).scrollIntoView({ block: 'nearest' });
+      } else input.removeAttribute('aria-activedescendant');
+    };
+    const render = () => {
+      list.replaceChildren(...items.map((it, i) => {
+        const li = document.createElement('li');
+        li.id = `ab-suggest-${i}`;
+        li.setAttribute('role', 'option');
+        li.setAttribute('aria-selected', 'false');
+        // The highlight is a 2px outline as well as a tint: a pale background alone
+        // is ~1.1:1 against white and fails WCAG 1.4.11 for a state indicator.
+        li.className = 'flex cursor-pointer items-baseline justify-between gap-3 px-3 py-2 aria-selected:bg-blue-50 aria-selected:outline aria-selected:outline-2 aria-selected:-outline-offset-2 aria-selected:outline-blue-600';
+        const t = document.createElement('span');
+        t.textContent = it.label;
+        const k = document.createElement('span');
+        k.className = 'text-xs text-gray-500';
+        k.textContent = it.kind;
+        li.append(t, k);
+        // mousedown, not click: click fires after the input's blur has closed the list.
+        li.addEventListener('mousedown', (e) => { e.preventDefault(); location.assign(it.href); });
+        return li;
+      }));
+      const n = items.length;
+      status.textContent = n ? `${n} suggestion${n === 1 ? '' : 's'}, use the up and down arrows to choose` : '';
+      if (n) { list.hidden = false; input.setAttribute('aria-expanded', 'true'); } else close();
+      active = -1;
+    };
+
+    const fetchSuggestions = async (q: string) => {
+      inflight?.abort();
+      inflight = new AbortController();
+      const params = new URLSearchParams({ q, types: 'searches,posts,pages' });
+      if (box.dataset.locale) params.set('locale', box.dataset.locale);
+      try {
+        const res = await fetch(`/api/search/suggest?${params}`, { signal: inflight.signal, headers: { Accept: 'application/json' } });
+        const body = await res.json();
+        const d = body?.data ?? {};
+        items = [
+          // A popular search leads to the results page for it.
+          ...(d.searches ?? []).map((s: string) => ({ label: s, kind: 'Search', href: `${box.dataset.results}?q=${encodeURIComponent(s)}` })),
+          ...(d.posts ?? []).map((p: { title: string; slug: string }) => ({ label: p.title, kind: 'Post', href: `${box.dataset.postBase}${encodeURIComponent(p.slug)}` })),
+          ...(d.pages ?? []).map((p: { title: string; slug: string }) => ({ label: p.title, kind: 'Page', href: `${box.dataset.pageBase}${encodeURIComponent(p.slug)}` })),
+        ];
+        if (input.value.trim() === q) render();
+      } catch {
+        /* aborted by a newer keystroke, or offline: the form still searches */
+      }
+    };
+
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      const q = input.value.trim();
+      if (q.length < 2) { items = []; close(); status.textContent = ''; return; }
+      timer = setTimeout(() => void fetchSuggestions(q), 180);
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown' && items.length) {
+        e.preventDefault();
+        if (list.hidden) render();
+        highlight((active + 1) % items.length);
+      } else if (e.key === 'ArrowUp' && items.length) {
+        e.preventDefault();
+        highlight(active <= 0 ? items.length - 1 : active - 1);
+      } else if (e.key === 'Enter' && active >= 0 && !list.hidden) {
+        e.preventDefault();
+        location.assign(items[active].href);
+      } else if (e.key === 'Escape') {
+        if (!list.hidden) { e.preventDefault(); close(); }
+      }
+    });
+    input.addEventListener('blur', () => setTimeout(close, 100));
+  }
+</script>

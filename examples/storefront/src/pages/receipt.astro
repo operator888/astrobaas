@@ -1,0 +1,34 @@
+---
+/*
+ * The link in the order-confirmation email.
+ *
+ * The CMS writes it as `<Site URL>/receipt?token=…`, and on a headless shop Site
+ * URL is THIS site (it has to be, so payment providers return buyers here) — but
+ * the receipt itself is rendered by the CMS. Without this page, every receipt
+ * link in every confirmation email was a 404. It forwards the signed token to
+ * the CMS unchanged; the token is what authorises the receipt, not this page.
+ */
+import Shop from '../layouts/Shop.astro';
+const CMS = String(import.meta.env.PUBLIC_CMS_URL).replace(/\/+$/, '');
+---
+<Shop title="Your receipt" noindex>
+  <h1>Your receipt</h1>
+  <p data-receipt-status role="status">Opening your receipt…</p>
+  <p><a data-receipt-link href={`${CMS}/receipt`}>Open the receipt</a></p>
+</Shop>
+
+<script>
+  const cms = String(import.meta.env.PUBLIC_CMS_URL).replace(/\/+$/, '');
+  const token = new URLSearchParams(location.search).get('token') ?? '';
+  const status = document.querySelector<HTMLElement>('[data-receipt-status]')!;
+  const link = document.querySelector<HTMLAnchorElement>('[data-receipt-link]')!;
+  // A receipt token is base64url and dots — anything else is not one of ours.
+  if (/^[A-Za-z0-9._~-]{10,600}$/.test(token)) {
+    const url = `${cms}/receipt?token=${encodeURIComponent(token)}`;
+    link.href = url;
+    window.location.replace(url);
+  } else {
+    status.textContent = 'This receipt link is incomplete. Open it from the confirmation email again.';
+    link.hidden = true;
+  }
+</script>

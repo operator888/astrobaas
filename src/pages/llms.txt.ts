@@ -25,8 +25,16 @@ PUT    /api/products/{id}         Update a product (partial).              [edit
 DELETE /api/products/{id}         Delete a product.                        [admin]
 GET    /api/brands                List brands (public).
 POST   /api/brands                Create a brand.                          [editor+]
+GET    /api/navigation            The site menu, resolved for ?locale= (public). Empty = use your own links.
+GET    /api/search/suggest        Suggestions while typing: popular searches, posts, pages, products, categories (public, ?q= &types=).
+POST   /api/product-bulk          Bulk-edit products (ids or filter, ops, where); preview unless apply:true. [editor+]
+POST   /api/product-bulk/csv      Update products from CSV (sku/slug/id + price, sale_price, stock, status, featured). [editor+]
+GET    /api/product-bulk/template Current values as that CSV. [editor+]
+GET    /api/product-bulk/history  Recent bulk changes. POST /api/product-bulk/undo { batch } undoes one. [editor+]
 GET    /api/product-categories    List product categories (public).
 POST   /api/product-categories    Create a product category.               [editor+]
+PUT    /api/product-categories/{id}  Rename, move (parent_slug), reorder. Slug is fixed. [editor+]
+DELETE /api/product-categories/{id}  Delete; 409 while it has subcategories; untags products. [editor+]
 POST   /api/orders                Checkout: { email, name?, items:[{product_id,qty}] }.
                                   Anonymous OK (same-origin CSRF or bearer key);
                                   totals computed server-side; stock decremented.

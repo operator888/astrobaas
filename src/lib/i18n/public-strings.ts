@@ -49,6 +49,11 @@ export interface PublicStrings {
   pdfDownload: string;
   pdfDocument: string;
   /**
+   * The skip link — the first thing a keyboard user reaches on every page, so
+   * it is core text on every theme and has to be in the page's language.
+   */
+  skipToContent: string;
+  /**
    * The receipt page (C-39).
    *
    * A whole core-rendered page rather than a phrase added to a theme, so it is
@@ -91,6 +96,7 @@ const EN: PublicStrings = {
   embedMap: 'Map',
   pdfDownload: 'Download PDF',
   pdfDocument: 'Document',
+  skipToContent: 'Skip to content',
   receipt: {
     heading: 'Receipt',
     notInvoice: 'This is a record of your purchase for your own use. It is not a tax invoice.',
@@ -133,6 +139,7 @@ const CATALOGUE: Record<string, PublicStrings> = {
     embedMap: 'Χάρτης',
     pdfDownload: 'Λήψη PDF',
     pdfDocument: 'Έγγραφο',
+    skipToContent: 'Μετάβαση στο περιεχόμενο',
     receipt: {
       heading: 'Απόδειξη',
       // NOT "απόδειξη λιανικής": that names a fiscal document, which this is
@@ -168,6 +175,7 @@ const CATALOGUE: Record<string, PublicStrings> = {
     embedMap: 'Karte',
     pdfDownload: 'PDF herunterladen',
     pdfDocument: 'Dokument',
+    skipToContent: 'Zum Inhalt springen',
     receipt: {
       heading: 'Beleg',
       notInvoice: 'Dies ist ein Nachweis Ihres Kaufs für Ihre Unterlagen. Es ist keine Rechnung im steuerlichen Sinne.',

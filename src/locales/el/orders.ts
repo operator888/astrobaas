@@ -52,6 +52,7 @@ export const orders = {
   'admin.orders.refundedAmount': '−{amount} επιστράφηκαν',
   'admin.orders.refundRemaining': 'απομένουν {amount}',
   'admin.orders.statusLocked': 'Ο ρόλος σας επιτρέπει προβολή παραγγελιών, όχι αλλαγή κατάστασης. Αυτό μπορεί να το κάνει διαχειριστής ή συντάκτης.',
+  'admin.orders.statusOf': 'Κατάσταση παραγγελίας {number}',
   'admin.orders.refund': 'Επιστροφή χρημάτων…',
   'admin.orders.refundInProviderDashboard': 'Επιστροφή χρημάτων από τον πίνακα {provider}',
 

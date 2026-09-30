@@ -1,0 +1,500 @@
+---
+/**
+ * Bulk edit for the products list.
+ *
+ * The list's rows carry a checkbox (`.bulk-pick`, value = product id). This bar:
+ *
+ *  - collects one or more changes — each kind once, so "raise prices 10%" and
+ *    "raise prices 5%" cannot both be queued and silently compound;
+ *  - optionally restricts them to products meeting a condition ("Only where");
+ *  - can act on every product matching the list's search, across pages, not
+ *    only the ticked ones — resolved by the server with the list's own filter;
+ *  - updates products from a CSV file (with a template of the current values);
+ *  - lists the recent bulk changes, each with an Undo.
+ *
+ * Every path PREVIEWS first — the server's preview, not a guess made here — and
+ * applies only on a second, explicit click. Everything is built with
+ * createElement and textContent: product names are shop data.
+ */
+import type { ProductCategory } from '../../core/models';
+import { flattenTree } from '../../lib/commerce/category-tree';
+import { minorUnits } from '../../lib/money-format';
+
+interface Props { categories: ProductCategory[]; currency: string; matching: number; pageCount: number; q: string }
+const { categories, currency, matching, pageCount, q } = Astro.props;
+const options = flattenTree(categories, { collation: 'el' }).map(({ cat, depth }) => ({
+  slug: cat.slug,
+  label: `${'— '.repeat(depth)}${cat.name}`,
+}));
+const input = 'px-3 py-2 border border-gray-300 rounded-lg text-sm';
+const small = 'block text-xs font-medium text-gray-600 mb-1';
+---
+<section id="bulk-bar" class="mb-4 rounded-lg border border-gray-200 bg-white p-4 space-y-3" aria-labelledby="bulk-title"
+  data-minor={String(minorUnits(currency))} data-currency={currency}
+  data-matching={String(matching)} data-page-count={String(pageCount)} data-q={q}>
+  <h2 id="bulk-title" class="sr-only">Change products in bulk</h2>
+
+  <div class="flex flex-wrap items-center gap-3 text-sm text-gray-700">
+    <p aria-live="polite"><strong id="bulk-count">0</strong> selected<span id="bulk-scope-note"></span></p>
+    <button id="bulk-select-matching" type="button" class="text-blue-700 underline" hidden>Select all matching products</button>
+    <span class="ml-auto flex flex-wrap gap-3">
+      <button id="bulk-csv-open" type="button" class="underline text-blue-700">Update from CSV…</button>
+      <a href="/api/product-bulk/template" class="underline text-blue-700" download>Download a CSV of current values</a>
+      <button id="bulk-history-open" type="button" class="underline text-blue-700" aria-expanded="false" aria-controls="bulk-history">Recent bulk changes</button>
+    </span>
+  </div>
+
+  <div class="flex flex-wrap items-end gap-3">
+    <div>
+      <label for="bulk-action" class={small}>Change</label>
+      <select id="bulk-action" class={input}>
+        <option value="">Choose a change…</option>
+        <option value="status">Status</option>
+        <option value="featured">Featured</option>
+        <option value="addCategory">Add to category</option>
+        <option value="removeCategory">Remove from category</option>
+        <option value="addTag">Add tag</option>
+        <option value="removeTag">Remove tag</option>
+        <option value="price">Price</option>
+        <option value="sale">Sale</option>
+        <option value="stock">Stock</option>
+      </select>
+    </div>
+
+    <div data-for="status" hidden>
+      <label for="bulk-status" class={small}>New status</label>
+      <select id="bulk-status" class={input}>
+        <option value="active">Active</option><option value="draft">Draft</option><option value="archived">Archived</option>
+      </select>
+    </div>
+    <div data-for="featured" hidden>
+      <label for="bulk-featured" class={small}>Featured</label>
+      <select id="bulk-featured" class={input}>
+        <option value="true">Feature them</option><option value="false">Stop featuring them</option>
+      </select>
+    </div>
+    <div data-for="addCategory removeCategory" hidden>
+      <label for="bulk-category" class={small}>Category</label>
+      <select id="bulk-category" class={input}>
+        {options.map((o) => <option value={o.slug}>{o.label}</option>)}
+      </select>
+    </div>
+    <div data-for="addTag removeTag" hidden>
+      <label for="bulk-tag" class={small}>Tag</label>
+      <input id="bulk-tag" maxlength="120" class={input} />
+    </div>
+    <div data-for="price" hidden class="flex items-end gap-2">
+      <div>
+        <label for="bulk-price-mode" class={small}>How</label>
+        <select id="bulk-price-mode" class={input}>
+          <option value="percent">Change by %</option>
+          <option value="amount">Change by amount ({currency})</option>
+          <option value="set">Set to ({currency})</option>
+        </select>
+      </div>
+      <div>
+        <label for="bulk-price-value" class={small}>Value</label>
+        <input id="bulk-price-value" inputmode="decimal" placeholder="e.g. 10 or -5" class={`w-32 ${input}`} aria-describedby="bulk-price-hint" />
+      </div>
+      <p id="bulk-price-hint" class="text-xs text-gray-500 max-w-[16rem]">Changes the regular price. Products on sale stay on sale.</p>
+    </div>
+    <div data-for="sale" hidden class="flex items-end gap-2">
+      <div>
+        <label for="bulk-sale-mode" class={small}>Sale</label>
+        <select id="bulk-sale-mode" class={input}>
+          <option value="percent_off">% off the regular price</option>
+          <option value="clear">End the sale</option>
+        </select>
+      </div>
+      <div>
+        <label for="bulk-sale-value" class={small}>Percent off</label>
+        <input id="bulk-sale-value" inputmode="decimal" placeholder="e.g. 20" class={`w-24 ${input}`} />
+      </div>
+    </div>
+    <div data-for="stock" hidden>
+      <label for="bulk-stock" class={small}>Stock count (empty = not tracked)</label>
+      <input id="bulk-stock" inputmode="numeric" class={`w-32 ${input}`} />
+    </div>
+
+    <button id="bulk-add" type="button" class="px-3 py-2 border border-gray-300 rounded-lg text-sm disabled:opacity-50" disabled>Add another change</button>
+    <button id="bulk-preview" type="button" class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-50" disabled>Preview</button>
+  </div>
+
+  <ul id="bulk-queue" class="flex flex-wrap gap-2 text-sm" aria-label="Changes to make"></ul>
+
+  <details id="bulk-where" class="text-sm">
+    <summary class="cursor-pointer text-gray-700">Only where… <span class="text-gray-500">(optional condition)</span></summary>
+    <div class="mt-3 flex flex-wrap items-end gap-3">
+      <div>
+        <label for="where-status" class={small}>Status is</label>
+        <select id="where-status" class={input}>
+          <option value="">any</option><option value="active">active</option><option value="draft">draft</option><option value="archived">archived</option>
+        </select>
+      </div>
+      <div>
+        <label for="where-stock" class={small}>Stock is</label>
+        <select id="where-stock" class={input}>
+          <option value="">any</option><option value="in">in stock</option><option value="out">sold out</option><option value="untracked">not tracked</option>
+        </select>
+      </div>
+      <div>
+        <label for="where-sale" class={small}>On sale</label>
+        <select id="where-sale" class={input}>
+          <option value="">either</option><option value="true">yes</option><option value="false">no</option>
+        </select>
+      </div>
+      <div>
+        <label for="where-category" class={small}>In category (and its subcategories)</label>
+        <select id="where-category" class={input}>
+          <option value="">any</option>
+          {options.map((o) => <option value={o.slug}>{o.label}</option>)}
+        </select>
+      </div>
+      <div>
+        <label for="where-min" class={small}>Price from ({currency})</label>
+        <input id="where-min" inputmode="decimal" class={`w-24 ${input}`} />
+      </div>
+      <div>
+        <label for="where-max" class={small}>to ({currency})</label>
+        <input id="where-max" inputmode="decimal" class={`w-24 ${input}`} />
+      </div>
+    </div>
+  </details>
+
+  <div id="bulk-history" class="text-sm" hidden>
+    <h3 class="font-medium text-gray-900 mb-2">Recent bulk changes</h3>
+    <ul id="bulk-history-list" class="divide-y divide-gray-100"></ul>
+  </div>
+
+  <input id="bulk-csv-file" type="file" accept=".csv,text/csv" class="sr-only" tabindex="-1" aria-hidden="true" />
+  <p id="bulk-error" class="text-sm text-red-700" role="alert" hidden></p>
+</section>
+
+<dialog id="bulk-dialog" class="m-auto w-full max-w-2xl rounded-xl p-0 backdrop:bg-black/40" aria-labelledby="bulk-dialog-title">
+  <div class="p-6">
+    <h2 id="bulk-dialog-title" class="text-lg font-semibold text-gray-900">Review the change</h2>
+    <p id="bulk-summary" class="mt-2 text-sm text-gray-700"></p>
+    <ul id="bulk-problems" class="mt-3 space-y-1 text-sm text-red-700"></ul>
+    <ul id="bulk-list" class="mt-4 max-h-80 overflow-y-auto divide-y divide-gray-100 text-sm"></ul>
+    <p id="bulk-result" class="mt-4 text-sm" role="status"></p>
+    <div class="mt-6 flex justify-end gap-2">
+      <button id="bulk-cancel" type="button" class="px-4 py-2 border border-gray-300 rounded-lg text-sm">Cancel</button>
+      <button id="bulk-apply" type="button" class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-50">Apply</button>
+    </div>
+  </div>
+</dialog>
+
+<script>
+  import { api } from '../../lib/apiClient';
+
+  const bar = document.getElementById('bulk-bar')!;
+  const minor = Number(bar.dataset.minor) || 100;
+  const matching = Number(bar.dataset.matching) || 0;
+  const pageCount = Number(bar.dataset.pageCount) || 0;
+  const listQuery = bar.dataset.q ?? '';
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+  const action = $<HTMLSelectElement>('bulk-action');
+  const count = $('bulk-count');
+  const previewBtn = $<HTMLButtonElement>('bulk-preview');
+  const addBtn = $<HTMLButtonElement>('bulk-add');
+  const queueEl = $('bulk-queue');
+  const error = $('bulk-error');
+  const dialog = $<HTMLDialogElement>('bulk-dialog');
+  const applyBtn = $<HTMLButtonElement>('bulk-apply');
+  const selectMatching = $<HTMLButtonElement>('bulk-select-matching');
+
+  const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = '') => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text) n.textContent = text;
+    return n;
+  };
+  const picks = () => [...document.querySelectorAll<HTMLInputElement>('.bulk-pick')];
+  const selected = () => picks().filter((c) => c.checked).map((c) => c.value);
+  /** "all matching" mode: every product the list's search matches, on every page. */
+  let allMatching = false;
+  /** Changes queued with "Add another change", by kind. */
+  const queue = new Map<string, { label: string; ops: Record<string, unknown> }>();
+
+  const selectionCount = () => (allMatching ? matching : selected().length);
+  function refresh() {
+    const n = selectionCount();
+    count.textContent = String(n);
+    $('bulk-scope-note').textContent = allMatching ? ` — every product matching${listQuery ? ` “${listQuery}”` : ''}, on all pages` : '';
+    const ready = n > 0 && (queue.size > 0 || !!action.value);
+    previewBtn.disabled = !ready;
+    addBtn.disabled = !action.value;
+    const all = document.getElementById('bulk-all') as HTMLInputElement | null;
+    const boxes = picks();
+    const onPage = selected().length;
+    if (all) {
+      all.checked = boxes.length > 0 && onPage === boxes.length;
+      all.indeterminate = onPage > 0 && onPage < boxes.length;
+    }
+    // Offer "all N" once a whole page is ticked and there is more than a page.
+    const offer = !allMatching && boxes.length > 0 && onPage === boxes.length && matching > pageCount;
+    selectMatching.hidden = !offer && !allMatching;
+    selectMatching.textContent = allMatching ? 'Only the ticked ones' : `Select all ${matching} matching products`;
+  }
+  selectMatching.addEventListener('click', () => { allMatching = !allMatching; refresh(); });
+  document.addEventListener('change', (e) => {
+    const t = e.target as HTMLElement;
+    if (t.id === 'bulk-all') for (const c of picks()) c.checked = (t as HTMLInputElement).checked;
+    if (t.id === 'bulk-all' || t.classList.contains('bulk-pick')) {
+      if (!(t as HTMLInputElement).checked) allMatching = false;
+      refresh();
+    }
+  });
+  action.addEventListener('change', () => {
+    for (const x of bar.querySelectorAll<HTMLElement>('[data-for]')) {
+      x.hidden = !(x.dataset.for ?? '').split(' ').includes(action.value);
+    }
+    refresh();
+  });
+
+  function showError(msg: string) { error.textContent = msg; error.hidden = !msg; }
+
+  /**
+   * A plain number, with at most one decimal separator (. or ,) and no
+   * grouping. "1,000" is REFUSED rather than read: as one thousand or as one,
+   * either guess sets a whole catalogue to the wrong price.
+   */
+  function plainNumber(text: string, threeDecimals = false): number {
+    const t = text.trim();
+    if (!/^[-+]?\d+([.,]\d+)?$/.test(t)) return NaN;
+    // "1,000" and "1.000" are one thousand to some and one to others: refused
+    // unless the currency really has three decimals.
+    if (!threeDecimals && /[.,]\d{3}$/.test(t)) return NaN;
+    return Number(t.replace(',', '.'));
+  }
+  /** Decimal text in the shop currency → integer minor units, or NaN. */
+  function toMinor(text: string): number {
+    const n = plainNumber(text, minor === 1000);
+    return Number.isFinite(n) ? Math.round(n * minor) : NaN;
+  }
+  const numberOf = (id: string) => plainNumber($<HTMLInputElement>(id).value || '');
+  const selectText = (id: string) => { const s = $<HTMLSelectElement>(id); return s.options[s.selectedIndex]?.textContent?.trim() ?? ''; };
+
+  /** The one change the form describes: its ops and a label, or a sentence saying what is missing. */
+  function buildOps(): { label: string; ops: Record<string, unknown> } | string {
+    switch (action.value) {
+      case 'status': return { label: `Status → ${selectText('bulk-status')}`, ops: { status: $<HTMLSelectElement>('bulk-status').value } };
+      case 'featured': return { label: selectText('bulk-featured'), ops: { featured: $<HTMLSelectElement>('bulk-featured').value === 'true' } };
+      case 'addCategory': return { label: `Add to ${selectText('bulk-category').replace(/^(— )+/, '')}`, ops: { addCategories: [$<HTMLSelectElement>('bulk-category').value] } };
+      case 'removeCategory': return { label: `Remove from ${selectText('bulk-category').replace(/^(— )+/, '')}`, ops: { removeCategories: [$<HTMLSelectElement>('bulk-category').value] } };
+      case 'addTag':
+      case 'removeTag': {
+        const t = $<HTMLInputElement>('bulk-tag').value.trim();
+        if (!t) return 'Type the tag.';
+        return action.value === 'addTag' ? { label: `Add tag ${t}`, ops: { addTags: [t] } } : { label: `Remove tag ${t}`, ops: { removeTags: [t] } };
+      }
+      case 'price': {
+        const mode = $<HTMLSelectElement>('bulk-price-mode').value;
+        const raw = $<HTMLInputElement>('bulk-price-value').value;
+        const value = mode === 'percent' ? numberOf('bulk-price-value') : toMinor(raw);
+        if (!Number.isFinite(value)) return 'Type a plain number, like 10 or 12.50 — no thousands separators.';
+        return { label: `Price ${mode === 'percent' ? `${value >= 0 ? '+' : ''}${value}%` : mode === 'amount' ? `${raw.trim()} ${bar.dataset.currency}` : `= ${raw.trim()} ${bar.dataset.currency}`}`, ops: { price: { mode, value } } };
+      }
+      case 'sale': {
+        const mode = $<HTMLSelectElement>('bulk-sale-mode').value;
+        if (mode === 'clear') return { label: 'End the sale', ops: { sale: { mode } } };
+        const value = numberOf('bulk-sale-value');
+        if (!Number.isFinite(value)) return 'Type how many percent off.';
+        return { label: `Sale ${value}% off`, ops: { sale: { mode, value } } };
+      }
+      case 'stock': {
+        const raw = $<HTMLInputElement>('bulk-stock').value.trim();
+        const value = raw === '' ? null : Number(raw);
+        if (value !== null && !Number.isInteger(value)) return 'Stock must be a whole number, or empty.';
+        return { label: `Stock = ${value ?? 'not tracked'}`, ops: { stock: value } };
+      }
+      default: return 'Choose a change.';
+    }
+  }
+
+  function renderQueue() {
+    queueEl.replaceChildren(...[...queue.entries()].map(([kind, item]) => {
+      const li = el('li', 'inline-flex items-center gap-2 rounded-full border border-gray-300 px-3 py-1');
+      li.append(el('span', '', item.label));
+      const x = el('button', 'text-gray-600 underline', 'Remove') as HTMLButtonElement;
+      x.type = 'button';
+      x.setAttribute('aria-label', `Remove the change “${item.label}”`);
+      x.addEventListener('click', () => { queue.delete(kind); renderQueue(); refresh(); });
+      li.append(x);
+      return li;
+    }));
+  }
+  /** Queue the form's change. Each kind once: two price changes would silently compound. */
+  function queueCurrent(): string | null {
+    const built = buildOps();
+    if (typeof built === 'string') return built;
+    queue.set(action.value, built);
+    renderQueue();
+    action.value = '';
+    action.dispatchEvent(new Event('change'));
+    return null;
+  }
+  addBtn.addEventListener('click', () => { showError(queueCurrent() ?? ''); });
+
+  function where(): Record<string, unknown> | undefined | string {
+    const w: Record<string, unknown> = {};
+    const v = (id: string) => $<HTMLSelectElement | HTMLInputElement>(id).value.trim();
+    if (v('where-status')) w.status = [v('where-status')];
+    if (v('where-stock')) w.stock = v('where-stock');
+    if (v('where-sale')) w.on_sale = v('where-sale') === 'true';
+    if (v('where-category')) w.category = v('where-category');
+    for (const [id, key] of [['where-min', 'price_min'], ['where-max', 'price_max']] as const) {
+      if (!v(id)) continue;
+      const m = toMinor(v(id));
+      if (!Number.isFinite(m) || m < 0) return 'The price range needs plain numbers.';
+      w[key] = m;
+    }
+    return Object.keys(w).length ? w : undefined;
+  }
+
+  /* ------------------------------------------------ the shared dialog --- */
+  let onApply: (() => Promise<void>) | null = null;
+  function openDialog(opts: {
+    title: string; summary: string; problems?: string[];
+    items: { name: string; text: string; warn?: boolean }[];
+    applyLabel: string; canApply: boolean; apply: () => Promise<void>;
+  }) {
+    $('bulk-dialog-title').textContent = opts.title;
+    $('bulk-summary').textContent = opts.summary;
+    $('bulk-problems').replaceChildren(...(opts.problems ?? []).map((p) => el('li', '', p)));
+    $('bulk-list').replaceChildren(...opts.items.map((it) => {
+      const li = el('li', 'py-2');
+      li.append(el('strong', '', it.name), el('span', it.warn ? 'text-amber-800' : 'text-gray-600', ` — ${it.text}`));
+      return li;
+    }));
+    $('bulk-result').textContent = '';
+    applyBtn.textContent = opts.applyLabel;
+    applyBtn.disabled = !opts.canApply;
+    onApply = opts.apply;
+    dialog.showModal();
+  }
+  $('bulk-cancel').addEventListener('click', () => dialog.close());
+  applyBtn.addEventListener('click', async () => {
+    if (!onApply) return;
+    applyBtn.disabled = true;
+    applyBtn.textContent = 'Applying…';
+    await onApply();
+  });
+  function finish(res: Awaited<ReturnType<typeof api.post>>) {
+    if (!res.ok) {
+      $('bulk-result').textContent = res.error;
+      applyBtn.disabled = false;
+      applyBtn.textContent = 'Try again';
+      return;
+    }
+    const d = res.data as { updated: number; failed: { name: string; message: string }[]; too_large_to_undo?: boolean };
+    const note = d.too_large_to_undo ? ' This change was too large to keep for undo.' : '';
+    $('bulk-result').textContent = `Updated ${d.updated}.${note}` + (d.failed.length ? ` Not saved: ${d.failed.map((f) => `${f.name} (${f.message})`).join('; ')}.` : ' Reloading…');
+    if (!d.failed.length) setTimeout(() => location.reload(), d.too_large_to_undo ? 2500 : 700);
+    else applyBtn.textContent = 'Done';
+  }
+  const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
+
+  /* ------------------------------------------------------ bulk change --- */
+  previewBtn.addEventListener('click', async () => {
+    showError('');
+    if (action.value) { const err = queueCurrent(); if (err) { showError(err); return; } }
+    if (!queue.size) { showError('Choose a change.'); return; }
+    const ops = Object.assign({}, ...[...queue.values()].map((q) => q.ops));
+    const w = where();
+    if (typeof w === 'string') { showError(w); return; }
+    const target = allMatching ? { filter: { q: listQuery } } : { ids: selected() };
+    const request = { ...target, ops, ...(w ? { where: w } : {}) };
+    previewBtn.disabled = true;
+    const res = await api.post('/api/product-bulk', request);
+    previewBtn.disabled = false;
+    if (!res.ok) { showError(res.error); return; }
+    const d = res.data as { will_change: number; unchanged: number; skipped: number; not_matching: number; not_found: string[]; products: { name: string; changes: string[]; skipped?: string }[] };
+    openDialog({
+      title: 'Review the change',
+      summary: `${d.will_change} will change, ${d.unchanged} already match` +
+        (d.not_matching ? `, ${d.not_matching} do not meet the condition` : '') +
+        (d.skipped ? `, ${d.skipped} skipped` : '') + (d.not_found.length ? `, ${d.not_found.length} no longer exist` : '') + '.',
+      items: d.products.map((p) => ({ name: p.name, text: p.skipped ? `skipped: ${p.skipped}` : p.changes.join('; '), warn: !!p.skipped })),
+      applyLabel: d.will_change ? `Apply to ${plural(d.will_change, 'product')}` : 'Nothing to apply',
+      canApply: d.will_change > 0,
+      apply: async () => finish(await api.post('/api/product-bulk', { ...request, apply: true })),
+    });
+  });
+
+  /* ------------------------------------------------------------- CSV --- */
+  const csvFile = $<HTMLInputElement>('bulk-csv-file');
+  $('bulk-csv-open').addEventListener('click', () => csvFile.click());
+  csvFile.addEventListener('change', async () => {
+    showError('');
+    const file = csvFile.files?.[0];
+    csvFile.value = '';
+    if (!file) return;
+    if (file.size > 1.5 * 1024 * 1024) { showError('The file is too large — at most 1.5 MB (about 1,000 rows fit easily).'); return; }
+    const csv = await file.text();
+    const res = await api.post('/api/product-bulk/csv', { csv });
+    if (!res.ok) { showError(res.error); return; }
+    const d = res.data as { will_change: number; unchanged: number; skipped: number; ignored_columns: string[]; row_errors: { row: number; message: string }[]; products: { name: string; changes: string[]; skipped?: string }[] };
+    const problems = d.row_errors.map((e) => `Row ${e.row}: ${e.message}`);
+    openDialog({
+      title: `Update from ${file.name}`,
+      summary: `${d.will_change} will change, ${d.unchanged} already match${d.skipped ? `, ${d.skipped} skipped` : ''}.` +
+        (d.ignored_columns.length ? ` Ignored columns: ${d.ignored_columns.join(', ')}.` : '') +
+        (problems.length ? ' Fix the rows below and upload again — nothing is applied while any row has a problem.' : ''),
+      problems,
+      items: d.products.map((p) => ({ name: p.name, text: p.skipped ? `skipped: ${p.skipped}` : p.changes.join('; '), warn: !!p.skipped })),
+      applyLabel: d.will_change ? `Apply to ${plural(d.will_change, 'product')}` : 'Nothing to apply',
+      canApply: d.will_change > 0 && problems.length === 0,
+      apply: async () => finish(await api.post('/api/product-bulk/csv', { csv, apply: true })),
+    });
+  });
+
+  /* ---------------------------------------------------- history, undo --- */
+  const historyBtn = $<HTMLButtonElement>('bulk-history-open');
+  const historyBox = $('bulk-history');
+  historyBtn.addEventListener('click', async () => {
+    const open = historyBox.hidden;
+    historyBox.hidden = !open;
+    historyBtn.setAttribute('aria-expanded', String(open));
+    if (!open) return;
+    const res = await api.get('/api/product-bulk/history');
+    const list = $('bulk-history-list');
+    if (!res.ok) { list.replaceChildren(el('li', 'py-2 text-red-700', res.error)); return; }
+    const batches = res.data as { id: string; at: string; label: string; products: number; undone_at: string | null }[];
+    if (!batches.length) { list.replaceChildren(el('li', 'py-2 text-gray-600', 'No bulk changes yet.')); return; }
+    list.replaceChildren(...batches.map((b) => {
+      const li = el('li', 'py-2 flex flex-wrap items-center gap-3');
+      li.append(el('span', '', b.label), el('span', 'text-gray-600', new Date(b.at).toLocaleString()));
+      if (b.undone_at) li.append(el('span', 'text-gray-600', '(undone)'));
+      else {
+        const undo = el('button', 'ml-auto underline text-blue-700', 'Undo') as HTMLButtonElement;
+        undo.type = 'button';
+        undo.setAttribute('aria-label', `Undo “${b.label}”`);
+        undo.addEventListener('click', () => void previewUndo(b.id));
+        li.append(undo);
+      }
+      return li;
+    }));
+  });
+  async function previewUndo(batch: string) {
+    const res = await api.post('/api/product-bulk/undo', { batch });
+    if (!res.ok) { showError(res.error); return; }
+    const d = res.data as { label: string; will_restore: number; kept: number; missing: number; products: { name: string; restored: string[]; kept: string[]; missing?: boolean }[] };
+    openDialog({
+      title: `Undo: ${d.label}`,
+      summary: `${d.will_restore} will be put back.` +
+        (d.kept ? ` On ${plural(d.kept, 'product')}, something changed since and is left as it is.` : '') +
+        (d.missing ? ` ${plural(d.missing, 'product')} no longer exist.` : ''),
+      items: d.products.map((p) => ({
+        name: p.name,
+        text: p.missing ? 'no longer exists' : [...p.restored.map((r) => `restore ${r}`), ...p.kept].join('; '),
+        warn: p.missing || p.kept.length > 0,
+      })),
+      applyLabel: d.will_restore ? `Undo on ${plural(d.will_restore, 'product')}` : 'Nothing to undo',
+      canApply: d.will_restore > 0,
+      apply: async () => finish(await api.post('/api/product-bulk/undo', { batch, apply: true })),
+    });
+  }
+
+  refresh();
+</script>

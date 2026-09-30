@@ -16,12 +16,14 @@
  * is refused at save time with a sentence the shop owner can act on.
  */
 
+import { validateSuggestSetting } from './search/suggest-settings';
 import { normaliseOrigin } from './site-url';
 import { validateRobotsBody } from './robots-txt';
 import { validateSynonyms } from './search/expander';
 import { validate } from './validate';
 import { settingRuleFor, type SettingGroup } from '../core/setting-groups';
 import { SHOP_CURRENCY_KEY } from './commerce-settings';
+import { NAVIGATION_SETTING, validateNavigation, normaliseNavigation } from './navigation';
 
 export interface SettingProblem {
   key: string;
@@ -138,9 +140,18 @@ export function validateSetting(
   // and a validator that only knew the directives someone thought of would
   // reject the exact line an operator came here to add.
   if (key === 'robots_txt') return validateRobotsBody(value);
+  // The site menu renders as <a href> on every public page, so its links are
+  // an allow-list of shapes — see navHrefProblem for why a denylist would not do.
+  if (key === NAVIGATION_SETTING) return validateNavigation(value);
   // Same shape: refuse what is a mistake rather than a typo. The parser drops
   // an unreadable LINE, so one bad rule must not take search down.
   if (key === 'search_synonyms') return validateSynonyms(value);
+
+  // Search suggestions and popular searches (Settings → Reading → Search).
+  {
+    const r = validateSuggestSetting(key, value);
+    if (r !== undefined) return r;
+  }
 
   if (key === 'captcha_surfaces') {
     if (value === null || value === undefined || value === '') return null;
@@ -207,6 +218,10 @@ export function validateSettings(
  * media URL. Storing the canonical form means the readers never have to care.
  */
 export function normaliseSettingValue(key: string, value: unknown): unknown {
+  // One canonical shape on disk: trimmed, no empty translations, no empty
+  // submenus. An empty menu is stored as null, which every theme reads as
+  // "use your own links".
+  if (key === NAVIGATION_SETTING) return normaliseNavigation(value);
   // Stored upper-case, so `resolveShopCurrency` and every reader see one
   // spelling rather than "eur", "Eur" and "EUR" being three shop currencies.
   if (key === SHOP_CURRENCY_KEY && typeof value === 'string' && value.trim()) {

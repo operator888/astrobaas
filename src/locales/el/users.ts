@@ -22,6 +22,8 @@ export const users = {
   'admin.users.searchPlaceholder': 'Αναζήτηση χρηστών...',
   'admin.users.allRoles': 'Όλοι οι ρόλοι',
   'admin.users.allStatuses': 'Όλες οι καταστάσεις',
+  'admin.users.filterByRole': 'Φιλτράρισμα κατά ρόλο',
+  'admin.users.filterByStatus': 'Φιλτράρισμα κατά κατάσταση',
   'admin.users.bulkActions': 'Μαζικές ενέργειες',
   'admin.users.deleteSelected': 'Διαγραφή επιλεγμένων ({count})',
 

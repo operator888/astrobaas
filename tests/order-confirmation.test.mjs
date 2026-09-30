@@ -218,5 +218,35 @@ const IBAN = 'Bank: Alpha\nIBAN: GR16 0110 1250 0000 0001 2300 695\nHolder: Exam
     none && !/details below/i.test(none.text));
 }
 
+/* ---- the receipt link points at the CMS, not the storefront ---- */
+{
+  // On a headless shop Site URL is the storefront (payment providers return
+  // buyers there), but /receipt is served by the CMS. The link used to be built
+  // from Site URL, so it was a 404 in every confirmation such a shop sent.
+  process.env.AUTH_SECRET ||= 'test-secret-for-receipt-links-0123456789abcdef';
+  const sendWith = async (extra) => {
+    let m = null;
+    await C.sendOrderConfirmation(order(), {
+      readSettings: async () => ({}),
+      send: async (msg) => { m = msg; },
+      instructionsFor: () => undefined,
+      ...extra,
+    });
+    return m?.text ?? '';
+  };
+  const headless = await sendWith({ siteUrl: 'https://shop.example', receiptBaseUrl: 'https://cms.example' });
+  check('a headless shop\'s receipt link is on the CMS', /https:\/\/cms\.example\/receipt\?token=/.test(headless));
+  check('...and not on the storefront', !/https:\/\/shop\.example\/receipt/.test(headless));
+  const classic = await sendWith({ siteUrl: 'https://shop.example' });
+  check('a shop whose storefront IS the CMS keeps its receipt link on Site URL', /https:\/\/shop\.example\/receipt\?token=/.test(classic));
+  const { readFileSync } = await import('node:fs');
+  const wiring = readFileSync(new URL('../src/lib/commerce-service.ts', import.meta.url), 'utf8');
+  check('checkout wires the CMS address ("Address of this CMS") in as the receipt base',
+    /receiptBaseUrl: typeof settings\.public_site_url === 'string'/.test(wiring));
+  const ship = readFileSync(new URL('../src/pages/api/orders/[id]/ship.ts', import.meta.url), 'utf8');
+  check('the "shipped" email builds its receipt link from the CMS address too',
+    /receiptBase = typeof settings\.public_site_url === 'string'/.test(ship) && /receiptUrl\(receiptBase, id\)/.test(ship));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

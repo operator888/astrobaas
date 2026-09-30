@@ -294,6 +294,7 @@ general 60/min per address, anonymous callers now have, per address, per minute:
 | `POST /api/orders/quote` | 30 | `RATE_LIMIT_QUOTE_PER_MIN` |
 | `POST /api/payments/start` | 10 | `RATE_LIMIT_PAYMENT_START_PER_MIN` |
 | `GET /api/search`, `GET /api/products?search=` | 30 | `RATE_LIMIT_SEARCH_PER_MIN` |
+| `GET /api/search/suggest` | 40 | `RATE_LIMIT_SUGGEST_PER_MIN` |
 
 A storefront whose **browsers** call these directly is affected when many
 shoppers share one address (an office, a mobile carrier's NAT) or when a
@@ -813,8 +814,10 @@ credential, and every install that kept it is one `/login` scan away.
 
 - A fresh **production** boot with no `ADMIN_PASSWORD` generates a random one
   and prints it **once** to stdout.
-- Login **refuses** the seeded password when `NODE_ENV=production`, with a
-  distinct `SEED_PASSWORD_REFUSED` error.
+- Login **refuses** the seeded password on any production build (what
+  `npm run build` produces), with a distinct `SEED_PASSWORD_REFUSED` error.
+  `NODE_ENV` does not need to be set for this; `NODE_ENV=production` also
+  applies it to a dev server.
 
 **What to do:** set `ADMIN_PASSWORD` before first boot, or run
 `npm run reset-password` on an existing install. `ALLOW_SEED_PASSWORD=1`

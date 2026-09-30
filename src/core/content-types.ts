@@ -366,7 +366,11 @@ export function _clearContentTypes(): void {
 export const ADMIN_FIELD_TYPES = FIELD_TYPES;
 
 const FIELD_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,40}$/;
-const MAX_ADMIN_TYPES = 20;
+// A sanity bound, not a design limit. It was 20, which one site with a few
+// themes on it (each theme brings its own collections) outgrows: the demo
+// server needs about 35. The whole set is one settings value that every
+// request reads, so it stays bounded.
+export const MAX_ADMIN_TYPES = 100;
 const MAX_FIELDS_PER_TYPE = 40;
 
 export interface ContentTypeValidation {

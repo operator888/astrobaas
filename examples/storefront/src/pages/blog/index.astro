@@ -1,0 +1,26 @@
+---
+import Shop from '../../layouts/Shop.astro';
+import { allPosts } from '../../lib/cms';
+
+const posts = await allPosts();
+const date = (iso?: string) => (iso ? new Date(iso).toLocaleDateString('en', { year: 'numeric', month: 'long', day: 'numeric' }) : '');
+---
+<Shop title="Blog" description="News and stories from the shop.">
+  <h1>Blog</h1>
+  {posts.length
+    ? (
+      <ul class="posts">
+        {posts.map((p) => {
+          const when = (p as { published_at?: string }).published_at ?? p.created_at;
+          return (
+            <li>
+              <h2><a href={`/blog/${p.slug}/`}>{p.title}</a></h2>
+              {when && <p class="muted"><time datetime={when}>{date(when)}</time></p>}
+              {p.excerpt && <p>{p.excerpt}</p>}
+            </li>
+          );
+        })}
+      </ul>
+    )
+    : <p class="muted">No posts yet.</p>}
+</Shop>

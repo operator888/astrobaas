@@ -13,6 +13,8 @@ import { resolveActiveTheme } from '../../lib/theme-runtime';
 import { resolveByline } from '../../lib/byline';
 import { getSiteSettings } from '../../lib/site';
 import { rankBy, POST_WEIGHTS } from '../../lib/search/rank';
+import { resolveSuggestSettings } from '../../lib/search/suggest-settings';
+import { notePopularSearch } from '../../lib/search/popular-store';
 import { jsonForScript } from '../../lib/json-in-html';
 import { resolveSiteUrl } from '../../lib/site-url';
 import { trailForArchive, breadcrumbListJsonLd } from '../../lib/breadcrumbs';
@@ -117,6 +119,10 @@ if (searchQuery) {
     // that worked on one and not the other would be exactly that.
     { expand: searchExpand ?? undefined },
   ).map((r) => r.item);
+  // Popular searches: counted only when it found something, never for staff.
+  if (!Astro.locals.user && resolveSuggestSettings(searchSettings).popular) {
+    notePopularSearch(searchQuery, filteredPosts.length, Astro.locals.ip, new Date(), Astro.request.headers.get('user-agent'));
+  }
 }
 
 const totalPosts = filteredPosts.length;

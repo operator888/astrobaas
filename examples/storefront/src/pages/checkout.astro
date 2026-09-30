@@ -1,0 +1,295 @@
+---
+import Shop from '../layouts/Shop.astro';
+
+/*
+ * Countries offered in the address form. ISO 3166-1 alpha-2, because the CMS
+ * refuses a country NAME rather than guessing which country "Georgia" is.
+ * PUBLIC_SHIP_COUNTRIES narrows it to where the shop actually delivers.
+ */
+const ALL = ['AT','BE','BG','CH','CY','CZ','DE','DK','EE','ES','FI','FR','GB','GR','HR','HU','IE','IS','IT','LT','LU','LV','MT','NL','NO','PL','PT','RO','SE','SI','SK','US','CA','AU'];
+const configured = String(import.meta.env.PUBLIC_SHIP_COUNTRIES ?? '')
+  .split(',').map((c) => c.trim().toUpperCase()).filter((c) => /^[A-Z]{2}$/.test(c));
+const codes = configured.length ? configured : ALL;
+const names = new Intl.DisplayNames(['en'], { type: 'region' });
+const countries = codes.map((c) => ({ code: c, name: names.of(c) ?? c })).sort((a, b) => a.name.localeCompare(b.name));
+---
+<Shop title="Checkout" noindex>
+  <h1>Checkout</h1>
+  <p data-co-status role="status" class="muted">Loading your cart…</p>
+  <div class="notice error" data-co-error role="alert" tabindex="-1" hidden><p></p></div>
+
+  <form class="checkout" data-checkout novalidate hidden>
+    <div>
+      <fieldset>
+        <legend>Contact</legend>
+        <div class="field">
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" autocomplete="email" required aria-describedby="email-hint" />
+          <p class="hint" id="email-hint">We send your receipt here.</p>
+        </div>
+        <div class="field">
+          <label for="name">Full name</label>
+          <input id="name" name="name" autocomplete="name" required />
+        </div>
+        <div class="field">
+          <label for="phone">Phone <span class="muted">(optional)</span></label>
+          <input id="phone" name="phone" type="tel" autocomplete="tel" />
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Delivery address</legend>
+        <div class="field">
+          <label for="line1">Street and number</label>
+          <input id="line1" name="line1" autocomplete="address-line1" required />
+        </div>
+        <div class="field">
+          <label for="line2">Apartment, floor <span class="muted">(optional)</span></label>
+          <input id="line2" name="line2" autocomplete="address-line2" />
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="postcode">Postcode</label>
+            <input id="postcode" name="postcode" autocomplete="postal-code" required />
+          </div>
+          <div class="field">
+            <label for="city">City</label>
+            <input id="city" name="city" autocomplete="address-level2" required />
+          </div>
+        </div>
+        <div class="field">
+          <label for="country">Country</label>
+          <select id="country" name="country" autocomplete="country" required>
+            <option value="">Choose a country</option>
+            {countries.map((c) => <option value={c.code}>{c.name}</option>)}
+          </select>
+        </div>
+      </fieldset>
+
+      <fieldset data-shipping hidden>
+        <legend>Delivery</legend>
+        <div data-shipping-options></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Payment</legend>
+        <div data-payment-options><p class="muted">Loading payment options…</p></div>
+      </fieldset>
+
+      <div class="field">
+        <label for="note">Note for the shop <span class="muted">(optional)</span></label>
+        <textarea id="note" name="note" rows="3" maxlength="1000"></textarea>
+      </div>
+    </div>
+
+    <aside class="summary" aria-labelledby="summary-title">
+      <h2 id="summary-title">Order summary</h2>
+      <ul class="posts" data-co-lines></ul>
+      <dl class="totals" data-co-totals aria-live="polite"></dl>
+      <p><button class="btn" type="submit" data-place>Place order</button></p>
+      <p class="hint">By placing the order you agree to pay the total shown.</p>
+    </aside>
+  </form>
+</Shop>
+
+<script>
+  import { readCart, clearCart, browserStorage, cartNonce, attemptKey } from '../lib/cart';
+  import { cms, quote, paymentMethods, instructionsFor, problem, AstroBaasError, type Quote, type PaymentMethod } from '../scripts/shop-api';
+  import { formatMoney } from '../lib/money';
+  import { powToken } from '../scripts/pow';
+  import { LAST_ORDER_KEY, startPayment } from '../scripts/last-order';
+
+  const store = browserStorage();
+  const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
+  const form = $<HTMLFormElement>('[data-checkout]');
+  const status = $('[data-co-status]');
+  const errorBox = $('[data-co-error]');
+  const placeBtn = $<HTMLButtonElement>('[data-place]');
+
+  const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLElementTagNameMap[K]> = {}, ...kids: (Node | string)[]) => {
+    const n = Object.assign(document.createElement(tag), props);
+    n.append(...kids);
+    return n;
+  };
+
+  function showError(message: string) {
+    errorBox.querySelector('p')!.textContent = message;
+    errorBox.hidden = false;
+    errorBox.focus();
+  }
+
+  let methods: PaymentMethod[] = [];
+  let last: Quote | null = null;
+
+  function field(name: string): string {
+    const v = new FormData(form).get(name);
+    return typeof v === 'string' ? v.trim() : '';
+  }
+
+  function renderShipping(q: Quote) {
+    const box = $('[data-shipping]');
+    const list = $('[data-shipping-options]');
+    if (!q.requires_shipping || !q.available_shipping_methods.length) { box.hidden = true; return; }
+    const chosen = q.selected_shipping_method?.id;
+    list.replaceChildren(...q.available_shipping_methods.map((m) => {
+      const input = el('input', { type: 'radio', name: 'shipping', value: m.id, checked: m.id === chosen });
+      input.addEventListener('change', () => void repriceShowingErrors());
+      return el('label', { className: 'choice' }, input,
+        el('span', {}, `${m.name} — ${m.cost_cents ? formatMoney(m.cost_cents, q.currency) : 'free'}`));
+    }));
+    box.hidden = false;
+  }
+
+  function renderSummary(q: Quote) {
+    $('[data-co-lines]').replaceChildren(...q.lines.map((l) =>
+      el('li', {}, `${l.qty} × ${l.name} — ${formatMoney(l.line_subtotal_cents, q.currency)}`)));
+    const totals = $('[data-co-totals]');
+    totals.replaceChildren();
+    const add = (label: string, value: string, grand = false) =>
+      totals.append(el('dt', { className: grand ? 'grand' : '' }, label), el('dd', { className: grand ? 'grand' : '' }, value));
+    add('Subtotal', formatMoney(q.subtotal_cents, q.currency));
+    if (q.discount_cents) add('Discount', `−${formatMoney(q.discount_cents, q.currency)}`);
+    if (q.requires_shipping) add('Delivery', field('country') ? formatMoney(q.shipping_cents, q.currency) : 'Choose a country');
+    add(q.prices_include_tax ? 'Includes tax' : 'Tax', formatMoney(q.tax_cents, q.currency));
+    add('Total', formatMoney(q.total_cents, q.currency), true);
+  }
+
+  function renderPayments() {
+    const box = $('[data-payment-options]');
+    if (!methods.length) {
+      box.replaceChildren(el('p', { textContent: 'This shop is not taking payments online yet. Please contact it to order.' }));
+      placeBtn.disabled = true;
+      return;
+    }
+    box.replaceChildren(...methods.map((m, i) =>
+      el('label', { className: 'choice' },
+        el('input', { type: 'radio', name: 'payment', value: m.id, required: true, checked: i === 0 }),
+        el('span', {}, m.label))));
+  }
+
+  const items = () => readCart(store);
+
+  /** Price the cart for what the form says now. Throws on refusal. */
+  async function reprice(): Promise<Quote> {
+    const q = await quote(items(), {
+      shipping_country: field('country') || undefined,
+      shipping_postcode: field('postcode') || undefined,
+      shipping_method_id: field('shipping') || undefined,
+    });
+    last = q;
+    renderShipping(q);
+    renderSummary(q);
+    return q;
+  }
+  const repriceShowingErrors = () => reprice().then(() => { errorBox.hidden = true; }, (err) => showError(problem(err)));
+
+  async function start() {
+    if (!items().length) {
+      status.textContent = 'Your cart is empty.';
+      status.append(' ', el('a', { href: '/shop/', textContent: 'Browse the shop' }), '.');
+      return;
+    }
+    try {
+      // No form without a priced cart: a checkout whose summary is empty
+      // invites the buyer to agree to a total nobody has shown them.
+      [methods] = await Promise.all([paymentMethods(), reprice()]);
+    } catch (err) {
+      status.textContent = problem(err);
+      status.append(' ', el('a', { href: '/cart/', textContent: 'Review your cart' }), '.');
+      return;
+    }
+    renderPayments();
+    status.textContent = '';
+    form.hidden = false;
+  }
+
+  for (const name of ['country', 'postcode']) {
+    form.querySelector(`[name="${name}"]`)?.addEventListener('change', () => void repriceShowingErrors());
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errorBox.hidden = true;
+    if (!form.checkValidity()) {
+      const bad = form.querySelector<HTMLInputElement>(':invalid');
+      showError(bad ? `Please fill in "${form.querySelector(`label[for="${bad.id}"]`)?.textContent?.trim() ?? bad.name}".` : 'Please complete the form.');
+      bad?.focus();
+      return;
+    }
+    const method = methods.find((m) => m.id === field('payment'));
+    if (!method) { showError('Choose how you want to pay.'); return; }
+
+    placeBtn.disabled = true;
+    placeBtn.textContent = 'Placing your order…';
+    const email = field('email');
+    const release = () => { placeBtn.disabled = false; placeBtn.textContent = 'Place order'; };
+    try {
+      /*
+       * Price it once more, for exactly what is about to be sent. A postcode
+       * typed a moment ago — or a price changed since the page loaded — can
+       * move the total; the buyer agrees to "the total shown", so if it moved
+       * they see the new one and press again, rather than being charged a
+       * number they never saw.
+       */
+      const shown = last?.total_cents;
+      const fresh = await reprice();
+      if (shown !== undefined && fresh.total_cents !== shown) {
+        release();
+        showError(`The total is now ${formatMoney(fresh.total_cents, fresh.currency)}, updated for your delivery details. Check it, then press "Place order" again.`);
+        return;
+      }
+
+      const address = {
+        name: field('name'), line1: field('line1'), line2: field('line2') || undefined,
+        city: field('city'), postcode: field('postcode'), country: field('country'),
+        phone: field('phone') || undefined,
+      };
+      const details = {
+        email,
+        name: address.name,
+        phone: address.phone,
+        items: items(),
+        shipping_address: address,
+        shipping_method_id: field('shipping') || undefined,
+        payment_method: method.id,
+        note: field('note') || undefined,
+      };
+      // Same cart + same details = same key = the same order, however many
+      // times it is sent. The proof-of-work token is left out of the key: it
+      // is new on every attempt, and the CMS leaves it out too.
+      const idempotencyKey = await attemptKey(cartNonce(store), details);
+      const order = await cms.orders.place(
+        { ...details, pow_token: await powToken(cms, 'checkout') },
+        { idempotencyKey },
+      ) as unknown as { number: string; total_cents: number; currency: string; status: string };
+
+      // What the confirmation page shows. Session-only, and never in the URL:
+      // an email address in a query string ends up in logs and referrers.
+      try {
+        sessionStorage.setItem(LAST_ORDER_KEY, JSON.stringify({
+          number: order.number, total_cents: order.total_cents, currency: order.currency,
+          method: method.label, instructions: instructionsFor(method), online: method.kind === 'provider',
+          provider: method.kind === 'provider' ? method.id : undefined, email,
+        }));
+      } catch { /* the order is placed either way */ }
+      clearCart(store);
+      document.dispatchEvent(new Event('cart:changed'));
+
+      if (method.kind === 'provider') {
+        placeBtn.textContent = 'Taking you to payment…';
+        // The order exists from here on. If the payment page cannot be opened,
+        // the confirmation page offers "Pay now" — pressing "Place order"
+        // again would only fail, because the cart is already empty.
+        const url = await startPayment(order.number, email, method.id).catch(() => null);
+        window.location.assign(url ?? '/order/placed/');
+        return;
+      }
+      window.location.assign('/order/placed/');
+    } catch (err) {
+      release();
+      showError(err instanceof AstroBaasError || !(err instanceof Error) ? problem(err) : err.message);
+    }
+  });
+
+  void start();
+</script>

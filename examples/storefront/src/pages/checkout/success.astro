@@ -1,0 +1,26 @@
+---
+/*
+ * Where Stripe, PayPal and Klarna send the buyer back: the CMS builds
+ * `<Site URL>/checkout/success?order=…`, and on a headless shop Site URL is
+ * this storefront.
+ *
+ * It says "thank you", not "paid". Arriving here proves only that the buyer
+ * came back; the CMS marks an order paid when the provider's signed webhook
+ * says so, which can take a few seconds (PayPal is captured then).
+ */
+import Shop from '../../layouts/Shop.astro';
+---
+<Shop title="Thank you" noindex>
+  <h1>Thank you for your order</h1>
+  <p>Order <strong data-order-number>—</strong> is with us. You will get an email as soon as the payment is confirmed, usually within a minute.</p>
+  <p class="muted">If the payment does not go through, the order is released after a while and nothing is charged.</p>
+  <p><a href="/shop/">Continue shopping</a></p>
+</Shop>
+
+<script>
+  // The order number is the only thing read from the URL, and it is shown as
+  // text, never as markup.
+  const n = new URLSearchParams(location.search).get('order');
+  const slot = document.querySelector('[data-order-number]');
+  if (slot && n && /^[A-Za-z0-9-]{1,40}$/.test(n)) slot.textContent = n;
+</script>

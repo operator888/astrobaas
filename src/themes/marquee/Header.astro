@@ -9,19 +9,23 @@
 import type { HeaderProps } from '../../core/theme-slots';
 import LocaleSwitcher from '../../components/public/LocaleSwitcher.astro';
 import { routeHref } from '../../lib/locale-links';
+import type { ResolvedNavItem } from '../../lib/navigation';
 
-const { siteTitle = 'AstroBaaS', localeOptions } = Astro.props as HeaderProps;
+const { siteTitle = 'AstroBaaS', localeOptions, navigation = [] } = Astro.props as HeaderProps;
 
 // routeHref, not a literal: see the note in the default PublicHeader. A theme
 // is the easiest place for this to regress, because its nav is written once and
 // looks correct on the single-language site it was designed against.
 const loc = Astro.locals.locale;
-const nav = [
+const here = Astro.url.pathname.replace(/\/+$/, '') || '/';
+const builtIn: ResolvedNavItem[] = [
   { href: routeHref('/', loc), label: 'Home' },
   { href: routeHref('/blog', loc), label: 'Blog' },
   { href: routeHref('/about', loc), label: 'About' },
   { href: routeHref('/contact', loc), label: 'Contact' },
-];
+].map((l) => ({ ...l, external: false, newTab: false, current: (l.href.replace(/\/+$/, '') || '/') === here, children: [] }));
+// The operator's menu replaces the stamped tabs, never sits beside them.
+const nav: ResolvedNavItem[] = navigation.length > 0 ? navigation : builtIn;
 ---
 
 <header class="mq-header mq-header-shell">
@@ -31,12 +35,32 @@ const nav = [
         class="mq-wordmark block font-bold uppercase leading-none tracking-tight ab-heading-font ab-ink"
       >{siteTitle}</span>
     </a>
-    <nav class="no-print mt-6 flex flex-wrap gap-0 -mb-px">
+    <nav class="no-print mt-6 flex flex-wrap gap-0 -mb-px" aria-label="Main">
       {nav.map((item) => (
-        <a
-          href={item.href}
-          class="mq-tab px-5 py-2 text-xs font-bold uppercase tracking-widest border-4 border-b-0 -ml-1 first:ml-0 ab-border-ink ab-ink ab-surface"
-        >{item.label}</a>
+        <span class="mq-nav-item relative -ml-1 first:ml-0">
+          <a
+            href={item.href}
+            class="mq-tab block px-5 py-2 text-xs font-bold uppercase tracking-widest border-4 border-b-0 ab-border-ink ab-ink ab-surface"
+            aria-current={item.current ? 'page' : undefined}
+            target={item.newTab ? '_blank' : undefined}
+            rel={item.newTab ? 'noopener' : undefined}
+          >{item.label}{item.newTab && <span class="sr-only"> (opens in a new tab)</span>}</a>
+          {item.children.length > 0 && (
+            <ul class="mq-nav-sub absolute left-0 top-full z-20 min-w-[12rem] border-4 ab-border-ink ab-surface py-1">
+              {item.children.map((child) => (
+                <li>
+                  <a
+                    href={child.href}
+                    class="block px-4 py-2 text-xs font-bold uppercase tracking-widest ab-ink"
+                    aria-current={child.current ? 'page' : undefined}
+                    target={child.newTab ? '_blank' : undefined}
+                    rel={child.newTab ? 'noopener' : undefined}
+                  >{child.label}{child.newTab && <span class="sr-only"> (opens in a new tab)</span>}</a>
+                </li>
+              ))}
+            </ul>
+          )}
+        </span>
       ))}
     </nav>
     <LocaleSwitcher options={localeOptions} class="mt-4" />
@@ -52,4 +76,16 @@ const nav = [
   .mq-wordmark {
     font-size: clamp(2.5rem, 9vw, 6rem);
   }
+
+  /* The current tab is the stamped-down one: the page's own colours swapped.
+     A shape change, not only a colour one. */
+  .mq-tab[aria-current='page'] {
+    background: var(--text-color);
+    color: var(--background-color);
+  }
+
+  /* Hover AND focus-within, so a keyboard reaches the submenu. */
+  .mq-nav-sub { display: none; }
+  .mq-nav-item:hover > .mq-nav-sub,
+  .mq-nav-item:focus-within > .mq-nav-sub { display: block; }
 </style>

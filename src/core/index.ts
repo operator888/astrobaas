@@ -81,6 +81,8 @@ export type {
   // …and the same for v4's TableOfContents, for the same reason.
   TableOfContentsProps,
   TocItem,
+  // The resolved site menu a Header receives (HeaderProps.navigation).
+  ResolvedNavItem,
   BreadcrumbItem,
 } from './theme-slots';
 

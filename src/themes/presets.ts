@@ -32,9 +32,9 @@ export const PRESETS: ThemePreset[] = [
     description: 'Crisp neutral base with a confident blue. The safe default.',
     swatch: ['#2563eb', '#f8fafc'],
     settings: {
-      primaryColor: '#2563eb', secondaryColor: '#7c3aed', accentColor: '#059669',
+      primaryColor: '#2563eb', secondaryColor: '#7c3aed', accentColor: '#047857',
       backgroundColor: '#ffffff', textColor: '#0f172a',
-      surfaceColor: '#ffffff', mutedColor: '#64748b', borderColor: '#e2e8f0',
+      surfaceColor: '#ffffff', mutedColor: '#475569', borderColor: '#e2e8f0',
       headingFont: 'Inter', bodyFont: 'Inter', fontSize: '16px',
       typeScale: 'normal', headingWeight: 'bold',
       radius: 'md', density: 'normal', shadow: 'soft',

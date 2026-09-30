@@ -1,0 +1,26 @@
+---
+import type { Product } from '../lib/cms';
+import { priceOf } from '../lib/cms';
+import { formatMoney } from '../lib/money';
+
+interface Props { product: Product; currency: string }
+const { product, currency } = Astro.props;
+const { now, was } = priceOf(product);
+const image = product.images?.find((i) => (i.kind ?? 'image') === 'image');
+---
+<li class="card">
+  <a href={`/product/${product.slug}/`}>
+    <div class="card-img">
+      {image
+        ? <img src={image.src} alt={image.alt ?? ''} loading="lazy" width="400" height="400" />
+        : null}
+    </div>
+    <span class="card-name">{product.name}</span>
+  </a>
+  <span class="price">
+    {was !== null && <span class="visually-hidden">Sale price </span>}
+    {formatMoney(now, currency)}
+    {was !== null && <del><span class="visually-hidden">Was </span>{formatMoney(was, currency)}</del>}
+  </span>
+  {!product.in_stock && <span class="stock-out">Sold out</span>}
+</li>

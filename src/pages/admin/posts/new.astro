@@ -303,9 +303,10 @@ const startBodyPage = patternsByName.get(String(startSettings.default_body_page 
 
         <!-- Category -->
         <div class="bg-white border border-gray-200 rounded-lg p-6">
-          <h3 class="text-lg font-semibold text-gray-900 mb-4">Category</h3>
+          <h3 id="post-category-label" class="text-lg font-semibold text-gray-900 mb-4">Category</h3>
           <select
             id="post-category"
+            aria-labelledby="post-category-label"
             name="category_id"
             class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
           >
@@ -366,7 +367,7 @@ const startBodyPage = patternsByName.get(String(startSettings.default_body_page 
       <div class="bg-white rounded-lg max-w-6xl w-full max-h-[90vh] overflow-hidden">
         <div class="flex items-center justify-between p-6 border-b border-gray-200">
           <h2 class="text-xl font-semibold text-gray-900">Select Media</h2>
-          <button id="close-media-modal" class="text-gray-400 hover:text-gray-600">
+          <button id="close-media-modal" type="button" aria-label="Close" class="text-gray-400 hover:text-gray-600">
             <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
             </svg>

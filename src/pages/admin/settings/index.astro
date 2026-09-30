@@ -1,4 +1,5 @@
 ---
+import { resolveSuggestSettings } from '../../../lib/search/suggest-settings';
 import AdminLayout from '../../../layouts/AdminLayout.astro';
 import { jsonForScript } from '../../../lib/json-in-html';
 import { LocalDB } from '../../../lib/localdb';
@@ -89,6 +90,9 @@ const values = {
   robots_txt: map.robots_txt ?? '',
   crawler_policy: (map.crawler_policy && typeof map.crawler_policy === 'object') ? map.crawler_policy : {},
   search_synonyms: map.search_synonyms ?? '',
+  // Through the resolver the suggestion route uses, so the defaults cannot drift.
+  suggest: resolveSuggestSettings(map),
+  search_popular_blocklist: typeof map.search_popular_blocklist === 'string' ? map.search_popular_blocklist : '',
   link_check_external: map.link_check_external === true || map.link_check_external === 'true' || map.link_check_external === '1',
   toc_min_headings: map.toc_min_headings ?? 0,
   // Through the same helper the routes use, so the default cannot drift.
@@ -349,7 +353,8 @@ const emailTransport = emailChannelLabel();
           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
         <p class="text-xs text-gray-500 mt-1">
           The web address your uploaded images are served from — set this if your shop runs on a
-          different domain than this CMS, or its product photos will not load.
+          different domain than this CMS, or its product photos will not load. Receipt links in
+          order emails point here too, because the receipt page is served by this CMS.
         </p>
       </div>
 
@@ -742,6 +747,38 @@ const emailTransport = emailChannelLabel();
           comment. Accents and capitals do not matter. Applies to posts and to the catalogue.
         </p>
       </div>
+
+      <fieldset class="space-y-3 border-t border-gray-200 pt-4">
+        <legend class="text-sm font-medium text-gray-900">Search suggestions</legend>
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input id="search_suggestions_enabled" name="search_suggestions_enabled" type="checkbox" checked={values.suggest.enabled} class="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+          Suggest posts, pages and products while someone types in the search box
+        </label>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="search_suggestions_limit">Suggestions of each kind</label>
+          <input id="search_suggestions_limit" name="search_suggestions_limit" type="number" min="1" max="8" value={values.suggest.limit} class="w-24 px-3 py-2 border border-gray-300 rounded-lg" />
+        </div>
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input id="search_popular_enabled" name="search_popular_enabled" type="checkbox" checked={values.suggest.popular} class="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+          Also suggest popular searches
+        </label>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="search_popular_min_count">Show a search only after this many visitors have made it</label>
+          <input id="search_popular_min_count" name="search_popular_min_count" type="number" min="2" max="1000" value={values.suggest.minCount} class="w-24 px-3 py-2 border border-gray-300 rounded-lg" aria-describedby="popular-hint" />
+          <p id="popular-hint" class="text-xs text-gray-500 mt-1 max-w-2xl">
+            Only searches that found something are counted, never staff searches, and each visitor once a day.
+            Anything that looks like an email, a web address or a phone or order number is never stored.
+            What visitors search for is listed under <a href="/admin/insights#searches" class="text-blue-600 hover:underline">Insights</a>.
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="search_popular_blocklist">Never suggest</label>
+          <textarea id="search_popular_blocklist" name="search_popular_blocklist" rows="3" spellcheck="false"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder={'competitor name\nan unwanted word'}>{values.search_popular_blocklist}</textarea>
+          <p class="text-xs text-gray-500 mt-1">One word or phrase per line. A popular search containing it is not suggested.</p>
+        </div>
+      </fieldset>
 
       {/*
         PER-CRAWLER POLICY.
@@ -1827,9 +1864,11 @@ const emailTransport = emailChannelLabel();
     name.placeholder = 'field_name';
     name.value = f.name ?? '';
     name.className = 'sg-fname px-2 py-1 border border-gray-300 rounded w-36 text-sm';
+    name.setAttribute('aria-label', 'Field name');
 
     const type = document.createElement('select');
     type.className = 'sg-ftype px-2 py-1 border border-gray-300 rounded text-sm';
+    type.setAttribute('aria-label', 'Field type');
     for (const [v, label] of SG_FIELD_TYPES) {
       const o = document.createElement('option');
       o.value = v; o.textContent = label;
@@ -2125,6 +2164,7 @@ const emailTransport = emailChannelLabel();
         choice.className = 'py-2 text-right';
         const sel = document.createElement('select');
         sel.className = 'px-2 py-1 border border-gray-300 rounded text-sm';
+        sel.setAttribute('aria-label', `${c.label} — what robots.txt tells it`);
         for (const [val, label] of [['default', 'Default'], ['allow', 'Allow'], ['disallow', 'Block']]) {
           const o = document.createElement('option');
           o.value = val; o.textContent = label;
@@ -2282,6 +2322,6 @@ const emailTransport = emailChannelLabel();
   });
   document.getElementById('reading-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    save(e.target, ['posts_per_page', 'feed_items', 'feed_format', 'discourage_indexing', 'toc_min_headings', 'related_posts_count', 'robots_txt', 'link_check_external', 'search_synonyms', 'default_body_post', 'default_body_page', 'comments_enabled', 'reviews_enabled', 'editorial_review_required', 'author_archives_enabled', 'print_button', 'popup_enabled', 'popup_title', 'popup_text', 'popup_button_label', 'popup_button_url', 'popup_trigger', 'popup_delay_seconds', 'popup_scroll_percent', 'popup_frequency_days']);
+    save(e.target, ['posts_per_page', 'feed_items', 'feed_format', 'discourage_indexing', 'toc_min_headings', 'related_posts_count', 'robots_txt', 'link_check_external', 'search_synonyms', 'search_suggestions_enabled', 'search_suggestions_limit', 'search_popular_enabled', 'search_popular_min_count', 'search_popular_blocklist', 'default_body_post', 'default_body_page', 'comments_enabled', 'reviews_enabled', 'editorial_review_required', 'author_archives_enabled', 'print_button', 'popup_enabled', 'popup_title', 'popup_text', 'popup_button_label', 'popup_button_url', 'popup_trigger', 'popup_delay_seconds', 'popup_scroll_percent', 'popup_frequency_days']);
   });
 </script>

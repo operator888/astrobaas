@@ -1,0 +1,99 @@
+---
+import Shop from '../../layouts/Shop.astro';
+import { allProducts, allCategories, shopCurrency, priceOf, type Product } from '../../lib/cms';
+import { pathTo } from '../../lib/categories';
+import { formatMoney } from '../../lib/money';
+
+export async function getStaticPaths() {
+  // Every product gets a page, listed or not: "hidden" means off the shelves,
+  // not unreachable — a merchant hides a product and still sends its link.
+  const products = await allProducts();
+  return products.map((p) => ({ params: { slug: p.slug }, props: { product: p } }));
+}
+
+interface Props { product: Product }
+const { product } = Astro.props;
+const [categories, currency] = await Promise.all([allCategories(), shopCurrency()]);
+const { now, was } = priceOf(product);
+const images = (product.images ?? []).filter((i) => (i.kind ?? 'image') === 'image');
+const trail = product.categories?.length ? pathTo(product.categories[0], categories) : [];
+
+// A product with variants can only be bought as one of them — the CMS refuses
+// an order line without a variant_id — so the choice is required, not optional.
+const variants = (product.variants ?? []).filter((v) => v.enabled);
+const variantLabel = (v: NonNullable<Product['variants']>[number]) =>
+  Object.values(v.options ?? {}).join(' / ') || v.sku || v.id;
+const buyable = variants.length ? variants.some((v) => v.in_stock) : product.in_stock;
+const plain = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+---
+<Shop title={product.name} description={product.short_description ? plain(product.short_description).slice(0, 160) : undefined}>
+  <nav class="crumbs" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="/shop/">Shop</a></li>
+      {trail.map((c) => <li><a href={`/shop/${c.slug}/`}>{c.name}</a></li>)}
+      <li><span aria-current="page">{product.name}</span></li>
+    </ol>
+  </nav>
+  <article class="product">
+    <div class="gallery">
+      {images.length
+        ? images.map((img, i) => (
+            <img src={img.src} alt={img.alt || (i === 0 ? product.name : '')} width="800" height="800" loading={i === 0 ? 'eager' : 'lazy'} />
+          ))
+        : null}
+    </div>
+    <div>
+      <h1>{product.name}</h1>
+      <p class="price">
+        {was !== null && <span class="visually-hidden">Sale price </span>}
+        {formatMoney(now, currency)}
+        {was !== null && <del><span class="visually-hidden">Was </span>{formatMoney(was, currency)}</del>}
+      </p>
+      {/* Sanitised by the CMS on save against its allow-list — the same HTML
+          the CMS's own theme renders. */}
+      {product.short_description && <div class="prose" set:html={product.short_description} />}
+
+      <form class="buy" data-add-to-cart data-product={product.id} novalidate>
+        {variants.length > 0 && (
+          <div class="field">
+            <label for="variant">Option</label>
+            <select id="variant" name="variant" required>
+              {variants.map((v) => (
+                <option value={v.id} disabled={!v.in_stock}>
+                  {variantLabel(v)}{v.price_cents != null && v.price_cents !== now ? ` — ${formatMoney(v.price_cents, currency)}` : ''}{!v.in_stock ? ' (sold out)' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        <div class="field">
+          <label for="qty">Quantity</label>
+          <input id="qty" name="qty" type="number" min="1" max="99" value="1" inputmode="numeric" />
+        </div>
+        <div class="field">
+          <button class="btn" type="submit" disabled={!buyable}>{buyable ? 'Add to cart' : 'Sold out'}</button>
+        </div>
+      </form>
+      <p class="notice" data-added role="status" hidden>
+        Added to your cart. <a href="/cart/">View cart</a>
+      </p>
+
+      {product.description && <div class="prose" set:html={product.description} />}
+    </div>
+  </article>
+</Shop>
+
+<script>
+  import { addToCart, browserStorage } from '../../lib/cart';
+  const form = document.querySelector<HTMLFormElement>('[data-add-to-cart]');
+  const done = document.querySelector<HTMLElement>('[data-added]');
+  form?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const data = new FormData(form);
+    const qty = Math.max(1, Math.floor(Number(data.get('qty')) || 1));
+    const variant = data.get('variant');
+    addToCart(browserStorage(), form.dataset.product!, qty, typeof variant === 'string' && variant ? variant : undefined);
+    document.dispatchEvent(new Event('cart:changed'));
+    if (done) { done.hidden = false; }
+  });
+</script>

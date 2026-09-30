@@ -1,0 +1,27 @@
+---
+import Shop from '../../layouts/Shop.astro';
+import ProductCard from '../../components/ProductCard.astro';
+import CategoryTree from '../../components/CategoryTree.astro';
+import { allProducts, allCategories, shopCurrency, listed } from '../../lib/cms';
+import { buildTree } from '../../lib/categories';
+
+const [products, categories, currency] = await Promise.all([allProducts(), allCategories(), shopCurrency()]);
+const shown = products.filter(listed);
+const tree = buildTree(categories);
+---
+<Shop title="Shop" description="Everything in the shop.">
+  <h1>Shop</h1>
+  <div class="shop">
+    {tree.length > 0 && (
+      <nav class="cats" aria-label="Categories">
+        <CategoryTree nodes={tree} />
+      </nav>
+    )}
+    <section aria-label="Products">
+      <p class="muted">{shown.length === 1 ? '1 product' : `${shown.length} products`}</p>
+      {shown.length
+        ? <ul class="grid">{shown.map((p) => <ProductCard product={p} currency={currency} />)}</ul>
+        : <p class="muted">Nothing here yet.</p>}
+    </section>
+  </div>
+</Shop>

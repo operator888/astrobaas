@@ -163,8 +163,25 @@ if (process.env.CHANGE_FEED_CHILD === 'hold') {
   // It exits 0 only if its own COMMIT succeeded — which a connection poisoned
   // in the OTHER process can prevent, by keeping a lock the commit must wait out.
   const { createClient } = await import('@libsql/client');
-  const c = createClient({ url: process.env.DATABASE_URL });
-  const tx = await c.transaction('write');
+  // TAKING the lock is patient; HOLDING it is not. Something can briefly own
+  // the file lock at the moment this starts (CI saw SQLITE_BUSY here once), and
+  // that is setup noise, not the behaviour under test — so retry BUSY for up to
+  // ~5s. Any other error, or still BUSY at the deadline, throws as before. Each
+  // attempt gets a FRESH client: a BEGIN that failed BUSY leaves its pooled
+  // connection with a statement in progress, and a later COMMIT on it fails.
+  let c;
+  let tx;
+  for (const deadline = Date.now() + 5000, delays = [25, 50, 100]; ; ) {
+    c = createClient({ url: process.env.DATABASE_URL });
+    try {
+      tx = await c.transaction('write');
+      break;
+    } catch (e) {
+      c.close();
+      if (e?.code !== 'SQLITE_BUSY' || Date.now() >= deadline) throw e;
+      await new Promise((r) => setTimeout(r, delays.length > 1 ? delays.shift() : delays[0]));
+    }
+  }
   await tx.execute('CREATE TABLE IF NOT EXISTS lock_probe (x)');
   await tx.execute('INSERT INTO lock_probe VALUES (1)');
   process.stdout.write('locked\n');

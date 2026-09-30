@@ -22,9 +22,10 @@
 import type { Post } from './models';
 import type { LocaleOption } from '../lib/locale-links';
 import type { TocItem } from '../lib/toc';
+import type { ResolvedNavItem } from '../lib/navigation';
 // Re-exported so a theme typing its TableOfContents override can name the
 // item type from 'astrobaas/core' without reaching into lib/.
-export type { TocItem };
+export type { TocItem, ResolvedNavItem };
 
 /** Every overridable slot. Adding one here is additive — themes inherit defaults. */
 export const THEME_SLOTS = [
@@ -63,6 +64,21 @@ export interface HeaderProps {
    * language at the same path.
    */
   localeOptions?: LocaleOption[];
+  /**
+   * The menu the operator built at /admin/navigation, resolved for this
+   * request: labels in the reader's language, internal links carrying their
+   * locale, `current` set on the item for this page.
+   *
+   * EMPTY when the operator has never saved a menu. A theme must then render
+   * its own built-in links, exactly as it did before this prop existed — that
+   * is what keeps adding it from changing any site nobody has touched. When it
+   * is non-empty, render it instead of the built-in links, not beside them.
+   *
+   * Render `current` as `aria-current="page"`, and `newTab` as
+   * `target="_blank" rel="noopener"` with something that tells the reader
+   * (the bundled themes add a visually-hidden "opens in a new tab").
+   */
+  navigation?: ResolvedNavItem[];
 }
 
 export interface FooterProps {

@@ -164,7 +164,7 @@ const twoVariants = (a, b) => [
   { id: 'v-tort', options: { Colour: 'Tortoise' }, stock: b, in_stock: b > 0, enabled: true },
 ];
 
-async function deterministicChild(LocalDB, saveProduct) {
+async function deterministicChild(LocalDB, saveProduct, planBulkEdit) {
   const hook = await installSqlHook();
   const out = {};
   const mk = (over) => LocalDB.createProduct({
@@ -239,6 +239,32 @@ async function deterministicChild(LocalDB, saveProduct) {
     await LocalDB.updateCustomer(c.id, { name: 'Race Renamed' });
     const after = await LocalDB.getCustomer(c.id);
     out.d5 = { fired: fired(), name: after.name, phone: after.phone ?? null };
+  }
+
+  // D9. Bulk edit (POST /api/product-bulk): a price change on a product whose
+  //     variants have their own prices. The route plans from a snapshot, so the
+  //     patch carries every variant — stock included. A Black sells mid-save.
+  //     With the snapshot's counts as bases the sale survives; the control
+  //     without bases shows the patch really would have given it back.
+  for (const [key, withBases] of [['d9', true], ['d9ctl', false]]) {
+    const priced = twoVariants(3, 3).map((v) => ({ ...v, price_cents: 5000, regular_price_cents: 5000 }));
+    const p = await mk({ name: key, slug: `race-${key}`, stock: null, type: 'variable', variants: priced });
+    const snapshot = JSON.parse(JSON.stringify(await LocalDB.getProduct(p.id)));
+    const [plan] = planBulkEdit([snapshot], { price: { mode: 'percent', value: 10 } });
+    let reserved = null;
+    const fired = hook.before(UPDATE_PRODUCTS, async () => {
+      reserved = await LocalDB.reserveStock(p.id, 1, { variantId: 'v-black' });
+    });
+    const bases = withBases
+      ? { stock: snapshot.stock ?? null, variants: new Map(snapshot.variants.map((v) => [v.id, v.stock ?? null])) }
+      : undefined;
+    const saved = await saveProduct(plan.patch, p.id, 'race-bulk', bases);
+    const after = await LocalDB.getProduct(p.id);
+    out[key] = {
+      fired: fired(), reserved, ok: saved.ok,
+      black: variantStock(after, 'v-black'), tort: variantStock(after, 'v-tort'),
+      price: (after.variants ?? []).find((v) => v.id === 'v-black')?.regular_price_cents,
+    };
   }
 
   // A1. ABA by REORDER: both variants hold 2, so a guard on the count alone
@@ -471,11 +497,11 @@ async function concurrentChild(LocalDB) {
 }
 
 if (process.env.STOCK_RACE_CHILD) {
-  const { LocalDB, saveProduct, putProduct } = await loadTs('tests/fixtures/storage-entry.ts', 'stockrace');
+  const { LocalDB, saveProduct, putProduct, planBulkEdit } = await loadTs('tests/fixtures/storage-entry.ts', 'stockrace');
   await LocalDB.init();
   const mode = process.env.STOCK_RACE_CHILD;
   const result = mode === 'deterministic'
-    ? await deterministicChild(LocalDB, saveProduct)
+    ? await deterministicChild(LocalDB, saveProduct, planBulkEdit)
     : mode === 'editor'
       ? await editorChild(LocalDB, putProduct)
       : await concurrentChild(LocalDB);
@@ -591,7 +617,7 @@ for (const driver of DRIVERS) {
 
     // Every scenario first proves the interleaving HAPPENED. A hook that never
     // fired would make every assertion below vacuously true.
-    for (const k of ['d1', 'd2', 'd3', 'd4', 'd5', 'a1', 'a2', 'a3']) {
+    for (const k of ['d1', 'd2', 'd3', 'd4', 'd5', 'd9', 'd9ctl', 'a1', 'a2', 'a3']) {
       t(`${k}: the interfering write really ran between the read and the write`, r[k]?.fired === true);
     }
 
@@ -599,6 +625,11 @@ for (const driver of DRIVERS) {
     t(`D1: a save that never mentioned stock does not give back a reserved unit (stock=${r.d1.stock}, expected 4)`,
       r.d1.stock === 4);
     t('D1: ...and the save itself still landed', r.d1.description === 'edited while a checkout reserved');
+
+    t('D9: the bulk save succeeded, and the Black sold mid-save was granted', r.d9.ok === true && r.d9.reserved === true);
+    t(`D9: a bulk price change keeps the unit a checkout sold meanwhile (black=${r.d9.black}, expected 2)`, r.d9.black === 2);
+    t(`D9: ...the other colour is untouched (tort=${r.d9.tort}) and the price moved (${r.d9.price}, expected 5500)`, r.d9.tort === 3 && r.d9.price === 5500);
+    t(`D9 control: WITHOUT bases the same patch gives the sale back (black=${r.d9ctl.black}, expected 3) — the scenario is real`, r.d9ctl.black === 3);
 
     t('D2: saveProduct succeeded', r.d2.ok === true);
     t(`D2: the variant reserved mid-save keeps its reservation (black=${r.d2.black}, expected 2)`, r.d2.black === 2);

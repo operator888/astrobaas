@@ -52,6 +52,7 @@ export const orders = {
   'admin.orders.refundedAmount': '−{amount} refunded',
   'admin.orders.refundRemaining': '{amount} left',
   'admin.orders.statusLocked': 'Your role can view orders but not change their status. An administrator or editor can.',
+  'admin.orders.statusOf': 'Status of order {number}',
   'admin.orders.refund': 'Refund…',
   'admin.orders.refundInProviderDashboard': 'Refund in the {provider} dashboard',
 

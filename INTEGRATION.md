@@ -74,6 +74,7 @@ minute:
 | `POST /api/orders/quote` | 30 | `RATE_LIMIT_QUOTE_PER_MIN` |
 | `POST /api/payments/start` | 10 | `RATE_LIMIT_PAYMENT_START_PER_MIN` |
 | `GET /api/search`, `GET /api/products?search=` | 30 | `RATE_LIMIT_SEARCH_PER_MIN` |
+| `GET /api/search/suggest` | 40 | `RATE_LIMIT_SUGGEST_PER_MIN` |
 | `POST /api/payments/webhook/*` | 600 | `RATE_LIMIT_WEBHOOK_PER_MIN` |
 
 Payment webhooks do **not** spend the anonymous 60/min — a provider sends
@@ -254,7 +255,30 @@ A shopper never needs an account: `orders.place` is public, and prices are
 computed server-side from the ids and quantities, so a basket total sent by a
 client is ignored.
 
+### Search suggestions
+
+`GET /api/search/suggest?q=lin&types=products,categories` answers a few
+matching products (`name`, `slug`, `price_cents`, `image`) and categories
+(`name`, `slug`, `count`) while the shopper types — public, cached, and ranked
+exactly like search, so Greek matches Latin and your synonyms apply. Debounce
+calls (150–200 ms) and ignore answers for a query that is no longer in the box.
+Under 2 characters it answers empty lists. `examples/storefront` has a complete
+accessible combobox (`src/scripts/search-box.ts`).
+
+Ask for `types=searches` too and it adds **popular searches** — queries other
+visitors made that found something, once enough different visitors made them
+(Settings → Reading → Search sets the minimum and a blocklist; nothing that
+looks like an email, web address or number is ever stored). Link one to your
+results page. When the operator switches suggestions off, every list is empty
+and `meta.enabled` is `false`: hide your list rather than waiting on one.
+
 ### Checkout from a storefront
+
+> **A working example:** [`examples/storefront`](./examples/storefront) does
+> everything in this section — quote, idempotent checkout, the optional
+> proof-of-work, payment redirects, and the return pages — and its
+> `scripts/e2e.mjs` places a real order against a CMS started from this
+> repository.
 
 `POST /api/orders` is public, so it carries its own abuse controls. What a
 storefront has to do about each:
@@ -340,6 +364,11 @@ provider's `redirect_url`. What changed for storefronts:
   neither is set. On a headless shop, set Site URL to the **storefront's**
   origin. The provider sends the buyer back to
   `<site>/checkout/success?order=…` and `<site>/checkout/cancelled?order=…`.
+- **Set "Address of this CMS" too** (Settings → General) on a headless shop.
+  Receipt links in confirmation emails are built from it, because the receipt
+  page is served by the CMS. Without it they fall back to Site URL — the
+  storefront — which then has to forward `/receipt?token=…` to the CMS (the
+  example storefront does).
 - **Online payments have a time limit.** An unpaid order paid through Stripe,
   PayPal or Klarna is cancelled once the shop's payment hold runs out (default
   120 minutes from placing it), and its stock goes back on sale. After that,
@@ -583,16 +612,15 @@ oldest request first); the rest follow on later ticks.
 
 ## 4. The typed SDK (`astrobaas/client`)
 
-> **Not installable from npm yet.** `astrobaas` is not published to the
-> registry, so `npm install astrobaas` in a separate frontend project will 404.
-> Two things work today:
+> **Install it from npm under the `alpha` tag:** `npm install astrobaas@alpha`
+> in your frontend project. A plain `npm install astrobaas` also works but
+> takes whatever `latest` points at; pin the tag while the API is pre-alpha
+> (see [PUBLISHING.md](./PUBLISHING.md)).
 >
 > - **Inside this repo**, `astrobaas/client` resolves to source via tsconfig
 >   paths — every example below runs as written.
-> - **From another project**, either call the REST API directly (§2 and §3; it
->   is plain HTTP and JSON, and `/openapi.json` describes all of it), or build a
->   local tarball: `npm run build:pkg && npm pack`, then
->   `npm install ../astrobaas/astrobaas-0.1.0.tgz`.
+> - **Without the SDK**, call the REST API directly (§2 and §3; it is plain
+>   HTTP and JSON, and `/openapi.json` describes all of it).
 >
 > The SDK is a convenience over the same endpoints, not a requirement — nothing
 > in the API needs it.
@@ -956,13 +984,16 @@ zero-dependency package, `astrobaas-mcp`, so an MCP client config can name it
 on a machine with no AstroBaaS installed.
 
 ```bash
+npx astrobaas create my-site  # a new project from the matching GitHub release, with .env
 npx astrobaas init      # write .env with a CSPRNG AUTH_SECRET (then: npm install)
 npx astrobaas secret    # print a fresh 32-byte secret to stdout
 npx astrobaas setup      # create/replace the admin account
 npx astrobaas-mcp        # start the MCP server (configure via env, see above)
 ```
 
-`init` refuses to overwrite an existing `.env` without `--force`.
+`init` refuses to overwrite an existing `.env` without `--force`. `create`
+refuses a folder that is not empty, and both need Node 22.12+ (`create` stops on
+an older Node; `init` warns).
 
 ---
 

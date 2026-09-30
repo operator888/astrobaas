@@ -1,0 +1,56 @@
+---
+import Shop from '../../layouts/Shop.astro';
+---
+<Shop title="Order placed" noindex>
+  <h1 data-op-title>Thank you</h1>
+  <div data-op-body>
+    <p class="muted">We could not find an order from this browser tab. If you placed one, the confirmation is in your email.</p>
+  </div>
+</Shop>
+
+<script>
+  import { readLastOrder, startPayment } from '../../scripts/last-order';
+  import { problem } from '../../scripts/shop-api';
+  import { formatMoney } from '../../lib/money';
+
+  const order = readLastOrder();
+  const body = document.querySelector<HTMLElement>('[data-op-body]')!;
+  const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLElementTagNameMap[K]> = {}, ...kids: (Node | string)[]) => {
+    const n = Object.assign(document.createElement(tag), props);
+    n.append(...kids);
+    return n;
+  };
+
+  if (order) {
+    const parts: Node[] = [
+      el('p', {}, 'Your order ', el('strong', { textContent: order.number }), ` is placed. The total is ${formatMoney(order.total_cents, order.currency)}.`),
+      el('p', { className: 'muted', textContent: 'A confirmation with your receipt is on its way to your email.' }),
+    ];
+    if (order.online && order.provider && order.email) {
+      // Checkout sends a buyer straight to the payment page. Landing HERE
+      // instead means that did not happen, so say so and offer it again.
+      const status = el('p', { role: 'status' });
+      const pay = el('button', { type: 'button', className: 'btn', textContent: `Pay now with ${order.method}` });
+      pay.addEventListener('click', async () => {
+        pay.disabled = true;
+        status.textContent = 'Opening the payment page…';
+        try {
+          window.location.assign(await startPayment(order.number, order.email!, order.provider!));
+        } catch (err) {
+          pay.disabled = false;
+          status.textContent = problem(err);
+        }
+      });
+      parts.push(el('div', { className: 'notice' },
+        el('p', { textContent: 'Your order is waiting for payment. It is held for a limited time, then released.' })), pay, status);
+    } else if (order.instructions) {
+      parts.push(el('h2', { textContent: `How to pay: ${order.method}` }),
+        el('p', { className: 'instructions', textContent: order.instructions }),
+        el('p', { className: 'muted' }, 'Please quote the order number ', el('strong', { textContent: order.number }), ' with your payment.'));
+    } else {
+      parts.push(el('p', { textContent: `You chose to pay by ${order.method}.` }));
+    }
+    parts.push(el('p', {}, el('a', { href: '/shop/', textContent: 'Continue shopping' })));
+    body.replaceChildren(...parts);
+  }
+</script>

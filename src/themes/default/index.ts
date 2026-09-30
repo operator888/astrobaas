@@ -16,10 +16,13 @@ export default defineTheme({
   version: '1.0.0',
   author: 'AstroBaaS Team',
   settings: {
+    // WCAG 2.1 AA with white text on them, and as text on white: 5.17, 5.70
+    // and 5.48 to 1. The previous blue-500/violet-500/emerald-500 were 3.67,
+    // 4.23 and 2.53 — every primary button on a fresh install failed.
     colors: {
-      primary: '#3B82F6',
-      secondary: '#8B5CF6',
-      accent: '#10B981',
+      primary: '#2563EB',
+      secondary: '#7C3AED',
+      accent: '#047857',
       background: '#FFFFFF',
       text: '#1F2937',
     },

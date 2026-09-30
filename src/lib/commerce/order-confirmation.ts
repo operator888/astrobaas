@@ -218,6 +218,16 @@ export interface ConfirmationDeps {
   instructionsFor: (methodId: string) => string | undefined;
   siteUrl?: string;
   /**
+   * Where the RECEIPT is served: this CMS's own address.
+   *
+   * Not always `siteUrl`. On a headless shop Site URL is the storefront — it
+   * has to be, so payment providers send buyers back there — but `/receipt` is
+   * rendered by the CMS, so a receipt link built from Site URL was a 404 on
+   * every such shop. Falls back to `siteUrl` when unset, which is right for a
+   * shop whose storefront IS the CMS.
+   */
+  receiptBaseUrl?: string;
+  /**
    * May this address be mailed now? Asked just before the send.
    *
    * Guest checkout is public, and every order it accepts mails the address it
@@ -276,7 +286,9 @@ export async function sendOrderConfirmation(
       siteUrl: deps.siteUrl,
       // Only when the origin is known — `receiptUrl` would otherwise build a
       // relative path that is not clickable from a mail client.
-      receiptLink: deps.siteUrl ? receiptUrl(deps.siteUrl, String(order.id)) : undefined,
+      receiptLink: (deps.receiptBaseUrl || deps.siteUrl)
+        ? receiptUrl((deps.receiptBaseUrl || deps.siteUrl)!, String(order.id))
+        : undefined,
       instructions: deps.instructionsFor(String(order.payment_method ?? '')),
       subject: rendered?.subject,
     });

@@ -32,9 +32,17 @@ export interface Props {
    * ignore all of them, so the page shipped no usable signal at all.
    */
   canonical?: string;
+  /**
+   * Text for the skip link (WCAG 2.4.1, Bypass Blocks). When set, the first
+   * focusable thing on the page is a link to `#main-content`, visible when it
+   * has focus. Only a layout that renders `<main id="main-content">` may pass
+   * it — a skip link to nothing is worse than none, and
+   * tests/accessibility-static.test.mjs holds every caller to that.
+   */
+  skipLabel?: string;
 }
 
-const { title, description = "A modern CMS built with Astro", image = "/favicon.svg", siteName, siteUrl, noindex, canonical } = Astro.props;
+const { title, description = "A modern CMS built with Astro", image = "/favicon.svg", siteName, siteUrl, noindex, canonical, skipLabel } = Astro.props;
 
 // CSRF token (set by middleware) — exposed via meta so public forms can submit.
 const csrf = Astro.locals.csrf ?? '';
@@ -209,6 +217,7 @@ const popupsLive = !onAdmin && await popupsAreLive();
     {popupsLive && <script src="/popup.js" is:inline defer></script>}
   </head>
   <body>
+    {skipLabel && <a href="#main-content" class="ab-skip-link">{skipLabel}</a>}
     <slot />
   </body>
 </html>

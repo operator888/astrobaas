@@ -1,0 +1,34 @@
+---
+import Shop from '../layouts/Shop.astro';
+import ProductCard from '../components/ProductCard.astro';
+import { allProducts, allPosts, shopCurrency, listed } from '../lib/cms';
+
+const [products, posts, currency] = await Promise.all([allProducts(), allPosts(), shopCurrency()]);
+const shown = products.filter(listed);
+const featured = shown.filter((p) => p.featured);
+const picks = (featured.length ? featured : shown).slice(0, 8);
+const latest = posts.slice(0, 3);
+const tagline = import.meta.env.PUBLIC_SHOP_TAGLINE || '';
+---
+<Shop title={import.meta.env.PUBLIC_SHOP_NAME || 'Shop'} description={tagline || undefined}>
+  <h1>{featured.length ? 'Featured' : 'New in the shop'}</h1>
+  {tagline && <p class="lede">{tagline}</p>}
+  {picks.length
+    ? <ul class="grid">{picks.map((p) => <ProductCard product={p} currency={currency} />)}</ul>
+    : <p class="muted">No products yet. Add some in the CMS, then rebuild this site.</p>}
+  <p><a class="btn btn-quiet" href="/shop/">See everything</a></p>
+
+  {latest.length > 0 && (
+    <section aria-labelledby="journal">
+      <h2 id="journal">From the blog</h2>
+      <ul class="posts">
+        {latest.map((p) => (
+          <li>
+            <h3><a href={`/blog/${p.slug}/`}>{p.title}</a></h3>
+            {p.excerpt && <p class="muted">{p.excerpt}</p>}
+          </li>
+        ))}
+      </ul>
+    </section>
+  )}
+</Shop>

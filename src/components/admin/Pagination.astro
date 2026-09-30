@@ -33,7 +33,7 @@ const btn = 'px-3 py-1.5 border border-gray-300 text-sm rounded-md text-gray-700
             {i > 0 && <span aria-hidden="true"> · </span>}
             {size === pageSize
               ? <strong class="text-gray-900" aria-current="true">{size}</strong>
-              : <a class="text-blue-600 hover:underline" href={listHref(sp, { per: size, page: null })}>{size}</a>}
+              : <a class="text-blue-600 underline underline-offset-2" href={listHref(sp, { per: size, page: null })}>{size}</a>}
           </>
         ))}
       </span>

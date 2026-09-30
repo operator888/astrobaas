@@ -903,8 +903,139 @@ const ShippingMethod = {
           responses: { '201': ok({ type: 'object' }) },
         },
       },
+      '/api/navigation': {
+        get: {
+          summary: 'The site menu the operator built at /admin/navigation, resolved for a language. Public. `items` is EMPTY when no menu has been saved — a storefront should then show its own default links. Labels come from the requested locale where a translation exists; internal links carry this CMS\'s locale prefix. Written through POST /api/settings/update (key `navigation`, admin only), which refuses any link that is not /path, #anchor, http(s)://, mailto: or tel:.',
+          parameters: [{ name: 'locale', in: 'query', required: false, schema: { type: 'string' }, description: 'Language for labels and internal links, e.g. de.' }],
+          responses: {
+            '200': ok({ type: 'object', properties: {
+              items: { type: 'array', items: { type: 'object', properties: {
+                label: { type: 'string' },
+                href: { type: 'string' },
+                external: { type: 'boolean', description: 'Leaves this site (http(s), mailto: or tel:).' },
+                newTab: { type: 'boolean', description: 'Open in a new tab. Only ever true for an external link.' },
+                current: { type: 'boolean', description: 'Always false here — there is no current page on an API call.' },
+                children: { type: 'array', items: { type: 'object' }, description: 'One level of submenu, same shape.' },
+              } } },
+            } }),
+          },
+        },
+      },
+      '/api/product-bulk': {
+        post: {
+          summary: 'Change many products at once (catalogue staff; API keys need `products:write`). Target the ticked products with `ids`, or every product the admin list\'s search matches with `filter: { q }`. `ops` may combine several changes; `where` restricts them to products meeting a condition (those that do not are counted as `not_matching`). Every applied change is recorded and can be undone (POST /api/product-bulk/undo). Without `apply: true` it is a PREVIEW: it reports, per product, what would change or why it is skipped, and changes nothing. Applying saves each product through the normal product save, so hooks, `product.updated` webhooks, price history and the audit log all see it; one `product.bulk_edit` audit entry records the batch. Prices change on the REGULAR price, in integer minor units, never below zero; a product whose variants have their own prices is skipped for a flat "set" (use percent or amount). At most 500 products; not a transaction — failures are listed and the rest apply. Off while the shop is switched off.',
+          security: [{ bearerApiKey: [] }],
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['ops'], properties: {
+            ids: { type: 'array', items: { type: 'string' }, maxItems: 1000 },
+            filter: { type: 'object', properties: { q: { type: 'string', description: 'The admin list search. Instead of ids.' } } },
+            where: { type: 'object', description: 'Only change products that meet this condition.', properties: {
+              status: { type: 'array', items: { type: 'string', enum: ['active', 'draft', 'archived'] } },
+              stock: { type: 'string', enum: ['in', 'out', 'untracked'] },
+              on_sale: { type: 'boolean' }, featured: { type: 'boolean' },
+              category: { type: 'string', description: 'Includes its subcategories.' },
+              price_min: { type: 'integer' }, price_max: { type: 'integer' },
+            } },
+            apply: { type: 'boolean', description: 'false or absent = preview only.' },
+            ops: { type: 'object', properties: {
+              status: { type: 'string', enum: ['active', 'draft', 'archived'] },
+              featured: { type: 'boolean' },
+              addCategories: { type: 'array', items: { type: 'string' }, description: 'Category slugs; each must exist.' },
+              removeCategories: { type: 'array', items: { type: 'string' } },
+              addTags: { type: 'array', items: { type: 'string' } },
+              removeTags: { type: 'array', items: { type: 'string' }, description: 'Matched without regard to case.' },
+              price: { type: 'object', properties: { mode: { type: 'string', enum: ['set', 'percent', 'amount'] }, value: { type: 'number', description: 'set/amount: minor units; percent: -99.99 to 500.' } } },
+              sale: { type: 'object', properties: { mode: { type: 'string', enum: ['clear', 'percent_off'] }, value: { type: 'number', description: 'percent_off: more than 0, less than 100.' } } },
+              stock: { type: ['integer', 'null'], description: 'null = not tracked. Skipped for products with variants.' },
+            } },
+          } } } } },
+          responses: {
+            '200': ok({ type: 'object', properties: {
+              preview: { type: 'boolean' },
+              selected: { type: 'integer' }, will_change: { type: 'integer' }, unchanged: { type: 'integer' }, skipped: { type: 'integer' },
+              not_found: { type: 'array', items: { type: 'string' } },
+              products: { type: 'array', description: 'Preview only.', items: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' }, changes: { type: 'array', items: { type: 'string' } }, skipped: { type: 'string' } } } },
+              updated: { type: 'integer', description: 'Apply only.' },
+              failed: { type: 'array', description: 'Apply only.', items: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' }, message: { type: 'string' } } } },
+            } }),
+          },
+        },
+      },
+      '/api/product-bulk/csv': {
+        post: {
+          summary: 'Update products from CSV text (catalogue staff). One row per product or variant; key columns sku, slug or id (each row uses the first it fills in; a variant\'s SKU updates that variant). Columns price, sale_price (`none` ends the sale), stock (`untracked`), status, featured. An empty cell changes nothing; other columns are ignored and listed. Numbers are plain — no thousands separators; "1,000" is a row error. Previews unless `apply: true`; a file with ANY row error is refused as a whole. Applied like every bulk change: saveProduct per product, stock sold meanwhile kept, the batch undoable. At most 1000 rows, 1.5 MB.',
+          security: [{ bearerApiKey: [] }],
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['csv'], properties: { csv: { type: 'string' }, apply: { type: 'boolean' } } } } } },
+          responses: { '200': ok({ type: 'object' }), '400': { description: 'Row errors on apply, or an unusable file.' } },
+        },
+      },
+      '/api/product-bulk/template': {
+        get: {
+          summary: 'Every product and variant with its current values, as the CSV that POST /api/product-bulk/csv reads (catalogue staff).',
+          security: [{ bearerApiKey: [] }],
+          responses: { '200': { description: 'text/csv', content: { 'text/csv': { schema: { type: 'string' } } } } },
+        },
+      },
+      '/api/product-bulk/history': {
+        get: {
+          summary: 'The 20 most recent bulk changes, newest first, for undo (catalogue staff).',
+          security: [{ bearerApiKey: [] }],
+          responses: { '200': ok({ type: 'array', items: { type: 'object', properties: {
+            id: { type: 'string' }, at: { type: 'string' }, actor: { type: 'string' }, kind: { type: 'string', enum: ['bulk', 'csv', 'undo'] },
+            label: { type: 'string' }, products: { type: 'integer' }, undone_at: { type: ['string', 'null'] },
+          } } }) },
+        },
+      },
+      '/api/product-bulk/undo': {
+        post: {
+          summary: 'Undo a bulk change (catalogue staff). Restores each field only while it still holds the value the change gave it; anything changed since — a later edit, stock a checkout sold — is left as it is and listed. Previews unless `apply: true`. A change is undone once (409 after); the undo is itself recorded and can be undone.',
+          security: [{ bearerApiKey: [] }],
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['batch'], properties: { batch: { type: 'string' }, apply: { type: 'boolean' } } } } } },
+          responses: { '200': ok({ type: 'object' }), '404': { description: 'No such change.' }, '409': { description: 'Already undone.' } },
+        },
+      },
+      '/api/search/popular': {
+        delete: {
+          summary: 'Forget every counted search, so popular-search suggestions start again from nothing (admin). Audited.',
+          security: [{ bearerApiKey: [] }],
+          responses: { '200': ok({ type: 'object', properties: { cleared: { type: 'boolean' } } }) },
+        },
+      },
+      '/api/search/suggest': {
+        get: {
+          summary: 'Suggestions while someone is typing: popular searches, and a few posts, pages, products and categories whose titles match. Public and cached; its own rate bucket. Popular searches are queries that found something, made by at least the operator\'s minimum number of visitors (default 5), not blocklisted, and never anything that looks like an email, web address or number. The operator can switch suggestions off (then `meta.enabled` is false and every list is empty), set the count per kind, and switch popular searches off. Same folding as search (accents, case, Greek matches Latin) and the same synonyms; no typo tolerance. Only what a visitor could open: published posts not hidden from search; active products whose catalogue visibility is `visible` or `search`; categories with their product count. Products and categories only while the shop is switched on. Fewer than 2 characters answers empty lists.',
+          parameters: [
+            { name: 'q', in: 'query', required: true, schema: { type: 'string' } },
+            { name: 'types', in: 'query', required: false, schema: { type: 'string' }, description: 'Comma-separated subset of searches,posts,pages,products,categories. Default: all the site has.' },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', maximum: 8 }, description: 'Per type; never more than the operator\'s setting (default 5).' },
+            { name: 'locale', in: 'query', required: false, schema: { type: 'string' }, description: 'Only posts and pages in this language.' },
+          ],
+          responses: {
+            '200': ok({ type: 'object', properties: {
+              searches: { type: 'array', items: { type: 'string' }, description: 'Popular searches that start with (a word of) the query.' },
+              posts: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, slug: { type: 'string' } } } },
+              pages: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, slug: { type: 'string' } } } },
+              products: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, slug: { type: 'string' }, price_cents: { type: 'integer' }, image: { type: ['string', 'null'] } } } },
+              categories: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, slug: { type: 'string' }, count: { type: 'integer' } } } },
+            } }),
+          },
+        },
+      },
+      '/api/product-categories/{id}': {
+        put: {
+          summary: 'Rename, move or reorder a product category (admin/editor/manager). `parent_slug: null` moves it to the top level. The slug cannot change — products are filed under it. A parent that does not exist, the category itself, one of its own subcategories, or a move past 5 levels is refused with a 400 that says which.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: { '200': ok({ type: 'object' }), '400': { description: 'Refused move or invalid payload' }, '404': { description: 'No such category' } },
+        },
+        delete: {
+          summary: 'Delete a product category (admin/editor/manager). Refused with 409 while it has subcategories. Products in it are untagged, never deleted; `untagged` says how many.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: { '200': ok({ type: 'object', properties: { id: { type: 'string' }, untagged: { type: 'integer' } } }), '404': { description: 'No such category' }, '409': { description: 'It still has subcategories' } },
+        },
+      },
       '/api/product-categories': {
-        get: { summary: 'List product categories (public)', responses: { '200': ok({ type: 'array', items: { type: 'object' } }) } },
+        get: { summary: 'List product categories (public), each with `parent_slug`, `product_count` (tagged directly) and `product_count_total` (including every subcategory). Filtering products by `?category=` includes subcategories.', responses: { '200': ok({ type: 'array', items: { type: 'object' } }) } },
         post: {
           summary: 'Create a product category (admin/editor)', security: [{ bearerApiKey: [] }],
           responses: { '201': ok({ type: 'object' }) },

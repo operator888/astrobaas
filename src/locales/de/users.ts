@@ -21,6 +21,8 @@ export const users = {
   'admin.users.searchPlaceholder': 'Benutzer suchen …',
   'admin.users.allRoles': 'Alle Rollen',
   'admin.users.allStatuses': 'Alle Status',
+  'admin.users.filterByRole': 'Nach Rolle filtern',
+  'admin.users.filterByStatus': 'Nach Status filtern',
   'admin.users.bulkActions': 'Sammelaktionen',
   'admin.users.deleteSelected': 'Ausgewählte löschen ({count})',
 

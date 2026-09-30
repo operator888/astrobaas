@@ -96,6 +96,9 @@ export const POST: APIRoute = async ({ params, request, locals }) => {
           const origin = typeof settings.site_url === 'string' && settings.site_url.trim()
             ? settings.site_url.trim()
             : process.env.SITE_URL;
+          const receiptBase = typeof settings.public_site_url === 'string' && settings.public_site_url.trim()
+            ? settings.public_site_url.trim()
+            : origin;
 
           const rendered = renderEmailTemplate('order_shipped', {
             site_title: siteTitle ?? 'Your order',
@@ -107,7 +110,10 @@ export const POST: APIRoute = async ({ params, request, locals }) => {
           const msg = buildShippedNotice({ ...order, ...patch }, {
             siteTitle,
             subject: rendered?.subject,
-            receiptLink: origin ? receiptUrl(origin, id) : undefined,
+            // The CMS's own address first — the receipt page is served here —
+            // then Site URL, which on a headless shop is the storefront. Same
+            // rule as the order confirmation.
+            receiptLink: receiptBase ? receiptUrl(receiptBase, id) : undefined,
           });
           if (msg) await sendEmail(msg);
         } catch (err) {

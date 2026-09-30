@@ -47,6 +47,9 @@ export const chrome = {
 
   // Sidebar group headings. The sidebar is grouped by what a person is
   // trying to DO rather than by technical category.
+  'admin.chrome.navigation': 'Navigation',
+  'admin.chrome.skipToContent': 'Zum Inhalt springen',
+  'admin.chrome.productCategories': 'Produktkategorien',
   'admin.chrome.redirects': 'Weiterleitungen',
   'admin.chrome.groupShop': 'Shop',
   'admin.chrome.groupContent': 'Inhalte',
