@@ -148,3 +148,19 @@ test('bulk edit: a CSV with a bad row cannot be applied; a good one can', async 
   expect([p.price_cents, p.stock]).toEqual([1850, 9]);
 });
 
+
+test('product editor: the prescription fields show on the Safety tab only', async ({ page }) => {
+  await login(page);
+  await page.goto('/admin/products');
+  await page.locator('#new-product').click();
+  const dialog = page.locator('#product-dialog');
+  await expect(dialog).toBeVisible();
+  const checkbox = dialog.locator('input[name="requires_prescription"]');
+  const tabs = await dialog.locator('#tab-bar .tab-btn').evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.tab));
+  expect(tabs).toContain('safety');
+  for (const tab of tabs) {
+    await dialog.locator(`#tab-bar .tab-btn[data-tab="${tab}"]`).click();
+    if (tab === 'safety') await expect(checkbox, `on ${tab}`).toBeVisible();
+    else await expect(checkbox, `on ${tab}`).toBeHidden();
+  }
+});

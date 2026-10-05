@@ -482,6 +482,24 @@ const shopCurrency = await getShopCurrency();
               <textarea name="gpsr_instructions" rows="3" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg"></textarea>
             </label>
           </div>
+          {/* Prescription lives here, in one tab. It sat outside every tab panel,
+              so the tab switcher never hid it and it showed under all of them. */}
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 border-t pt-4 mt-4">
+            <label class="text-sm flex items-center gap-2">
+              <input name="requires_prescription" type="checkbox" class="rounded border-gray-300" />
+              <span>Requires a prescription</span>
+            </label>
+            <label class="text-sm">
+              <span class="block mb-1">Prescription form</span>
+              <select name="prescription_type" class="w-full rounded border-gray-300">
+                <option value="spectacles">Spectacles (SPH / CYL / axis / ADD / PD)</option>
+                <option value="contacts">Contact lenses (adds base curve + diameter)</option>
+              </select>
+              <span class="text-xs text-gray-400">
+                Checkout refuses this product without a valid prescription.
+              </span>
+            </label>
+          </div>
         </section>
 
         <!-- ---------------- Images ---------------- -->
@@ -608,24 +626,6 @@ const shopCurrency = await getShopCurrency();
           <label class="text-sm flex items-center gap-2 mt-6">
             <input name="sold_individually" type="checkbox" class="rounded border-gray-300" />
             <span>Sold individually (max 1 per order)</span>
-          </label>
-        </section>
-
-        <!-- ---------------- Prescription (optical) ---------------- -->
-        <section class="grid grid-cols-1 md:grid-cols-2 gap-4 border-t pt-4">
-          <label class="text-sm flex items-center gap-2">
-            <input name="requires_prescription" type="checkbox" class="rounded border-gray-300" />
-            <span>Requires a prescription</span>
-          </label>
-          <label class="text-sm">
-            <span class="block mb-1">Prescription form</span>
-            <select name="prescription_type" class="w-full rounded border-gray-300">
-              <option value="spectacles">Spectacles (SPH / CYL / axis / ADD / PD)</option>
-              <option value="contacts">Contact lenses (adds base curve + diameter)</option>
-            </select>
-            <span class="text-xs text-gray-400">
-              Checkout refuses this product without a valid prescription.
-            </span>
           </label>
         </section>
 

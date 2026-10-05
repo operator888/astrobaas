@@ -27,7 +27,7 @@ import { descendantSlugs } from './commerce/category-tree'
 import { scoreOrder, riskFields, hashIp } from './commerce/order-risk'
 import { resolveTaxSettings } from './commerce/tax'
 import {
-  PRODUCT_FIELDS_SETTING, validateProductFieldDefs, type ProductFieldDef,
+  PRODUCT_FIELDS_SETTING, validateProductFieldDefs, mergeProductFieldDefs, type ProductFieldDef,
 } from '../core/product-fields-def'
 import {
   resolveCurrencySettings, rateFor, convertTotals,
@@ -832,7 +832,8 @@ export async function getTaxOrigin(): Promise<string | undefined> {
   }
 }
 
-export async function getProductFieldDefs(): Promise<ProductFieldDef[]> {
+/** The fields the MERCHANT stored, alone — no plugin fields merged in. */
+export async function getMerchantProductFieldDefs(): Promise<ProductFieldDef[]> {
   try {
     // `.value`, not the row. getSetting returns the whole { key, value }
     // record, and passing that straight to the validator makes every stored
@@ -843,6 +844,54 @@ export async function getProductFieldDefs(): Promise<ProductFieldDef[]> {
   } catch {
     return []
   }
+}
+
+/**
+ * Plugin-definition problems already logged by this process. The merge runs on
+ * every product save and list; the same bad definition once in the log is a
+ * report, a thousand times is noise that buries it.
+ */
+const loggedPluginFieldErrors = new Set<string>()
+
+/**
+ * Every declared product field — the merchant's plus those active plugins add
+ * through `PLUGIN_HOOKS.PRODUCT_FIELD_DEFS` — and which names a plugin owns.
+ *
+ * Plugins are registered by the middleware on every request. Code that runs
+ * outside a request and never bootstraps the registry (a standalone script)
+ * sees the merchant's fields only, which is the same answer an install without
+ * the plugin gives.
+ */
+export async function getProductFieldDefsWithSource(): Promise<{
+  fields: ProductFieldDef[]
+  managed: Set<string>
+  merchant: ProductFieldDef[]
+  conflicts: string[]
+}> {
+  const merchant = await getMerchantProductFieldDefs()
+  let pluginRaw: unknown = []
+  try {
+    pluginRaw = pluginManager.applyFilters(PLUGIN_HOOKS.PRODUCT_FIELD_DEFS, [])
+  } catch (err) {
+    // applyFilters isolates each filter already; this guards the registry itself.
+    console.error('[astrobaas] product field plugins failed:', err)
+    pluginRaw = []
+  }
+  const merged = mergeProductFieldDefs(merchant, pluginRaw)
+  for (const e of merged.errors) {
+    if (loggedPluginFieldErrors.has(e)) continue
+    loggedPluginFieldErrors.add(e)
+    console.warn(`[astrobaas] plugin product field ignored: ${e}`)
+  }
+  return { fields: merged.fields, managed: merged.managed, merchant, conflicts: merged.conflicts }
+}
+
+/**
+ * The merged list every consumer reads: save validation, the admin product
+ * form, the public projection and — through saveProduct — the bulk paths.
+ */
+export async function getProductFieldDefs(): Promise<ProductFieldDef[]> {
+  return (await getProductFieldDefsWithSource()).fields
 }
 
 export async function getCurrencySettings(): Promise<CurrencySettings> {

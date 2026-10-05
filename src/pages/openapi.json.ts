@@ -1123,13 +1123,37 @@ const ShippingMethod = {
       },
       '/api/commerce/product-fields': {
         get: {
-          summary: 'Fields this merchant declared on their products. Public callers get ONLY the fields marked public — no values, no private field names, and no count of what was withheld. Staff get every declaration, which the admin product form needs.',
-          responses: { '200': ok({ type: 'object', properties: { fields: { type: 'array', items: { type: 'object' } } } }) },
+          summary: 'Fields declared on this shop\'s products — the merchant\'s own plus any an active plugin adds. Public callers get ONLY the fields marked public — no values, no private field names, and no count of what was withheld. Staff get every declaration, which the admin product form needs.',
+          responses: {
+            '200': ok({
+              type: 'object',
+              properties: {
+                fields: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      name: { type: 'string' },
+                      label: { type: 'string' },
+                      help: { type: 'string' },
+                      rule: { type: 'object' },
+                      visibility: { type: 'string', enum: ['public', 'staff'], description: 'Staff callers only.' },
+                      managed: { type: 'boolean', description: 'Staff callers only, and present only when true: an active plugin provides this field. It is read-only for the merchant — PUT refuses its name.' },
+                    },
+                  },
+                },
+                conflicts: {
+                  type: 'array', items: { type: 'string' },
+                  description: 'Staff callers only: names an active plugin declares that the merchant already defined. The merchant\'s field is kept and the plugin\'s is inactive until the merchant renames or removes theirs.',
+                },
+              },
+            }),
+          },
         },
         put: {
-          summary: 'Replace the product-field declarations (admin). Removing a declaration HIDES the field; the values products already store survive.',
+          summary: 'Replace the MERCHANT\'s product-field declarations (admin). Plugin-provided fields are not part of this list: a name an active plugin provides is refused with a 422 naming it, and nothing in that request is saved. Removing a declaration HIDES the field; the values products already store survive.',
           security: [{ bearerApiKey: [] }],
-          responses: { '200': ok({ type: 'object' }), '400': errRes('Invalid definitions'), '403': errRes('Admin only') },
+          responses: { '200': ok({ type: 'object' }), '403': errRes('Admin only'), '422': errRes('Invalid definitions, or a name an active plugin provides') },
         },
       },
       '/api/commerce/currencies': {

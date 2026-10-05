@@ -165,6 +165,120 @@ export function validateProductFieldDefs(raw: unknown): ProductFieldValidation {
   return { ok: errors.length === 0, fields: errors.length ? [] : fields, errors };
 }
 
+export interface MergedProductFieldDefs {
+  /** Merchant fields a plugin does not shadow, in their order, then the plugin fields. */
+  fields: ProductFieldDef[];
+  /** Names provided by a plugin. The merchant editor shows these read-only. */
+  managed: Set<string>;
+  /** Why a plugin definition was dropped. For the log, never for a buyer. */
+  errors: string[];
+  /**
+   * Names a plugin declares that the merchant already defined themselves. The
+   * merchant's field wins, the plugin's is inactive, and the settings screen
+   * says so — a clash that is only in the server log is a clash nobody fixes.
+   */
+  conflicts: string[];
+}
+
+/**
+ * The merchant's fields plus the ones active plugins declare through
+ * `PLUGIN_HOOKS.PRODUCT_FIELD_DEFS`.
+ *
+ * Plugin definitions come through the SAME door as the merchant's —
+ * `validateProductFieldDefs`, one definition at a time — so a plugin gets the
+ * same vocabulary, the same reserved names and the same fail-closed visibility,
+ * and nothing it sends can be more than a merchant could have typed.
+ *
+ * One at a time because the failure modes differ. A merchant saving a list
+ * wants the whole list refused and every reason shown; a plugin is code the
+ * merchant cannot edit, and one malformed definition in it must not take the
+ * merchant's own fields — or the plugin's other fields — down with it. The bad
+ * one is dropped and reported; the rest stand.
+ *
+ * On a name collision the MERCHANT wins, and the plugin's field is inactive.
+ * Letting the plugin win looked natural (its code depends on its rule) and is
+ * a leak: the merchant's field may be staff-only, holding values somebody
+ * typed as private notes, and the plugin's definition would re-declare those
+ * stored values public — or re-type them so every product carrying one stops
+ * saving. Installing a plugin must never change what an existing field
+ * publishes. The clash is reported in `conflicts`; the merchant resolves it by
+ * renaming or removing their own field, knowingly.
+ *
+ * Anything that is not an array — a filter that returned nothing, a plugin
+ * that returned an object — is treated as no plugin fields.
+ */
+export function mergeProductFieldDefs(
+  merchant: readonly ProductFieldDef[],
+  pluginRaw: unknown,
+): MergedProductFieldDefs {
+  const errors: string[] = [];
+  const plugin: ProductFieldDef[] = [];
+  const managed = new Set<string>();
+  const conflicts: string[] = [];
+  const merchantNames = new Set(merchant.map((f) => f.name));
+
+  if (pluginRaw !== undefined && pluginRaw !== null && !Array.isArray(pluginRaw)) {
+    errors.push('plugin product fields must be an array; ignored');
+  }
+  const raw: unknown[] = Array.isArray(pluginRaw) ? pluginRaw : [];
+
+  raw.forEach((def, i) => {
+    const label = `plugin fields[${i}]`;
+    if (plugin.length >= MAX_PRODUCT_FIELDS) {
+      errors.push(`${label}: more than ${MAX_PRODUCT_FIELDS} plugin product fields; dropped`);
+      return;
+    }
+    const one = validateProductFieldDefs([def]);
+    if (!one.ok || one.fields.length !== 1) {
+      for (const e of one.errors) errors.push(e.replace(/^fields\[0\]/, label));
+      return;
+    }
+    const f = one.fields[0];
+    if (managed.has(f.name)) {
+      // Two plugins claiming one name: the first registered keeps it, and the
+      // second is told, rather than one silently reinterpreting the other's data.
+      errors.push(`${label}.name "${f.name}" is already provided by another plugin; dropped`);
+      return;
+    }
+    if (merchantNames.has(f.name)) {
+      if (!conflicts.includes(f.name)) conflicts.push(f.name);
+      errors.push(`${label}.name "${f.name}" is already one of the shop's own product fields; the shop's field is kept and the plugin's is not active`);
+      return;
+    }
+    managed.add(f.name);
+    plugin.push(f);
+  });
+
+  return { fields: [...merchant, ...plugin], managed, errors, conflicts };
+}
+
+/**
+ * What a merchant's save of the definition list actually stores.
+ *
+ * `submitted` is the already-validated list from the editor. A submitted name
+ * a plugin currently provides is REFUSED, by name — the editor shows it
+ * read-only, so one arriving here is a stale form or a script, and dropping it
+ * quietly would report "saved" for a row that was not.
+ *
+ * (A merchant field that CLASHES with a plugin's is not in `managed` — the
+ * merchant's wins — so it stays editable and is stored like any other.)
+ */
+export function planMerchantProductFieldSave(
+  submitted: readonly ProductFieldDef[],
+  managed: ReadonlySet<string>,
+): ProductFieldValidation & { taken: string[] } {
+  const taken = submitted.filter((f) => managed.has(f.name)).map((f) => f.name);
+  if (taken.length) {
+    return {
+      ok: false,
+      fields: [],
+      taken,
+      errors: taken.map((n) => `"${n}" is provided by a plugin and cannot be defined here`),
+    };
+  }
+  return { ok: true, fields: [...submitted], errors: [], taken };
+}
+
 /** The validator schema for the `custom` bag, from the declared fields. */
 export function schemaForProductFields(fields: readonly ProductFieldDef[]): Record<string, FieldRule> {
   const schema: Record<string, FieldRule> = {};

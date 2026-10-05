@@ -270,6 +270,36 @@ export const PLUGIN_HOOKS = {
    * things a shop already publishes belong in there — never a credential.
    */
   MANUAL_METHODS: 'manual_methods',
+  /**
+   * filter(defs: unknown[]) -> unknown[]
+   *
+   * A plugin declares product fields — the same kind a merchant declares under
+   * Settings → Product fields, with values stored in `Product.custom`. Append
+   * raw definitions in exactly the shape `PUT /api/commerce/product-fields`
+   * accepts: `{ name, label?, help?, rule, visibility? }`. The initial value is
+   * `[]`; return the incoming array with yours added.
+   *
+   * Exists because a vertical plugin needs typed per-product data of its own,
+   * and without this it could only ask the merchant to type the definitions in
+   * by hand and hope nobody renamed one. Core merges them in `getProductFieldDefs`
+   * (see `mergeProductFieldDefs`), so product save validation, the admin
+   * product form, the public projection and the bulk paths all see them without
+   * knowing a plugin was involved.
+   *
+   * Each definition is validated on its own: a malformed one is dropped and
+   * logged, and never takes the merchant's fields down with it. On a name
+   * collision the MERCHANT's definition wins and the plugin's is inactive —
+   * installing a plugin must never change what an existing field publishes —
+   * and the settings screen names the clash. The editor shows plugin fields
+   * read-only, and the PUT refuses a new merchant definition that uses a name a
+   * plugin currently provides.
+   *
+   * With no plugin registered the result is `[]` and the merchant's list is
+   * served unchanged. When the plugin is removed its fields simply stop being
+   * declared: the values stay in `Product.custom` (undeclared keys are carried
+   * through on save), and stop being published on the next read.
+   */
+  PRODUCT_FIELD_DEFS: 'product_field_defs',
 } as const;
 
 /** Return shape of the {@link PLUGIN_HOOKS.ORDER_LINE_EXTRAS} filter. */

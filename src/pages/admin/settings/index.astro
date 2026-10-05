@@ -989,6 +989,7 @@ const emailTransport = emailChannelLabel();
           <tbody id="pfield-rows"></tbody>
         </table>
         <p id="pfield-empty" class="text-sm text-gray-400 py-2">No extra product fields.</p>
+        <p id="pfield-conflicts" class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2" hidden></p>
         <div class="flex items-center gap-2 mt-3">
           <button type="button" id="pfield-add"
             class="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium">Add a field</button>
@@ -2203,11 +2204,43 @@ const emailTransport = emailChannelLabel();
     const statusEl = document.getElementById('pfield-status');
     if (rowsEl) {
       let defs = [];
+      // Fields an active plugin declares. Shown so the admin knows the name is
+      // taken and what it holds, never editable here, and never sent back —
+      // the PUT replaces the merchant's list only and refuses a plugin's name.
+      let managed = [];
       const TYPES = ['string', 'number', 'boolean', 'date', 'url', 'email', 'media'];
+
+      function split(fields) {
+        managed = fields.filter((f) => f.managed).map((f) => ({ ...f }));
+        defs = fields.filter((f) => !f.managed).map((f) => ({ ...f }));
+      }
 
       function render() {
         rowsEl.textContent = '';
-        emptyEl.hidden = defs.length > 0;
+        emptyEl.hidden = defs.length + managed.length > 0;
+        for (const f of managed) {
+          const tr = document.createElement('tr');
+          tr.className = 'border-t border-gray-100 text-gray-500';
+          const name = document.createElement('code');
+          name.className = 'font-mono';
+          name.textContent = f.name;
+          const label = document.createElement('span');
+          label.textContent = f.label || f.name;
+          const type = document.createElement('span');
+          type.textContent = f.rule?.type ?? 'string';
+          const vis = document.createElement('span');
+          vis.textContent = f.visibility === 'public' ? 'Storefront' : 'Staff only';
+          const note = document.createElement('span');
+          note.className = 'text-xs text-gray-400';
+          note.textContent = 'Provided by a plugin';
+          for (const child of [name, label, type, vis, note]) {
+            const td = document.createElement('td');
+            td.className = 'py-2 pr-3';
+            td.appendChild(child);
+            tr.appendChild(td);
+          }
+          rowsEl.appendChild(tr);
+        }
         defs.forEach((f, i) => {
           const tr = document.createElement('tr');
           tr.className = 'border-t border-gray-100';
@@ -2268,8 +2301,26 @@ const emailTransport = emailChannelLabel();
         });
       }
 
+      // A plugin wanted a name this shop already uses. The shop's field is
+      // kept and the plugin's is inactive; say so here, where it can be fixed.
+      function showConflicts(names) {
+        const el = document.getElementById('pfield-conflicts');
+        if (!el) return;
+        el.hidden = !names.length;
+        el.textContent = names.length
+          ? `A plugin also declares ${names.map((n) => `"${n}"`).join(', ')}. Your own field is kept and `
+            + 'the plugin’s is not active. To let the plugin use the name, rename or remove yours — '
+            + 'values products already store under it will then follow the plugin’s rules, '
+            + 'including whether the storefront can see them.'
+          : '';
+      }
+
       api.get('/api/commerce/product-fields').then((res) => {
-        if (res.ok) { defs = (res.data?.fields ?? []).map((f) => ({ ...f })); render(); }
+        if (res.ok) {
+          split(res.data?.fields ?? []);
+          showConflicts(res.data?.conflicts ?? []);
+          render();
+        }
       });
 
       document.getElementById('pfield-add')?.addEventListener('click', () => {
@@ -2282,7 +2333,17 @@ const emailTransport = emailChannelLabel();
         statusEl.className = 'text-sm text-gray-500';
         const res = await api.put('/api/commerce/product-fields', { fields: defs });
         if (res.ok) {
-          defs = (res.data?.fields ?? []).map((f) => ({ ...f }));
+          // Re-read rather than trusting the PUT's answer (the merchant's list
+          // alone): removing a field that clashed with a plugin's hands the
+          // name to the plugin, so both the read-only rows and the clash
+          // notice can change with this save.
+          const fresh = await api.get('/api/commerce/product-fields');
+          if (fresh.ok) {
+            split(fresh.data?.fields ?? []);
+            showConflicts(fresh.data?.conflicts ?? []);
+          } else {
+            defs = (res.data?.fields ?? []).map((f) => ({ ...f }));
+          }
           render();
           statusEl.textContent = 'Product fields saved. Reload a product to see them.';
           statusEl.className = 'text-sm text-green-600';

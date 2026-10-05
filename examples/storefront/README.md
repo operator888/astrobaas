@@ -101,4 +101,5 @@ The code is small on purpose:
 
 ## Licence
 
-MIT — copy it into your own project and change anything.
+MIT (see `LICENSE`) — copy it into your own project, open or closed, and change
+anything; keep the copyright notice. The AstroBaaS CMS it talks to is GPL.

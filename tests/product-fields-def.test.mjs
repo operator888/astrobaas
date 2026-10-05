@@ -179,5 +179,108 @@ const text = { type: 'string', optional: true, max: 100 };
     undeclaredIn.ok && (undeclaredIn.value === undefined || !('sneaky' in undeclaredIn.value)));
 }
 
+/* ---------------------------------------------------- plugin-declared fields */
+{
+  const merchant = D.validateProductFieldDefs([
+    { name: 'vintage_year', label: 'Year (merchant)', rule: text },
+    { name: 'cost_price', rule: num },
+  ]).fields;
+  const plugin = [
+    { name: 'vintage_year', label: 'Vintage', rule: num, visibility: 'public' },
+    { name: 'region', rule: text },
+  ];
+
+  const m = D.mergeProductFieldDefs(merchant, plugin);
+  const byName = new Map(m.fields.map((f) => [f.name, f]));
+  check('plugin fields are merged in beside the merchant\'s', byName.has('region') && byName.has('cost_price'));
+  // Merchant wins. The plugin wins looked natural and is a leak: the merchant's
+  // staff-only field would be re-declared public by the plugin, publishing values
+  // somebody typed as private notes, or re-typed so those products stop saving.
+  check('on a name collision the MERCHANT definition is kept',
+    byName.get('vintage_year')?.label === 'Year (merchant)' && byName.get('vintage_year')?.rule.type === 'string');
+  check('...a staff-only merchant field stays staff-only, whatever the plugin says',
+    !D.productFieldIsPublic(byName.get('vintage_year')));
+  check('...listed once', m.fields.filter((f) => f.name === 'vintage_year').length === 1);
+  check('...the plugin\'s clashing field is not managed', !m.managed.has('vintage_year'));
+  check('...and the clash is reported for the settings screen',
+    m.conflicts.length === 1 && m.conflicts[0] === 'vintage_year'
+    && m.errors.some((e) => e.includes('"vintage_year"')));
+  check('managed names are exactly the plugin\'s active ones',
+    m.managed.has('region') && m.managed.size === 1);
+  const clean = D.mergeProductFieldDefs(merchant, [{ name: 'region', rule: text, visibility: 'public' }]);
+  check('a clean merge reports no errors and no conflicts', clean.errors.length === 0 && clean.conflicts.length === 0);
+  check('plugin definitions are rebuilt by the same validator (public marking kept)',
+    D.productFieldIsPublic(clean.fields.find((f) => f.name === 'region')));
+
+  // One bad plugin definition must not take the others — or the merchant's — down.
+  const bad = D.mergeProductFieldDefs(merchant, [
+    { name: 'good_one', rule: num },
+    { name: '9bad', rule: num },
+    { name: 'no_rule' },
+    { name: 'leaky', rule: num, visibility: 'Public' },
+    'not an object',
+  ]);
+  const badNames = bad.fields.map((f) => f.name);
+  check('a malformed plugin definition is dropped...', !badNames.includes('9bad')
+    && !badNames.includes('no_rule') && !badNames.includes('leaky'));
+  check('...without affecting the plugin\'s good definitions', badNames.includes('good_one'));
+  check('...or the merchant\'s fields', badNames.includes('vintage_year') && badNames.includes('cost_price'));
+  check('...and each dropped one is reported, naming it as a plugin field',
+    bad.errors.length === 4 && bad.errors.every((e) => /^plugin fields\[\d\]/.test(e)));
+  check('a dropped definition is not managed', !bad.managed.has('9bad') && !bad.managed.has('leaky'));
+
+  for (const reserved of ['sku', 'price_cents', 'custom', '__proto__']) {
+    const r = D.mergeProductFieldDefs([], [{ name: reserved, rule: num }]);
+    check(`a plugin cannot take the reserved name "${reserved}"`,
+      r.fields.length === 0 && r.errors.length === 1);
+  }
+
+  const file = D.mergeProductFieldDefs([], [{ name: 'upload', rule: { type: 'file' } }]);
+  check('a plugin cannot declare a file upload on a product either', file.fields.length === 0);
+
+  const twice = D.mergeProductFieldDefs([], [{ name: 'x', rule: num }, { name: 'x', rule: text }]);
+  check('two plugin definitions of one name: the first keeps it, the second is reported',
+    twice.fields.length === 1 && twice.fields[0].rule.type === 'number' && twice.errors.length === 1);
+
+  for (const [label, raw] of [['undefined', undefined], ['null', null], ['an object', { name: 'x', rule: num }], ['a string', 'x']]) {
+    const r = D.mergeProductFieldDefs(merchant, raw);
+    check(`non-array plugin output (${label}) is treated as no plugin fields`,
+      r.fields.length === 2 && r.managed.size === 0);
+  }
+
+  const many = D.mergeProductFieldDefs([], Array.from(
+    { length: D.MAX_PRODUCT_FIELDS + 3 }, (_, i) => ({ name: `f${i}`, rule: num })));
+  check('plugin fields are bounded, keeping the first ones',
+    many.fields.length === D.MAX_PRODUCT_FIELDS && many.errors.length === 3);
+
+  const none = D.mergeProductFieldDefs(merchant, []);
+  check('with no plugin the merchant list comes back unchanged',
+    none.fields.length === 2 && none.fields[0].name === 'vintage_year' && none.fields[0].label === 'Year (merchant)');
+}
+
+/* ---------------------------------------------------- the merchant's save, with plugins active */
+{
+  const managed = new Set(['vintage_year']);
+
+  const refused = D.planMerchantProductFieldSave(
+    D.validateProductFieldDefs([{ name: 'cost_price', rule: num }, { name: 'vintage_year', rule: text }]).fields,
+    managed);
+  check('a submitted plugin-owned name is REFUSED, not silently dropped', refused.ok === false
+    && refused.fields.length === 0);
+  check('...with an error naming it', refused.taken[0] === 'vintage_year'
+    && refused.errors.some((e) => e.includes('"vintage_year"') && /plugin/.test(e)));
+
+  const saved = D.planMerchantProductFieldSave(
+    D.validateProductFieldDefs([{ name: 'cost_price', rule: num }, { name: 'supplier', rule: text }]).fields,
+    managed);
+  check('a save without plugin-owned names stores what was submitted',
+    saved.ok && saved.fields.map((f) => f.name).join() === 'cost_price,supplier');
+
+  const plain = D.planMerchantProductFieldSave(
+    D.validateProductFieldDefs([{ name: 'a', rule: num }]).fields, new Set());
+  check('with no plugin a save stores exactly what was submitted',
+    plain.ok && plain.fields.length === 1 && plain.fields[0].name === 'a');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

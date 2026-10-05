@@ -6699,6 +6699,126 @@ async function main() {
         } else fail('still public after undeclaring', JSON.stringify(anonAfter?.data?.custom));
       }
 
+      /* --- PRODUCT FIELDS A PLUGIN DECLARES ------------------------------
+       *
+       * `test-second-module` (the external fixture) declares `plugin_rating`
+       * (public, 0-5), `plugin_note` (staff) and a malformed `sku` through
+       * PLUGIN_HOOKS.PRODUCT_FIELD_DEFS. Every consumer reads the merged list,
+       * so these go through the same save validation and the same public
+       * projection as a merchant's field — asserted end to end here.
+       */
+      {
+        const staffSchema = await (await fetch(`${BASE}/api/commerce/product-fields`, { headers: ch }))
+          .json().catch(() => null);
+        const sf = new Map((staffSchema?.data?.fields ?? []).map((f) => [f.name, f]));
+        if (sf.get('plugin_rating')?.managed === true && sf.get('plugin_note')?.managed === true) {
+          ok('plugin fields: staff see a plugin\'s product fields marked managed');
+        } else fail('plugin fields managed flag', JSON.stringify([...sf.values()]).slice(0, 200));
+        if (!sf.has('sku')) ok('...and a malformed plugin definition is dropped on its own');
+        else fail('plugin reserved name accepted', JSON.stringify(sf.get('sku')));
+
+        const pubSchema = await (await fetch(`${BASE}/api/commerce/product-fields`)).json().catch(() => null);
+        const pf = pubSchema?.data?.fields ?? [];
+        const pubRating = pf.find((f) => f.name === 'plugin_rating');
+        if (pubRating && !('managed' in pubRating) && !pf.some((f) => f.name === 'plugin_note')) {
+          ok('...while the public schema lists the public one with no managed flag, and hides the staff one');
+        } else fail('plugin fields public schema', JSON.stringify(pf).slice(0, 200));
+
+        const pfProduct = await (await mkProduct({
+          name: 'Plugin Field Widget', slug: `pf-widget-${Date.now()}`,
+          price_cents: 900, stock: 3, status: 'active',
+          custom: { plugin_rating: 4, plugin_note: 'internal only' },
+        })).json().catch(() => null);
+        const pfSlug = pfProduct?.data?.slug;
+        if (pfProduct?.data?.custom?.plugin_rating === 4 && pfProduct?.data?.custom?.plugin_note === 'internal only') {
+          ok('...a value for a plugin field is accepted on product save');
+        } else fail('plugin field value not stored', JSON.stringify(pfProduct?.data?.custom ?? pfProduct));
+
+        const pfBad = await mkProduct({
+          name: 'Bad Plugin Field', slug: `pf-bad-${Date.now()}`, price_cents: 100,
+          custom: { plugin_rating: 9 },
+        });
+        if (pfBad.status === 400) ok('...and validated against the PLUGIN\'s rule (9 > max 5 is refused)');
+        else fail('plugin field rule not enforced', `status=${pfBad.status}`);
+
+        if (pfSlug) {
+          const anon = await (await fetch(`${BASE}/api/products/${pfSlug}`)).json().catch(() => null);
+          if (anon?.data?.custom?.plugin_rating === 4 && !('plugin_note' in (anon?.data?.custom ?? {}))) {
+            ok('...a public plugin field is published to an anonymous caller, a staff one is not');
+          } else fail('plugin field projection', JSON.stringify(anon?.data?.custom));
+        }
+
+        // The merchant cannot define a name a plugin owns: refused, by name.
+        const taken = await fetch(`${BASE}/api/commerce/product-fields`, {
+          method: 'PUT', headers: ch,
+          body: JSON.stringify({ fields: [
+            { name: 'merchant_ok', rule: { type: 'string', optional: true } },
+            { name: 'plugin_rating', rule: { type: 'string', optional: true } },
+          ] }),
+        });
+        const takenBody = await taken.json().catch(() => null);
+        if (taken.status === 422 && /plugin_rating/.test(JSON.stringify(takenBody))) {
+          ok('...and PUT refuses a merchant field that uses a plugin-owned name, naming it');
+        } else fail('PUT accepted a plugin-owned name', `status=${taken.status} ${JSON.stringify(takenBody).slice(0, 200)}`);
+        const afterTaken = await (await fetch(`${BASE}/api/commerce/product-fields`, { headers: ch }))
+          .json().catch(() => null);
+        if (!(afterTaken?.data?.fields ?? []).some((f) => f.name === 'merchant_ok')) {
+          ok('...without saving the rest of that list');
+        } else fail('refused PUT partially saved', JSON.stringify(afterTaken?.data?.fields).slice(0, 200));
+
+        // A plugin declaring a name the MERCHANT already uses must not change
+        // what that field publishes. The first design let the plugin win,
+        // which re-declared a merchant's staff-only notes public. Reproduce the
+        // real order of events: the shop has the field first, the plugin
+        // arrives later.
+        const toggle = (active) => fetch(`${BASE}/api/plugins/toggle`, {
+          method: 'POST', headers: ch, body: JSON.stringify({ id: 'test-field-clash', active }),
+        });
+        await fetch(`${BASE}/api/commerce/product-fields`, {
+          method: 'PUT', headers: ch,
+          body: JSON.stringify({ fields: [{ name: 'clash_field', label: 'Private rating note', rule: { type: 'string', optional: true } }] }),
+        });
+        const clashProduct = await (await mkProduct({
+          name: 'Clash Widget', slug: `pf-clash-${Date.now()}`, price_cents: 500, stock: 1, status: 'active',
+          custom: { clash_field: 'supplier said: do not reorder' },
+        })).json().catch(() => null);
+        await toggle(true);
+
+        const clashSlug = clashProduct?.data?.slug;
+        const clashAnon = clashSlug
+          ? await (await fetch(`${BASE}/api/products/${clashSlug}`)).json().catch(() => null) : null;
+        if (clashSlug && !('clash_field' in (clashAnon?.data?.custom ?? {}))) {
+          ok('plugin fields: a plugin re-declaring a merchant\'s staff-only name does NOT publish its values');
+        } else fail('plugin field clash leaked a staff-only value', JSON.stringify(clashAnon?.data?.custom ?? clashProduct));
+
+        const clashSchema = await (await fetch(`${BASE}/api/commerce/product-fields`, { headers: ch }))
+          .json().catch(() => null);
+        const clashRow = (clashSchema?.data?.fields ?? []).find((f) => f.name === 'clash_field');
+        if ((clashSchema?.data?.conflicts ?? []).includes('clash_field') && clashRow && !clashRow.managed
+          && clashRow.visibility === 'staff') {
+          ok('...the merchant\'s field is kept, and staff are told about the clash');
+        } else fail('plugin field clash not reported', JSON.stringify(clashSchema?.data).slice(0, 300));
+
+        const resave = clashProduct?.data?.id ? await fetch(`${BASE}/api/products/${clashProduct.data.id}`, {
+          method: 'PUT', headers: ch,
+          body: JSON.stringify({ custom: { clash_field: 'supplier said: do not reorder' } }),
+        }) : null;
+        if (resave?.status === 200) ok('...and products holding the merchant\'s value still save');
+        else fail('plugin field clash blocked a save', `status=${resave?.status}`);
+
+        // Handing the name back: remove the merchant's field, the plugin's applies.
+        await fetch(`${BASE}/api/commerce/product-fields`, {
+          method: 'PUT', headers: ch, body: JSON.stringify({ fields: [] }),
+        });
+        const handed = await (await fetch(`${BASE}/api/commerce/product-fields`, { headers: ch }))
+          .json().catch(() => null);
+        if ((handed?.data?.fields ?? []).find((f) => f.name === 'clash_field')?.managed === true
+          && !(handed?.data?.conflicts ?? []).length) {
+          ok('...until the merchant removes theirs, which hands the name to the plugin');
+        } else fail('plugin field not restored after the clash', JSON.stringify(handed?.data).slice(0, 300));
+        await toggle(false);
+      }
+
       // --- the shop currency is CONFIGURABLE, and FROZEN once placed ---
       //
       // `placeOrder()` wrote the literal 'EUR', so every install on earth was a

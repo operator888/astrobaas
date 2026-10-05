@@ -6,6 +6,39 @@ semver yet because the API surface is pre-alpha.
 
 ## [Unreleased]
 
+### "Requires a prescription" shows on one tab only
+
+In the product editor, the prescription fields ("Requires a prescription" and
+"Prescription form") appeared under every tab. Their block was not attached to
+any tab, so switching tabs never hid it. They are now in the **Safety** tab,
+next to the other compliance fields. A new test,
+`tests/product-dialog-tabs.test.mjs`, fails if any block in the product editor
+is not attached to a tab.
+
+### Plugins can declare product fields
+
+A plugin can now add product fields through the new `PRODUCT_FIELD_DEFS` hook,
+in the same shape a merchant uses under **Settings → Product fields**.
+
+- Values live in `Product.custom`, are validated on every save, and are
+  published only when the field is marked public.
+- **Settings → Product fields** lists a plugin's fields read-only, marked
+  "Provided by a plugin". Saving the list refuses a name a plugin provides.
+- If a merchant field already has the same name, the merchant's is kept and the
+  plugin's is inactive. **Settings → Product fields** names the clash, and
+  staff see it as `conflicts` on `GET /api/commerce/product-fields`. Installing
+  a plugin never changes what an existing field publishes.
+- A malformed plugin definition is dropped and logged without affecting any
+  other field.
+- `GET /api/commerce/product-fields` marks plugin fields `managed: true` for
+  staff. Public callers see no difference.
+
+### The storefront starter is MIT, and says so
+
+`examples/storefront` now has its own MIT `LICENSE`, and LICENSING.md says that
+starter templates in `examples/` are MIT: copy them into any project, open or
+closed, and keep the copyright notice. The CMS itself stays GPL.
+
 ### Bulk edit: several changes, conditions, every page, CSV and undo
 
 - **Several changes at once.** Queue them with **Add another change**. Each

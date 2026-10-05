@@ -3,6 +3,14 @@
 **AstroBaaS is free software under the GNU General Public License, version 3 or
 later** (`GPL-3.0-or-later`). The full text is in [LICENSE](./LICENSE).
 
+## Starter templates are MIT
+
+The starter templates in `examples/` that you build your own site from —
+today `examples/storefront` — are under the **MIT licence** instead (each has
+its own `LICENSE` file). They exist to be copied into your project, open or
+closed, so they carry no share-alike condition: keep the copyright notice and
+do what you like. The CMS they talk to stays GPL.
+
 ## What you may do
 
 Everything the GPL grants, for any purpose, commercial included:

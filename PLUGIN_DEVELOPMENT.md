@@ -113,6 +113,56 @@ The same table, for shops. Everything money-shaped is integer **cents**.
 | `PAYMENT_PROVIDERS` | filter | `(providers: PaymentProvider[]) => PaymentProvider[]` | Contribute payment gateways. Collected once at bootstrap from **active** plugins only. See "Payment providers from a plugin" below. |
 | `MANUAL_METHODS` | filter | `(methods: ManualMethodDef[]) => ManualMethodDef[]` | Contribute manual (offline) payment methods. A manual id that shadows a gateway id is **refused** — otherwise a shop could accept as unpaid what it believes was charged. |
 
+| `PRODUCT_FIELD_DEFS` | filter | `(defs: unknown[]) => unknown[]` | Declare product fields, exactly like a merchant's under Settings → Product fields. Initial value `[]`; **append** to what you are handed. See "Product fields from a plugin" below. |
+
+### Product fields from a plugin
+
+A plugin that needs typed data on every product declares the fields itself
+instead of asking the merchant to type the definitions in. Each definition has
+the shape `PUT /api/commerce/product-fields` accepts —
+`{ name, label?, help?, rule, visibility? }` — and goes through the same
+validator, so the same field types and reserved names apply.
+
+```ts
+import { PLUGIN_HOOKS, type Plugin } from 'astrobaas/core';
+
+const wine: Plugin = {
+  id: 'wine',
+  name: 'Wine',
+  filters: {
+    [PLUGIN_HOOKS.PRODUCT_FIELD_DEFS]: (defs: unknown[]) => [
+      ...defs,
+      {
+        name: 'vintage_year',
+        label: 'Vintage',
+        help: 'The harvest year on the label.',
+        rule: { type: 'number', optional: true, int: true, min: 1900, max: 2100 },
+        visibility: 'public',
+      },
+    ],
+  },
+};
+```
+
+- **Values live in `Product.custom`**, next to the merchant's own fields:
+  `{ "custom": { "vintage_year": 2019 } }`. Every writer — the admin form, the
+  REST API, bulk edit and CSV — validates them against your rule on save.
+- **Staff-only unless you say `visibility: 'public'`.** A public field is
+  published on `GET /api/products` and in the public schema at
+  `GET /api/commerce/product-fields`; a staff-only one never leaves the admin.
+- **The merchant's own field wins a name collision.** If the shop already
+  defined a field with your name, yours is inactive and **Settings → Product
+  fields** tells the admin, who can rename or remove theirs to hand you the name.
+  Your plugin must not assume its field exists — the shop's could be staff-only
+  and typed differently, and installing a plugin never changes what an existing
+  field publishes. Choose specific names. Otherwise the settings editor shows
+  your fields read-only ("Provided by a plugin"), and the PUT refuses a new
+  merchant definition that takes one of your names.
+- **A bad definition is dropped on its own** and logged; the merchant's fields
+  and your other fields keep working.
+- **Removing the plugin** stops declaring the fields. Stored values stay in
+  `Product.custom` and stop being published on the next read.
+
 ### Payment providers from a plugin
 
 The contracts are exported from `astrobaas/core`:

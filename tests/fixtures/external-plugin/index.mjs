@@ -273,7 +273,32 @@ export default function ({ definePlugin, PLUGIN_HOOKS }) {
       version: '1.0.0',
       description: 'Fixture: proves one module can carry several plugins.',
       author: 'AstroBaaS tests',
-      filters: {},
+      filters: {
+        // Product fields a plugin declares (PLUGIN_HOOKS.PRODUCT_FIELD_DEFS):
+        // one public, one staff-only, and one that must be DROPPED on its own —
+        // `sku` is reserved — without taking the other two down with it.
+        [PLUGIN_HOOKS.PRODUCT_FIELD_DEFS]: (defs) => [
+          ...defs,
+          { name: 'plugin_rating', label: 'Plugin rating', rule: { type: 'number', optional: true, min: 0, max: 5 }, visibility: 'public' },
+          { name: 'plugin_note', rule: { type: 'string', optional: true, max: 50 } },
+          { name: 'sku', rule: { type: 'string', optional: true } },
+        ],
+      },
+    }),
+    // NOT force-activated, so smoke can switch it on AFTER a merchant already
+    // uses `clash_field` — the order in which a real clash happens.
+    definePlugin({
+      id: 'test-field-clash',
+      name: 'Field Clash Fixture',
+      version: '1.0.0',
+      description: 'Fixture: declares a public field a merchant may already have.',
+      author: 'AstroBaaS tests',
+      filters: {
+        [PLUGIN_HOOKS.PRODUCT_FIELD_DEFS]: (defs) => [
+          ...defs,
+          { name: 'clash_field', label: 'Clash', rule: { type: 'number', optional: true }, visibility: 'public' },
+        ],
+      },
     }),
   ];
 }

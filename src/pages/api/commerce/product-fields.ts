@@ -1,9 +1,10 @@
 import type { APIRoute } from 'astro';
 import { LocalDB } from '../../../lib/localdb';
 import { ApiResponseBuilder } from '../../../lib/api-response';
-import { getProductFieldDefs } from '../../../lib/commerce-service';
+import { getProductFieldDefsWithSource } from '../../../lib/commerce-service';
 import {
   PRODUCT_FIELDS_SETTING, validateProductFieldDefs, productFieldIsPublic,
+  planMerchantProductFieldSave,
 } from '../../../core/product-fields-def';
 import { recordAudit, AUDIT } from '../../../lib/audit';
 
@@ -20,14 +21,21 @@ import { recordAudit, AUDIT } from '../../../lib/audit';
  * sibling problem either — `/api/forms/[type]` exists for the same reason and
  * says so.
  *
- * PUT is ADMIN. It replaces the whole definition list.
+ * The list includes fields active plugins declare (PLUGIN_HOOKS.PRODUCT_FIELD_DEFS).
+ * Staff see those marked `managed: true`, because the settings editor must
+ * show them read-only; a public caller sees no flag and no difference — which
+ * fields a shop's plugins add is not a storefront's business.
+ *
+ * PUT is ADMIN. It replaces the whole MERCHANT definition list. Plugin fields
+ * are not the merchant's to edit, so a submitted name a plugin currently
+ * provides is refused by name rather than silently dropped.
  */
 export const prerender = false;
 
 export const GET: APIRoute = async ({ locals }) => {
   try {
     await LocalDB.init();
-    const all = await getProductFieldDefs();
+    const { fields: all, managed, conflicts } = await getProductFieldDefsWithSource();
     const isStaff = !!locals.user;
 
     // Staff see everything including the staff-only declarations — the admin
@@ -38,9 +46,12 @@ export const GET: APIRoute = async ({ locals }) => {
       help: f.help,
       rule: f.rule,
       ...(isStaff ? { visibility: f.visibility ?? 'staff' } : {}),
+      ...(isStaff && managed.has(f.name) ? { managed: true } : {}),
     }));
 
-    return ApiResponseBuilder.success({ fields });
+    // Staff also learn which of their own field names a plugin wanted: theirs
+    // is kept and the plugin's is inactive until they rename or remove it.
+    return ApiResponseBuilder.success(isStaff ? { fields, conflicts } : { fields });
   } catch (err) {
     console.error('Product fields list error:', err);
     return ApiResponseBuilder.serverError('Failed to load product fields');
@@ -65,7 +76,17 @@ export const PUT: APIRoute = async ({ request, locals }) => {
       );
     }
 
-    await LocalDB.updateSetting(PRODUCT_FIELDS_SETTING, result.fields);
+    // Plugin-owned names are refused by name. See planMerchantProductFieldSave.
+    const { managed } = await getProductFieldDefsWithSource();
+    const toStore = planMerchantProductFieldSave(result.fields, managed);
+    if (!toStore.ok) {
+      return ApiResponseBuilder.validationError(
+        'Invalid product field definitions',
+        Object.fromEntries(toStore.errors.map((e, i) => [String(i), e])),
+      );
+    }
+
+    await LocalDB.updateSetting(PRODUCT_FIELDS_SETTING, toStore.fields);
 
     recordAudit(AUDIT.PRODUCT_FIELDS_UPDATE, {
       actor: locals.user?.id,
