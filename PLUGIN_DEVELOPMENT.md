@@ -433,6 +433,10 @@ uses). Records are stored generically, and a type that declared
 - **`ai-assistant`** — a chat bubble on every public page, backed by the
   operator's own provider under **Settings → AI assistant**. The widget never
   holds the API key: it posts to `/api/assistant/chat` on this origin.
+- **`finance`** — invoicing and bookkeeping. The reference for a plugin that
+  is a whole application: ~70 API routes, one admin screen with its own
+  client app, namespaced storage with a hash-chained log, outbound events and
+  MCP tools. See `src/plugins/finance/README.md`.
 - **`popups`** — one opt-in overlay, on the operator's terms. Deactivating it
   does not set a flag; `/popup.js` stops being served at all.
 

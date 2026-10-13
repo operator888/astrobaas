@@ -156,7 +156,7 @@ export { signWebhook, newWebhookSecret } from '../lib/auth';
 
 // ---- Email (pluggable transport; send notifications, provide a transport) ----
 export { sendEmail, getEmailTransport, setEmailTransport, consoleTransport, webhookTransport } from '../lib/email';
-export type { EmailMessage, EmailTransport } from '../lib/email';
+export type { EmailMessage, EmailTransport, EmailAttachment } from '../lib/email';
 
 // ---- Security audit log (record sensitive actions from plugins/custom routes) ----
 export { recordAudit, AUDIT } from '../lib/audit';

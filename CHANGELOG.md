@@ -6,6 +6,35 @@ semver yet because the API surface is pre-alpha.
 
 ## [Unreleased]
 
+### Finance: invoicing and bookkeeping (your own Lexware)
+
+A new bundled plugin, **Finance** (`src/plugins/finance`), under
+**Admin → Finanzen**, limited to admins and managers.
+
+- Quotes, invoices and credit notes with GoBD-safe numbering: numbers are
+  assigned at finalization under a lock and never reused; finalized documents
+  are immutable and corrected by credit note; every change goes into a
+  hash-chained log with a verify check.
+- German VAT treatments (19/7/0 %, Kleinunternehmer, EU reverse charge,
+  intra-Community supply, third country, export) with EN 16931 rounding.
+- E-invoices out (XRechnung 3.0 CII; ZUGFeRD/Factur-X EN 16931 as PDF/A-3b)
+  and in (XRechnung, ZUGFeRD, UBL → expense). Verified with two independent
+  EN 16931 / XRechnung validators.
+- Expenses with archived receipts; bank statements (camt.053, MT940, CSV) with
+  automatic payment matching; dunning; recurring invoices.
+- UStVA figures, profit & loss, open items; DATEV EXTF export and a
+  Steuerberater ZIP package.
+- Lexware Office importer; contacts CSV import.
+- REST API (`/api/plugin/finance/…`, scope `finance:read|write`), idempotent
+  sales endpoint for websites and the licence centre (API key or HMAC), new
+  webhook events (`invoice.paid` and nine more), shop orders → invoices, and
+  `finance_*` MCP tools.
+
+Core changes it needed: email attachments on every transport (SMTP, SMTP2GO,
+webhook, console); the `finance` API-key scope; an 18 MB body limit for
+`/api/plugin/finance/upload/*` in the app, nginx and Caddy configs; the MCP
+route-existence test now understands plugin routes.
+
 ### "Requires a prescription" shows on one tab only
 
 In the product editor, the prescription fields ("Requires a prescription" and

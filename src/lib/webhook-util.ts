@@ -42,6 +42,21 @@ export const WEBHOOK_EVENTS = [
    */
   'subscriber.confirmed',
   'subscriber.unsubscribed',
+  /**
+   * The finance module (src/plugins/finance). Fired only while it is active.
+   * `invoice.paid` is the one most integrations want: unlock a licence, start
+   * a project, thank a customer — when the money is actually there.
+   */
+  'invoice.finalized',
+  'invoice.paid',
+  'invoice.cancelled',
+  'invoice.dunned',
+  'credit_note.finalized',
+  'quote.finalized',
+  'quote.accepted',
+  'quote.rejected',
+  'document.sent',
+  'expense.created',
 ] as const;
 
 /**

@@ -43,7 +43,7 @@ Covered by the stability policy below.
 | `ApiResponseBuilder`, `ApiResponse`, `ApiSuccessResponse`, `ApiErrorResponse` | class/types | The house response shape for custom endpoints. Preserve the service layer's status at the route boundary — 400 and 409 mean different things to a client. |
 | `fireEvent`, `webhookMatches`, `webhookBody`, `WEBHOOK_EVENTS` | fn/const | Outbound webhook dispatch + helpers. |
 | `signWebhook`, `newWebhookSecret` | fn | HMAC signing for webhook payloads (also for verifying receivers). |
-| `sendEmail`, `getEmailTransport`, `setEmailTransport`, `consoleTransport`, `webhookTransport`, `EmailMessage`, `EmailTransport` | fn/type | Pluggable email transport. |
+| `sendEmail`, `getEmailTransport`, `setEmailTransport`, `consoleTransport`, `webhookTransport`, `EmailMessage`, `EmailTransport`, `EmailAttachment` | fn/type | Pluggable email transport; messages may carry attachments. |
 | `recordAudit`, `AUDIT`, `AuditDetails` | fn/const/type | Security audit log — record sensitive actions from plugins/custom routes. |
 | `reportError` | fn | Structured error reporting from a plugin or custom route. Never throws, so it is safe on an error path. |
 | `plainText`, `countWords`, `sentences`, `decodeEntities`, `truncateWords` | fn | Text extraction from stored HTML. Exported so a plugin computing a read time or an excerpt uses the same stripper as the byline and the editor's analysis panel — five private copies once existed and two disagreed about whether a tag boundary is a word boundary. The bundled `reading-time` plugin is the worked example. |
