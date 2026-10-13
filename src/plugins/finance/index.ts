@@ -82,6 +82,7 @@ export default definePlugin({
       if (!settings.auto_run_recurring) return;
       const r = await fin.runRecurring('scheduler');
       if (r.created.length) console.log(`[ecws-billing] created ${r.created.length} recurring invoice(s)`);
+      if (r.expenses.length) console.log(`[ecws-billing] booked ${r.expenses.length} standing expense(s)`);
       for (const e of r.errors) console.error(`[ecws-billing] recurring: ${e}`);
     },
 

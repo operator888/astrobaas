@@ -874,6 +874,29 @@ function memoryStore() {
   check('shop: a cent of rounding is written off, invoice paid', sale.document.status === 'paid' && sale.document.paid_cents === TX.dueCents(sale.document));
 }
 
+// ---- Standing expenses and order confirmations
+{
+  const store = memoryStore();
+  let clock = new Date('2026-12-05T09:00:00Z');
+  const mails = [];
+  const fin = new S.Finance(store, { fontBytes: async () => font, sendEmail: async (m) => { mails.push(m); }, emailStatus: () => ({ active: true, label: 'smtp' }), siteUrl: async () => 'https://x', now: () => clock });
+  await fin.saveCompany(seller, 'a');
+  const rx = await fin.saveRecurringExpense(null, { name: 'Büromiete', supplier_name: 'Vermieter GmbH', category: 'other', gross: '595,00', tax_rate: 19, next_date: '2026-10-31', interval: 'monthly' }, 'a');
+  const r1 = await fin.runRecurring('s');
+  const exps = await fin.listExpenses();
+  check('standing expense: one open expense per elapsed month, anchored to the 31st', r1.expenses.length === 2 && exps.map((e) => e.date).sort().join() === '2026-10-31,2026-11-30' && exps.every((e) => e.gross_cents === 59500 && e.tax_cents === 9500));
+  const r2 = await fin.runRecurring('s');
+  check('standing expense: idempotent on a second run', r2.expenses.length === 0 && (await fin.listExpenses()).length === 2);
+  check('standing expense: next date moves on', (await fin.listRecurringExpenses())[0].next_date === '2026-12-31' && rx.anchor_day === 31);
+
+  const cust = await fin.createContact({ company_name: 'Kunde AG', email: 'k@k.de', billing_address: { street: 'S', zip: '1', city: 'Köln', country: 'DE' } }, 'a');
+  const q = await fin.finalize((await fin.createDocument({ type: 'quote', contact_id: cust.id, lines: [{ name: 'Shop', quantity: 1, unit_price_cents: 90000 }, { name: 'Wartung', quantity: 12, unit_price_cents: 5000, optional: true }] }, 'a')).id, 'a');
+  await rejects('order confirmation: only for accepted quotes', () => fin.orderConfirmation(q.id, {}, 'a'), /accepted quote/);
+  await fin.respondToQuote(q.id, { decision: 'accept', name: 'K', options: [q.lines[1].id] });
+  const ab = await fin.orderConfirmation(q.id, { send: true }, 'a');
+  check('order confirmation: PDF archived and emailed', !!ab.pdf_id && ab.document.order_confirmation.sent_to === 'k@k.de' && mails.some((m) => /Auftragsbestätigung/.test(m.subject)));
+}
+
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -310,6 +310,8 @@ export interface FinanceDocument {
   deducts?: { id: string; number: string; net_cents: number; tax_cents: number; gross_cents: number; groups: TaxGroup[] }[];
   /** Quotes accepted online: which optional lines the customer chose. */
   accepted_options?: string[];
+  /** Quotes: the order confirmation (Auftragsbestätigung) issued for it. */
+  order_confirmation?: { pdf_id: string; date: ISODate; sent_to?: string };
   /** Who accepted / rejected a quote online, and when. */
   quote_response?: { status: 'accepted' | 'rejected'; at: ISODateTime; name?: string; note?: string; via: 'portal' | 'admin' };
   /** Cached totals — recomputed on every write, never trusted from input. */
@@ -413,7 +415,7 @@ export interface Expense {
   file_name?: string;
   /** The structured XML, when the expense came in as an e-invoice. */
   xml_file_id?: string;
-  source: 'manual' | 'upload' | 'einvoice' | 'ai' | 'bank' | 'inbound' | 'lexware';
+  source: 'manual' | 'upload' | 'einvoice' | 'ai' | 'bank' | 'inbound' | 'lexware' | 'recurring';
   note?: string;
   bank_tx_id?: string;
   external_ref?: string;
@@ -475,6 +477,31 @@ export interface MatchSuggestion {
 /* ------------------------------------------------------------------ *
  * Recurring invoices (retainers, licences, hosting)
  * ------------------------------------------------------------------ */
+
+/**
+ * A standing cost (Dauerbeleg): rent, a server, an insurance premium. The
+ * contract is the receipt; each period an open expense is booked from it.
+ */
+export interface RecurringExpense {
+  id: string;
+  name: string;
+  active: boolean;
+  supplier_name: string;
+  contact_id?: string;
+  category: string;
+  gross_cents: number;
+  tax_rate: number;
+  description?: string;
+  interval: 'monthly' | 'quarterly' | 'yearly';
+  next_date: ISODate;
+  end_date?: ISODate;
+  anchor_day?: number;
+  /** Book it as already paid (a direct debit you do not want to match by hand). */
+  book_as_paid: boolean;
+  last_expense_id?: string;
+  created_at: ISODateTime;
+  updated_at: ISODateTime;
+}
 
 export interface RecurringTemplate {
   id: string;

@@ -20,7 +20,7 @@ import crypto from 'node:crypto';
 import type { PluginStore } from 'astrobaas/core';
 import type {
   Article, BankAccount, BankTransaction, CompanyProfile, Contact, Counter, DocumentType, Expense,
-  FinanceDocument, FinanceSettings, LogEntry, Payment, RecurringTemplate, TaxTreatment,
+  FinanceDocument, FinanceSettings, LogEntry, Payment, RecurringExpense, RecurringTemplate, TaxTreatment,
 } from './types';
 import { computeTotals, dueCents, skontoFor, splitByGroups, suggestTreatment, withDeductions } from './tax';
 import { nextNumber, patternProblem, periodKey } from './numbering';
@@ -52,6 +52,7 @@ export const COL = {
   bankAccounts: 'bank_accounts',
   bankTx: (year: string) => `bank_tx_${year}`,
   recurring: 'recurring',
+  recurringExpenses: 'recurring_expenses',
   log: (year: string) => `log_${year}`,
   dunnings: 'dunnings',
   jobs: 'jobs',
@@ -786,6 +787,59 @@ export class Finance {
     return next;
   }
 
+  /** The lines a quote turns into once accepted: chosen options in, alternatives out. */
+  private acceptedLines(q: FinanceDocument) {
+    return q.lines
+      .filter((l) => !l.alternative && (!l.optional || (q.accepted_options ?? []).includes(l.id)))
+      .map((l) => ({ ...l, optional: undefined }));
+  }
+
+  /**
+   * Auftragsbestätigung for an accepted quote: a PDF that confirms the order
+   * with exactly the accepted scope, archived with the quote and optionally
+   * emailed. It is a letter, not a tax document, so it takes no number of
+   * its own — it refers to the quote.
+   */
+  async orderConfirmation(did: string, input: unknown, actor: string): Promise<{ document: FinanceDocument; pdf_id: string }> {
+    const i = asObj(input);
+    const q = await this.getDocument(did);
+    if (q.type !== 'quote' || !(q.status === 'accepted' || q.status === 'invoiced')) throw new FinanceError('Only an accepted quote can be confirmed.', 409);
+    const company = q.seller ?? await this.company();
+    const lang = company.document_language || 'de';
+    const lines = this.acceptedLines(q);
+    const ab: FinanceDocument = {
+      ...q,
+      title: `${lang === 'de' ? 'Auftragsbestätigung zu Angebot' : 'Order confirmation for quote'} ${q.number}`,
+      intro: lang === 'de'
+        ? `vielen Dank für Ihren Auftrag${q.quote_response?.at ? ` vom ${q.quote_response.at.slice(0, 10).split('-').reverse().join('.')}` : ''}. Hiermit bestätigen wir die folgenden Leistungen:`
+        : 'Thank you for your order. We confirm the following:',
+      issue_date: this.today(),
+      valid_until: undefined,
+      lines,
+      totals: this.totalsOf({ ...q, lines }, lang),
+    };
+    const contact = q.contact_id ? await this.store.get<Contact>(COL.contacts, q.contact_id) : undefined;
+    const pdf = await renderDocumentPdf(ab, company, { fontBytes: await this.deps.fontBytes(), customerNumber: contact?.customer_number, now: this.now() });
+    const name = `${lang === 'de' ? 'Auftragsbestaetigung' : 'Order-confirmation'}-${q.number}.pdf`;
+    const meta = await archiveFile(pdf, name, 'pdf');
+    let sentTo: string | undefined;
+    if (i.send && q.recipient.email) {
+      this.requireRealEmail();
+      await this.deps.sendEmail!({
+        to: q.recipient.email,
+        subject: `${lang === 'de' ? 'Auftragsbestätigung' : 'Order confirmation'} — ${q.number}`,
+        text: lang === 'de' ? `Guten Tag,\n\nvielen Dank für Ihren Auftrag. Anbei unsere Auftragsbestätigung zu Angebot ${q.number}.\n\nMit freundlichen Grüßen\n${legalName(company)}`
+          : `Hello,\n\nthank you for your order. Please find our order confirmation for quote ${q.number} attached.\n\nKind regards\n${legalName(company)}`,
+        replyTo: company.email || undefined,
+        attachments: [{ filename: name, contentType: 'application/pdf', content: pdf }],
+      });
+      sentTo = q.recipient.email;
+    }
+    const document = await this.patchDocument(did, () => ({ order_confirmation: { pdf_id: meta.id, date: this.today(), sent_to: sentTo } }));
+    await this.log(actor, 'quote.confirmed', 'quote', did, `Auftragsbestätigung${sentTo ? ` sent to ${sentTo}` : ''}`);
+    return { document, pdf_id: meta.id };
+  }
+
   async quoteToInvoice(did: string, actor: string): Promise<FinanceDocument> {
     const q = await this.getDocument(did);
     if (q.type !== 'quote' || q.status === 'draft') throw new FinanceError('Finalize the quote first.', 409);
@@ -794,9 +848,7 @@ export class Finance {
       type: 'invoice', contact_id: q.contact_id, recipient: q.recipient, reference: q.reference,
       // Alternatives were for comparison; optional lines go over only when
       // the customer chose them when accepting.
-      lines: q.lines
-        .filter((l) => !l.alternative && (!l.optional || (q.accepted_options ?? []).includes(l.id)))
-        .map((l) => ({ ...l, id: undefined, optional: undefined })),
+      lines: this.acceptedLines(q).map((l) => ({ ...l, id: undefined })),
       tax_treatment: q.tax_treatment, price_mode: q.price_mode, currency: q.currency, title: undefined,
       einvoice_format: q.einvoice_format,
     }, actor, { from_quote_id: q.id });
@@ -1482,9 +1534,93 @@ export class Finance {
     await this.log(actor, 'recurring.delete', 'recurring', rid);
   }
 
-  /** Create every invoice that is due today or earlier. Idempotent per period. */
-  runRecurring(actor: string): Promise<{ created: string[]; errors: string[] }> {
-    return singleFlight('recurring', () => this.runRecurringOnce(actor));
+  /** Create every invoice and standing expense that is due today or earlier. Idempotent per period. */
+  runRecurring(actor: string): Promise<{ created: string[]; errors: string[]; expenses: string[] }> {
+    return singleFlight('recurring', async () => {
+      const inv = await this.runRecurringOnce(actor);
+      const exp = await this.runRecurringExpensesOnce(actor);
+      return { created: inv.created, errors: [...inv.errors, ...exp.errors], expenses: exp.created };
+    });
+  }
+
+  /* ----------------------------- standing expenses (Dauerbelege) ----------------------------- */
+
+  async listRecurringExpenses(): Promise<RecurringExpense[]> {
+    return (await this.store.list<RecurringExpense>(COL.recurringExpenses, ALL)).map((r) => r.data);
+  }
+
+  async saveRecurringExpense(rid: string | null, input: unknown, actor: string): Promise<RecurringExpense> {
+    const i = asObj(input);
+    const before = rid ? await this.store.get<RecurringExpense>(COL.recurringExpenses, rid) : undefined;
+    if (rid && !before) throw new FinanceError('Standing expense not found.', 404);
+    const pick = <K extends keyof RecurringExpense>(k: K, fn: (v: unknown) => RecurringExpense[K] | undefined): RecurringExpense[K] | undefined => (k in i ? fn(i[k as string]) : before?.[k]);
+    const contactId = pick('contact_id', (v) => str(v, 60));
+    if (contactId) await this.getContact(contactId);
+    const nextDate = pick('next_date', (v) => readDate(v, 'next_date')) ?? this.today();
+    const r: RecurringExpense = {
+      id: before?.id ?? id('rx'),
+      name: pick('name', (v) => str(v, 120)) ?? '',
+      active: pick('active', (v) => v !== false && v !== 'false') ?? true,
+      supplier_name: pick('supplier_name', (v) => str(v, 200)) ?? '',
+      contact_id: contactId,
+      category: pick('category', (v) => str(v, 40)) ?? 'other',
+      gross_cents: 'gross' in i || 'gross_cents' in i ? readCents(i, 'gross') : before?.gross_cents ?? 0,
+      tax_rate: pick('tax_rate', (v) => ([19, 7, 0].includes(Number(v)) ? Number(v) : 19)) ?? 19,
+      description: pick('description', (v) => str(v, 300)),
+      interval: pick('interval', (v) => (v === 'quarterly' || v === 'yearly' ? v : 'monthly')) ?? 'monthly',
+      next_date: nextDate,
+      end_date: pick('end_date', (v) => readDate(v, 'end_date')),
+      anchor_day: pick('anchor_day', (v) => (v ? Math.min(31, Math.max(1, Math.round(Number(v)))) : undefined)) ?? Number(nextDate.slice(8, 10)),
+      book_as_paid: pick('book_as_paid', (v) => v === true || v === 'true') ?? false,
+      last_expense_id: before?.last_expense_id,
+      created_at: before?.created_at ?? this.stamp(),
+      updated_at: this.stamp(),
+    };
+    if (!r.supplier_name && !r.contact_id) throw new FinanceError('A standing expense needs a supplier.');
+    if (!r.name) r.name = r.supplier_name;
+    if (r.gross_cents <= 0) throw new FinanceError('A standing expense needs a positive amount.');
+    await this.store.put(COL.recurringExpenses, r.id, r as unknown as Record<string, unknown>);
+    await this.log(actor, rid ? 'recurring_expense.update' : 'recurring_expense.create', 'recurring_expense', r.id, r.name);
+    return r;
+  }
+
+  async deleteRecurringExpense(rid: string, actor: string): Promise<void> {
+    await this.store.delete(COL.recurringExpenses, rid);
+    await this.log(actor, 'recurring_expense.delete', 'recurring_expense', rid);
+  }
+
+  private async runRecurringExpensesOnce(actor: string): Promise<{ created: string[]; errors: string[] }> {
+    const today = this.today();
+    const created: string[] = [];
+    const errors: string[] = [];
+    for (const r of await this.listRecurringExpenses()) {
+      let tpl = r;
+      let guard = 0;
+      while (tpl.active && tpl.next_date <= today && (!tpl.end_date || tpl.next_date <= tpl.end_date) && guard++ < 24) {
+        const ref = `recurring_expense:${tpl.id}:${tpl.next_date}`;
+        const months = tpl.interval === 'yearly' ? 12 : tpl.interval === 'quarterly' ? 3 : 1;
+        try {
+          if (!(await this.store.get(COL.refs, ref))) {
+            const e = await this.saveExpense(null, {
+              supplier_name: tpl.supplier_name || undefined, contact_id: tpl.contact_id, date: tpl.next_date,
+              gross_cents: tpl.gross_cents, tax_rate: tpl.tax_rate, category: tpl.category,
+              description: tpl.description ?? tpl.name, status: tpl.book_as_paid ? 'paid' : 'open',
+              ...(tpl.book_as_paid ? { paid_date: tpl.next_date } : {}),
+              note: `Dauerbeleg „${tpl.name}“ — Vertrag/Dauerrechnung als Beleg.`,
+            }, actor, { source: 'recurring' });
+            await this.store.put(COL.refs, ref, { expense_id: e.id });
+            created.push(e.id);
+            tpl = { ...tpl, last_expense_id: e.id };
+          }
+        } catch (e) {
+          errors.push(`${tpl.name}: ${(e as Error).message}`);
+          break;
+        }
+        tpl = { ...tpl, next_date: addMonthsAnchored(tpl.next_date, months, tpl.anchor_day ?? Number(tpl.next_date.slice(8, 10))), updated_at: this.stamp() };
+        await this.store.put(COL.recurringExpenses, tpl.id, tpl as unknown as Record<string, unknown>);
+      }
+    }
+    return { created, errors };
   }
 
   private async runRecurringOnce(actor: string): Promise<{ created: string[]; errors: string[] }> {

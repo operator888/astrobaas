@@ -232,6 +232,7 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
       const b = await body(request);
       return json(await fin.setQuoteStatus(params.id, b.status === 'rejected' ? 'rejected' : 'accepted', actor));
     }),
+    r('POST', '/documents/:id/order-confirmation', async ({ fin, params, request, actor }) => json(await fin.orderConfirmation(params.id, await body(request), actor))),
     r('POST', '/documents/:id/to-invoice', async ({ fin, params, actor }) => json(await fin.quoteToInvoice(params.id, actor), 201)),
     r('POST', '/documents/:id/dunning', async ({ fin, params, request, actor }) => json(await fin.createDunning(params.id, await body(request), actor), 201)),
     r('POST', '/documents/:id/duplicate', async ({ fin, params, actor }) => {
@@ -309,6 +310,10 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
     r('PUT', '/recurring/:id', async ({ fin, params, request, actor }) => json(await fin.saveRecurring(params.id, await body(request), actor))),
     r('DELETE', '/recurring/:id', async ({ fin, params, actor }) => { await fin.deleteRecurring(params.id, actor); return json({ deleted: true }); }),
     r('POST', '/recurring/run', async ({ fin, actor }) => json(await fin.runRecurring(actor))),
+    r('GET', '/recurring-expenses', async ({ fin }) => json(await fin.listRecurringExpenses())),
+    r('POST', '/recurring-expenses', async ({ fin, request, actor }) => json(await fin.saveRecurringExpense(null, await body(request), actor), 201)),
+    r('PUT', '/recurring-expenses/:id', async ({ fin, params, request, actor }) => json(await fin.saveRecurringExpense(params.id, await body(request), actor))),
+    r('DELETE', '/recurring-expenses/:id', async ({ fin, params, actor }) => { await fin.deleteRecurringExpense(params.id, actor); return json({ deleted: true }); }),
 
     /* ------------------------------ reports ------------------------------ */
     r('GET', '/reports/vat', async ({ fin, url }) => {
