@@ -202,7 +202,7 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
       if (from) list = list.filter((d) => (d.issue_date ?? d.created_at) >= from);
       if (to) list = list.filter((d) => (d.issue_date ?? d.created_at).slice(0, 10) <= to);
       const today = fin.today();
-      return json(list.map((d) => ({ ...publicDoc(d), title: d.title, overdue: fin.isOverdue(d), days_overdue: d.due_date && fin.isOverdue(d) ? Math.round((Date.parse(today) - Date.parse(d.due_date)) / 864e5) : 0, dunning_level: d.dunning_level ?? 0, sent_at: d.sent_at })));
+      return json(list.map((d) => ({ ...publicDoc(d), title: d.title, invoice_kind: d.invoice_kind, overdue: fin.isOverdue(d), days_overdue: d.due_date && fin.isOverdue(d) ? Math.round((Date.parse(today) - Date.parse(d.due_date)) / 864e5) : 0, dunning_level: d.dunning_level ?? 0, sent_at: d.sent_at })));
     }),
     r('POST', '/documents', async ({ fin, request, actor }) => {
       const b = await body(request);

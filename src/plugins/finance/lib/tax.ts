@@ -269,6 +269,21 @@ export function looksLikeVatId(v: string | undefined): boolean {
     .test(v.replace(/[\s.-]/g, '').toUpperCase());
 }
 
+/**
+ * Leitweg-ID shape and check digits (KoSIT format spec 2.0.2: ISO/IEC 7064
+ * MOD 97-10 over everything before the last two digits). `null` when the
+ * value is not shaped like a Leitweg-ID at all — then it is some other buyer
+ * reference and nothing can be said about it.
+ */
+export function leitwegIdValid(v: string | undefined): boolean | null {
+  const s = (v ?? '').trim().toUpperCase();
+  if (!/^\d{2,12}(-[A-Z0-9]{1,30})?-\d{2}$/.test(s)) return null;
+  const digits = s.replace(/-/g, '').replace(/[A-Z]/g, (ch) => String(ch.charCodeAt(0) - 55));
+  let rem = 0;
+  for (const d of digits) rem = (rem * 10 + Number(d)) % 97;
+  return rem === 1;
+}
+
 /** IBAN mod-97 check. */
 export function validIban(iban: string | undefined): boolean {
   if (!iban) return false;

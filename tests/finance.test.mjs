@@ -897,6 +897,11 @@ function memoryStore() {
   check('order confirmation: PDF archived and emailed', !!ab.pdf_id && ab.document.order_confirmation.sent_to === 'k@k.de' && mails.some((m) => /Auftragsbestätigung/.test(m.subject)));
 }
 
+// ---- Leitweg-ID check digits
+check('leitweg: a valid id passes (04011000-1234512345-06)', T.leitwegIdValid('04011000-1234512345-06') === true);
+check('leitweg: a mistyped id fails', T.leitwegIdValid('04011000-1234512345-07') === false && T.leitwegIdValid('04-12345-67') === false);
+check('leitweg: an ordinary PO number is not judged', T.leitwegIdValid('PO-778') === null);
+
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

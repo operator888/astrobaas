@@ -47,6 +47,17 @@ export function wrapText(text: string, font: PDFFont, size: number, maxWidth: nu
       if (font.widthOfTextAtSize(candidate, size) <= maxWidth) { line = candidate; continue; }
       if (line) out.push(line);
       if (font.widthOfTextAtSize(word, size) <= maxWidth) { line = word; continue; }
+      // Too long for one line: break an e-mail address or URL at "@" or "/"
+      // before falling back to a hard break inside the word.
+      const parts = word.split(/(?<=[@/])/);
+      if (parts.length > 1 && parts.every((p) => font.widthOfTextAtSize(p, size) <= maxWidth)) {
+        let acc = '';
+        for (const p of parts) {
+          if (acc && font.widthOfTextAtSize(acc + p, size) > maxWidth) { out.push(acc); acc = p; } else acc += p;
+        }
+        line = acc;
+        continue;
+      }
       let chunk = '';
       for (const ch of word) {
         if (font.widthOfTextAtSize(chunk + ch, size) > maxWidth) { out.push(chunk); chunk = ch; } else chunk += ch;

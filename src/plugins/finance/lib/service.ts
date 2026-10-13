@@ -22,7 +22,7 @@ import type {
   Article, BankAccount, BankTransaction, CompanyProfile, Contact, Counter, DocumentType, Expense,
   FinanceDocument, FinanceSettings, LogEntry, Payment, RecurringExpense, RecurringTemplate, TaxTreatment,
 } from './types';
-import { computeTotals, dueCents, skontoFor, splitByGroups, suggestTreatment, withDeductions } from './tax';
+import { computeTotals, dueCents, leitwegIdValid, skontoFor, splitByGroups, suggestTreatment, withDeductions } from './tax';
 import { nextNumber, patternProblem, periodKey } from './numbering';
 import { addDays, addMonthsAnchored, contactDisplayName, daysBetween, formatMoney, legalName, todayIso } from './format';
 import {
@@ -619,6 +619,9 @@ export class Finance {
         try { await this.deductionsFor(d.deducts.map((x) => x.id), d.contact_id, d.id); } catch (e) { errors.push((e as Error).message); }
         if (dueCents(d) < 0) errors.push('The down payments exceed the final invoice total — correct the amounts or issue a credit note.');
       }
+    }
+    if (d.einvoice_format === 'xrechnung' && leitwegIdValid(d.recipient.buyer_reference) === false) {
+      warnings.push(`The Leitweg-ID "${d.recipient.buyer_reference}" fails its check digits — the authority's portal would not route this invoice. Copy it again from the order.`);
     }
     if (d.skonto && d.skonto.days >= (d.payment_days ?? company.default_payment_days)) {
       warnings.push(`The Skonto period (${d.skonto.days} days) is not shorter than the payment term — customers will always deduct it.`);

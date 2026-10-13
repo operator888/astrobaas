@@ -79,6 +79,12 @@
   const centsInput = (c) => fmt.format((c || 0) / 100);
 
   /** Element.append() writes null as the text "null"; this skips it like h() does. */
+  /** Replace an element's children; null / false entries are skipped, never printed as "null". */
+  function fill(el, ...children) {
+    el.replaceChildren(...children.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false));
+    return el;
+  }
+
   function append(el, ...children) {
     el.append(...children.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false));
     return el;
@@ -101,6 +107,30 @@
    * pass through unchanged.
    */
   const DE_MESSAGES = [
+    [/^Line (\d+): the unit price must not be negative.*$/, (m) => `Position ${m[1]}: Der Einzelpreis darf nicht negativ sein — für einen Abzug eine negative Menge eintragen.`],
+    [/^The invoice total is negative.*$/, 'Die Rechnungssumme ist negativ — bitte stattdessen eine Gutschrift erstellen.'],
+    [/^The credit note total is negative.*$/, 'Die Gutschrift-Summe ist negativ — Beträge bitte positiv eingeben.'],
+    [/^Optional and alternative lines belong in quotes only.*$/, 'Optionale und alternative Positionen gibt es nur im Angebot — Markierung oder Position entfernen.'],
+    [/^This final invoice deducts no down payments.*$/, 'Diese Schlussrechnung zieht keine Abschläge ab — bitte die Abschlagsrechnungen auswählen.'],
+    [/^The down payments exceed the final invoice total.*$/, 'Die Abschläge übersteigen die Schlussrechnung — Beträge prüfen oder eine Gutschrift erstellen.'],
+    [/^A final invoice can only deduct finalized down-payment invoices.*$/, 'Eine Schlussrechnung kann nur abgeschlossene Abschlagsrechnungen abziehen.'],
+    [/^Down-payment invoice (\S+) belongs to another customer\.?$/, (m) => `Abschlagsrechnung ${m[1]} gehört zu einem anderen Kunden.`],
+    [/^Down-payment invoice (\S+) is already settled by (.+)\.$/, (m) => `Abschlagsrechnung ${m[1]} ist bereits mit ${m[2].replace('another final invoice draft', 'einem anderen Schlussrechnungs-Entwurf')} verrechnet.`],
+    [/^The Skonto period \((\d+) days\) is not shorter than the payment term.*$/, (m) => `Die Skontofrist (${m[1]} Tage) ist nicht kürzer als das Zahlungsziel — Kunden würden immer Skonto ziehen.`],
+    [/^The Leitweg-ID "(.+)" fails its check digits.*$/, (m) => `Die Leitweg-ID „${m[1]}“ hat eine falsche Prüfziffer — das Behördenportal kann die Rechnung nicht zustellen. Bitte erneut aus der Bestellung kopieren.`],
+    [/^This invoice offers no Skonto\.?$/, 'Diese Rechnung gewährt kein Skonto.'],
+    [/^The difference \((.+)\) is larger than the Skonto \((.+)\)\.$/, (m) => `Die Differenz (${m[1]}) ist größer als das Skonto (${m[2]}).`],
+    [/^Nothing is left to settle.*$/, 'Es ist nichts mehr offen — die Zahlung deckt den ganzen Betrag.'],
+    [/^Only an invoice can be settled with a Skonto.*$/, 'Skonto oder Differenzbuchung ist nur bei Rechnungen möglich.'],
+    [/^Only (.+) of this transaction is still unassigned\.$/, (m) => `Von diesem Umsatz sind nur noch ${m[1]} nicht zugeordnet.`],
+    [/^The amount to assign is zero\.?$/, 'Der zuzuordnende Betrag ist null.'],
+    [/^This transaction is already fully matched\.?$/, 'Dieser Umsatz ist bereits vollständig zugeordnet.'],
+    [/^Only an accepted quote can be confirmed\.?$/, 'Eine Auftragsbestätigung gibt es nur für angenommene Angebote.'],
+    [/^This quote has already been answered\.?$/, 'Dieses Angebot wurde bereits beantwortet.'],
+    [/^Foreign VAT of (.+) on expenses.*$/, (m) => `Ausländische Umsatzsteuer von ${m[1]} aus Ausgaben ist hier nicht als Vorsteuer abziehbar (Vorsteuer-Vergütungsverfahren über das BZSt).`],
+    [/^A standing expense needs a supplier\.?$/, 'Ein Dauerbeleg braucht einen Lieferanten.'],
+    [/^A standing expense needs a positive amount\.?$/, 'Ein Dauerbeleg braucht einen positiven Betrag.'],
+    [/^The e-invoice could not be read: (.*)$/, (m) => `Die E-Rechnung konnte nicht gelesen werden: ${m[1]}`],
     [/^Add at least one billable line\.?$/, 'Mindestens eine Position mit Leistung hinzufügen.'],
     [/^Fill in the company profile first.*$/, 'Bitte zuerst die Firmendaten ausfüllen (Einstellungen → Firma).'],
     [/^Your company needs a tax number or VAT id.*$/, 'Die Firma braucht eine Steuernummer oder USt-IdNr. (§ 14 Abs. 4 Nr. 2 UStG) — Einstellungen → Firma.'],
@@ -257,10 +287,10 @@
       h('div', { class: 'text-xs leading-tight text-gray-500' }, 'E-Commerce Web Services · Rechnungen, Belege, Bank & Steuer')));
   const nav = h('nav', { class: 'mb-5 flex flex-wrap gap-1 border-b border-gray-200 pb-2', 'aria-label': 'ECWS Billing' });
   const main = h('div', {});
-  root.replaceChildren(brand, nav, main);
+  fill(root, brand, nav, main);
 
   function renderNav(active) {
-    nav.replaceChildren(...NAV.map(([k, l]) => h('a', {
+    fill(nav, ...NAV.map(([k, l]) => h('a', {
       href: `#/${k}`,
       class: `rounded-md px-3 py-1.5 text-sm font-medium ${active === k ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`,
     }, l)));
@@ -274,7 +304,7 @@
     const section = parts[0] || '';
     renderNav(['doc'].includes(section) ? (params.get('type') === 'quote' ? 'quotes' : 'invoices') : section === 'contact' ? 'contacts' : section === 'expense' ? 'expenses' : section === 'rec' ? 'recurring' : ['credit_notes', 'dunning'].includes(section) ? 'invoices' : section);
     document.title = 'ECWS Billing';
-    main.replaceChildren(h('p', { class: 'text-sm text-gray-400' }, 'Lädt…'));
+    fill(main, h('p', { class: 'text-sm text-gray-400' }, 'Lädt…'));
     try {
       await meta();
       const view = {
@@ -284,9 +314,9 @@
         dunning: dunningView, recurring: recurringList, rec: () => recurringEditor(parts[1]), reports: reportsView, export: exportView, settings: settingsView,
       }[section] || dashboard;
       const node = await view();
-      main.replaceChildren(node);
+      fill(main, node);
     } catch (e) {
-      main.replaceChildren(h('div', { class: 'rounded-md bg-red-50 p-4 text-sm text-red-800' }, e.message || String(e)));
+      fill(main, h('div', { class: 'rounded-md bg-red-50 p-4 text-sm text-red-800' }, e.message || String(e)));
     }
   }
   window.addEventListener('hashchange', route);
@@ -366,10 +396,10 @@
       if (state.q) qs.set('q', state.q);
       const docs = await api('GET', `/documents?${qs}`);
       const total = docs.filter((d) => d.status !== 'draft' && d.status !== 'cancelled').reduce((s, d) => s + d.gross_cents, 0);
-      list.replaceChildren(
+      fill(list, 
         table(['Nr.', 'Kunde', 'Datum', type === 'quote' ? 'Gültig' : 'Fällig', { label: 'Brutto', right: true }, { label: 'Offen', right: true }, 'Status'],
-          docs.map((d) => ({ d, cells: [d.number || 'Entwurf', d.recipient.name, date(d.issue_date), date(d.due_date), money(d.gross_cents, d.currency),
-            type === 'quote' ? '' : money(d.gross_cents - d.paid_cents, d.currency),
+          docs.map((d) => ({ d, cells: [h('span', {}, d.number || 'Entwurf', d.invoice_kind === 'partial' || d.invoice_kind === 'final' ? h('span', { class: 'ml-1 rounded bg-gray-100 px-1 text-xs text-gray-600' }, d.invoice_kind === 'partial' ? 'Abschlag' : 'Schluss') : null), d.recipient.name, date(d.issue_date), date(d.due_date), money(d.gross_cents, d.currency),
+            type === 'quote' ? '' : money((d.due_cents ?? d.gross_cents) - d.paid_cents, d.currency),
             h('span', { class: 'flex gap-1' }, badge(d.overdue ? 'overdue' : d.status), d.dunning_level ? h('span', { class: 'text-xs text-red-600' }, `M${d.dunning_level}`) : null)] })),
           (r) => go(`#/doc/${r.d.id}`)),
         h('p', { class: 'mt-2 text-right text-xs text-gray-500' }, `${docs.length} Dokumente · Summe ${money(total)}`));
@@ -378,7 +408,7 @@
       .filter(([k]) => type !== 'quote' || !['overdue', 'paid'].includes(k));
     if (type === 'quote') chips.push(['accepted', 'Angenommen'], ['rejected', 'Abgelehnt'], ['invoiced', 'Abgerechnet']);
     const chipRow = h('div', { class: 'flex flex-wrap gap-1' });
-    const renderChips = () => chipRow.replaceChildren(...chips.map(([k, l]) => h('button', {
+    const renderChips = () => fill(chipRow, ...chips.map(([k, l]) => h('button', {
       type: 'button', class: `rounded-full px-3 py-1 text-xs font-medium ${state.status === k ? 'bg-gray-900 text-white' : 'bg-white text-gray-600 ring-1 ring-gray-200 hover:bg-gray-50'}`,
       onclick: () => { state.status = k; renderChips(); load(); },
     }, l)));
@@ -415,7 +445,7 @@
       h('p', { class: 'text-xs text-gray-500' }, `Mahnstufen nach ${d.level_days.join(' / ')} Tagen Verzug (Zahlungserinnerung, 1. und 2. Mahnung). Mindestens 7 Tage zwischen zwei Schreiben. Verzugszinsen (§ 288 BGB) ${d.charge_interest ? `ab Stufe 2, Basiszins ${d.base_rate_percent} %` : 'sind ausgeschaltet'}. Gesendet wird nie automatisch — jedes Schreiben löst du hier selbst aus.`),
       emailWarning(),
       table(['Rechnung', 'Kunde', 'Fällig', { label: 'Tage', right: true }, { label: 'Offen', right: true }, 'Nächste Stufe', ''],
-        list.map((x) => ({ x, cells: [x.number, x.recipient.name, date(x.due_date), String(x.days_overdue), money(x.gross_cents - x.paid_cents, x.currency), levelName(x.next_level),
+        list.map((x) => ({ x, cells: [x.number, x.recipient.name, date(x.due_date), String(x.days_overdue), money((x.due_cents ?? x.gross_cents) - x.paid_cents, x.currency), levelName(x.next_level),
           h('span', { class: 'flex justify-end gap-1' }, btn('Nur PDF', (e) => { e.stopPropagation(); create(x, false); }), btn('Senden', (e) => { e.stopPropagation(); create(x, true); }, 'primary'))] })),
         (r) => go(`#/doc/${r.x.id}`)),
       list.length ? null : h('p', { class: 'text-sm text-green-700' }, 'Aktuell ist keine Mahnung fällig.'));
@@ -427,7 +457,7 @@
     const groups = {};
     let net = 0;
     for (const l of lines) {
-      if (l.type === 'text') continue;
+      if (l.type === 'text' || l.optional || l.alternative) continue;
       const rate = zero ? 0 : Number(l.tax_rate) || 0;
       const raw = (Number(l.quantity) || 0) * (l.unit_price_cents || 0) * (1 - (Number(l.discount_percent) || 0) / 100);
       let n = Math.round(raw);
@@ -451,6 +481,8 @@
         tax_treatment: '', price_mode: 'net', currency: company.default_currency || 'EUR', recipient: {}, einvoice_format: 'zugferd', issue_date: '', service_date: '',
         intro: type === 'quote' ? t.quote_intro : t.invoice_intro, closing: type === 'quote' ? t.quote_closing : t.invoice_closing,
         contact_id: params.get('contact') || undefined,
+        invoice_kind: params.get('kind') || 'standard',
+        skonto: type === 'invoice' ? company.default_skonto : undefined,
       };
     } else {
       doc = await api('GET', `/documents/${id}`);
@@ -475,6 +507,24 @@
       intro: textarea({ value: doc.intro || '' }),
       closing: textarea({ value: doc.closing || '' }),
       internal_note: textarea({ value: doc.internal_note || '', rows: 2 }),
+      invoice_kind: select({}, [['standard', 'Rechnung'], ['partial', 'Abschlagsrechnung'], ['final', 'Schlussrechnung']], doc.invoice_kind || 'standard'),
+      skonto_percent: input({ type: 'number', min: 0, max: 10, step: '0.5', value: doc.skonto ? doc.skonto.percent : '', placeholder: 'kein' }),
+      skonto_days: input({ type: 'number', min: 0, max: 90, value: doc.skonto ? doc.skonto.days : '', placeholder: 'Tage' }),
+    };
+    // Final invoice: which down-payment invoices of this customer it settles.
+    let deducts = (doc.deducts || []).map((x) => x.id);
+    let partials = [];
+    const deductBox = h('div', { class: 'space-y-1 text-sm' });
+    const loadPartials = async () => {
+      if (doc.type !== 'invoice' || f.invoice_kind.value !== 'final' || !contactSel.value) { fill(deductBox); partials = []; renderTotals(); return; }
+      const all = await api('GET', `/documents?type=invoice&contact_id=${encodeURIComponent(contactSel.value)}`);
+      partials = all.filter((d) => d.invoice_kind === 'partial' && d.status !== 'draft' && d.status !== 'cancelled');
+      fill(deductBox, 
+        h('div', { class: 'text-xs font-medium text-gray-600' }, 'Abzuziehende Abschlagsrechnungen'),
+        ...(partials.length ? partials.map((d) => h('label', { class: 'flex items-center gap-2' },
+          h('input', { type: 'checkbox', checked: deducts.includes(d.id), onchange: (e) => { deducts = e.target.checked ? [...deducts, d.id] : deducts.filter((x) => x !== d.id); renderTotals(); } }),
+          `${d.number} · ${date(d.issue_date)} · ${money(d.gross_cents, d.currency)}`)) : [h('p', { class: 'text-xs text-gray-500' }, 'Für diesen Kunden gibt es keine abgeschlossenen Abschlagsrechnungen.')]));
+      renderTotals();
     };
     let lines = (doc.lines || []).map((l) => ({ ...l }));
     const linesBox = h('div', {});
@@ -482,10 +532,13 @@
 
     function renderTotals() {
       const t = previewTotals(lines, f.tax_treatment.value || 'domestic', f.price_mode.value);
-      totalsBox.replaceChildren(
+      fill(totalsBox, ...[
         h('div', { class: 'flex justify-between' }, h('span', {}, 'Netto'), h('span', { class: 'tabular-nums' }, money(t.net))),
         ...t.groups.filter((g) => g[0] > 0).map((g) => h('div', { class: 'flex justify-between text-gray-600' }, h('span', {}, `USt. ${g[0]} %`), h('span', { class: 'tabular-nums' }, money(g[2])))),
-        h('div', { class: 'flex justify-between border-t border-gray-300 pt-1 font-semibold' }, h('span', {}, 'Gesamt'), h('span', { class: 'tabular-nums' }, money(t.gross))));
+        h('div', { class: 'flex justify-between border-t border-gray-300 pt-1 font-semibold' }, h('span', {}, 'Gesamt'), h('span', { class: 'tabular-nums' }, money(t.gross))),
+        ...(f.invoice_kind.value === 'final' ? partials.filter((d) => deducts.includes(d.id)).map((d) => h('div', { class: 'flex justify-between text-gray-600' }, h('span', {}, `abzgl. ${d.number}`), h('span', { class: 'tabular-nums' }, `−${money(d.gross_cents)}`))) : []),
+        f.invoice_kind.value === 'final' && deducts.length ? h('div', { class: 'flex justify-between border-t border-gray-300 pt-1 font-semibold' }, h('span', {}, 'Zu zahlen'),
+          h('span', { class: 'tabular-nums' }, money(t.gross - partials.filter((d) => deducts.includes(d.id)).reduce((x, d) => x + d.gross_cents, 0)))) : null].filter(Boolean));
     }
 
     const lineNet = (l) => Math.round((Number(l.quantity) || 0) * (l.unit_price_cents || 0) * (1 - (Number(l.discount_percent) || 0) / 100));
@@ -502,7 +555,7 @@
       h('button', { type: 'button', class: 'rounded px-1 text-red-600 hover:bg-red-50', title: 'Position entfernen', 'aria-label': 'Position entfernen', onclick: () => { lines.splice(i, 1); renderLines(); renderTotals(); } }, '✕'));
 
     function renderLines() {
-      linesBox.replaceChildren(
+      fill(linesBox, 
         h('div', { class: 'grid grid-cols-12 gap-2 px-1 text-xs font-medium text-gray-500' },
           h('div', { class: 'col-span-5' }, 'Bezeichnung / Beschreibung'), h('div', { class: 'col-span-1' }, 'Menge'), h('div', { class: 'col-span-2' }, 'Einheit'),
           h('div', { class: 'col-span-2' }, `Preis (${f.price_mode.value === 'gross' ? 'brutto' : 'netto'})`), h('div', { class: 'col-span-1' }, 'USt %'), h('div', { class: 'col-span-1' }, '')),
@@ -524,7 +577,9 @@
             h('div', { class: 'col-span-2' }, select({ onchange: (e) => upd('unit', e.target.value) }, META.units.map((u) => [u.code, u.de]), l.unit)),
             h('div', { class: 'col-span-2 space-y-1' },
               input({ value: centsInput(l.unit_price_cents), oninput: (e) => upd('unit_price_cents', parseMoney(e.target.value)) }),
-              input({ value: l.discount_percent || '', placeholder: 'Rabatt %', oninput: (e) => upd('discount_percent', Number(e.target.value.replace(',', '.')) || undefined) })),
+              input({ value: l.discount_percent || '', placeholder: 'Rabatt %', oninput: (e) => upd('discount_percent', Number(e.target.value.replace(',', '.')) || undefined) }),
+              doc.type === 'quote' ? select({ 'aria-label': 'Art der Position', onchange: (e) => { l.optional = e.target.value === 'optional' || undefined; l.alternative = e.target.value === 'alternative' || undefined; renderTotals(); } },
+                [['', 'fest'], ['optional', 'optional'], ['alternative', 'Alternative']], l.optional ? 'optional' : l.alternative ? 'alternative' : '') : null),
             h('div', { class: 'col-span-1' }, select({ onchange: (e) => upd('tax_rate', Number(e.target.value)) }, [[19, '19'], [7, '7'], [0, '0']], l.tax_rate)),
             h('div', { class: 'col-span-1 flex flex-col items-end gap-0.5' }, rowActions(i), h('span', { class: 'mt-1 whitespace-nowrap text-xs tabular-nums text-gray-500', title: 'Zeilensumme netto' }, money(lineNet(l)))));
         }),
@@ -538,11 +593,18 @@
           btn('+ Text', () => { lines.push({ type: 'text', name: '', quantity: 0, unit: 'C62', unit_price_cents: 0, tax_rate: 19 }); renderLines(); })));
     }
     f.price_mode.addEventListener('change', () => { renderLines(); renderTotals(); });
+    f.invoice_kind.addEventListener('change', loadPartials);
+    contactSel.addEventListener('change', loadPartials);
     f.tax_treatment.addEventListener('change', renderTotals);
     renderLines();
     renderTotals();
+    loadPartials().catch(() => {});
 
     const collect = () => ({
+      ...(doc.type === 'invoice' ? {
+        invoice_kind: f.invoice_kind.value, deducts: f.invoice_kind.value === 'final' ? deducts : [],
+        skonto: Number(f.skonto_percent.value) > 0 && Number(f.skonto_days.value) > 0 ? { percent: Number(f.skonto_percent.value), days: Number(f.skonto_days.value) } : null,
+      } : {}),
       type: doc.type, contact_id: contactSel.value || undefined, title: f.title.value, reference: f.reference.value, issue_date: f.issue_date.value || undefined,
       service_date: f.service_date.value || undefined, service_date_end: f.service_date_end.value || undefined,
       valid_until: f.valid_until.value || undefined, payment_days: Number(f.payment_days.value) || 0,
@@ -558,7 +620,7 @@
       return saved;
     };
     const checks = h('div', {});
-    const showCheck = (c) => checks.replaceChildren(
+    const showCheck = (c) => fill(checks, 
       ...c.errors.map((m) => h('div', { class: 'rounded-md bg-red-50 px-3 py-2 text-sm text-red-800' }, `✗ ${deMsg(m)}`)),
       ...c.warnings.map((m) => h('div', { class: 'rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800' }, `! ${deMsg(m)}`)),
       !c.errors.length && !c.warnings.length ? h('div', { class: 'rounded-md bg-green-50 px-3 py-2 text-sm text-green-800' }, '✓ Alles in Ordnung — das Dokument kann abgeschlossen werden.') : null);
@@ -592,7 +654,10 @@
         card(h('div', { class: 'grid grid-cols-2 gap-3' },
           field('Titel', f.title), field('Preise', f.price_mode), h('div', { class: 'col-span-2' }, field('Ihre Referenz / Bestellnr. (erscheint auf Rechnung und in der E-Rechnung)', f.reference)),
           field('Rechnungsdatum', f.issue_date, 'leer = Tag des Abschlusses'), field(doc.type === 'quote' ? 'Gültig bis' : 'Zahlungsziel (Tage)', doc.type === 'quote' ? f.valid_until : f.payment_days),
-          field('Leistungsdatum / von', f.service_date), field('Leistung bis', f.service_date_end))),
+          field('Leistungsdatum / von', f.service_date), field('Leistung bis', f.service_date_end),
+          doc.type === 'invoice' ? field('Rechnungsart', f.invoice_kind) : null,
+          doc.type === 'invoice' ? h('div', {}, h('span', { class: 'mb-1 block text-xs font-medium text-gray-600' }, 'Skonto (% / Tage)'), h('div', { class: 'flex gap-1' }, f.skonto_percent, f.skonto_days)) : null,
+          doc.type === 'invoice' ? h('div', { class: 'col-span-2' }, deductBox) : null)),
         card(h('div', { class: 'space-y-3' }, field('Einleitung', f.intro), field('Schlusstext', f.closing), field('Interne Notiz (nicht gedruckt)', f.internal_note)))),
       card(linesBox, h('div', { class: 'mt-4 flex' }, totalsBox)));
     return box;
@@ -604,8 +669,12 @@
     return window.confirm(msg);
   }
 
+  const KIND = { partial: 'Abschlagsrechnung', final: 'Schlussrechnung' };
+  const PAYMETHOD = { bank: 'Überweisung', cash: 'Bar', stripe: 'Stripe', paypal: 'PayPal', card: 'Karte', other: 'Sonstige', offset: 'Verrechnung', discount: 'Skonto / Differenz' };
+  const due = (doc) => (doc.totals.due_cents ?? doc.totals.gross_cents);
+
   function finalizedView(doc, box) {
-    const open = doc.totals.gross_cents - doc.paid_cents;
+    const open = due(doc) - doc.paid_cents;
     const actions = [
       btn('PDF', () => download(`/documents/${doc.id}/pdf?inline=1`)),
       doc.einvoice_format !== 'pdf' && doc.type !== 'quote' ? btn('XML', () => download(`/documents/${doc.id}/xml`)) : null,
@@ -614,8 +683,8 @@
     ];
     if (doc.type === 'invoice' && ['open', 'partially_paid'].includes(doc.status)) {
       actions.push(btn('Zahlung erfassen', () => paymentDialog(doc)));
-      actions.push(btn('Mahnen', () => run(async () => {
-        const r = await api('POST', `/documents/${doc.id}/dunning`, { send: confirmBox('Mahnung direkt per E-Mail senden? (Abbrechen = nur PDF erzeugen)') });
+      if (doc.due_date && doc.due_date < today()) actions.push(btn('Mahnen', () => run(async () => {
+        const r = await api('POST', `/documents/${doc.id}/dunning`, { send: !!doc.recipient.email && !!(META && META.email && META.email.active) && confirmBox('Mahnung direkt per E-Mail senden? (Abbrechen = nur PDF erzeugen)') });
         download(`/files/${r.pdf_id}`);
         route();
       })));
@@ -636,13 +705,21 @@
       actions.push(btn('Angenommen', () => run(async () => { await api('POST', `/documents/${doc.id}/quote-status`, { status: 'accepted' }); route(); })));
       actions.push(btn('Abgelehnt', () => run(async () => { await api('POST', `/documents/${doc.id}/quote-status`, { status: 'rejected' }); route(); })));
     }
+    if (doc.type === 'quote' && ['accepted', 'invoiced'].includes(doc.status)) {
+      actions.push(btn(doc.order_confirmation ? 'Auftragsbestätigung erneut' : 'Auftragsbestätigung', () => run(async () => {
+        const canMail = !!doc.recipient.email && !!(META && META.email && META.email.active);
+        const r = await api('POST', `/documents/${doc.id}/order-confirmation`, { send: canMail && confirmBox(`Auftragsbestätigung an ${doc.recipient.email} senden? (Abbrechen = nur PDF erzeugen)`) });
+        download(`/files/${r.pdf_id}`);
+        route();
+      })));
+    }
     if (doc.type === 'quote' && ['open', 'accepted'].includes(doc.status)) {
       actions.push(btn('→ Rechnung erstellen', () => run(async () => { const d = await api('POST', `/documents/${doc.id}/to-invoice`); go(`#/doc/${d.id}`); }), 'primary'));
     }
     const r = doc.recipient;
     const tot = doc.totals;
     append(box, 
-      title(`${TYPE[doc.type]} ${doc.number}`, ...actions),
+      title(`${KIND[doc.invoice_kind] || TYPE[doc.type]} ${doc.number}`, ...actions),
       h('div', { class: 'grid gap-4 lg:grid-cols-3' },
         card(h('div', { class: 'space-y-1 text-sm' },
           h('div', { class: 'flex items-center gap-2' }, badge(doc.status), doc.dunning_level ? h('span', { class: 'text-xs text-red-600' }, `Mahnstufe ${doc.dunning_level}`) : null, doc.imported ? h('span', { class: 'text-xs text-gray-500' }, 'importiert') : null),
@@ -660,6 +737,9 @@
           h('div', { class: 'flex justify-between' }, h('span', {}, 'Netto'), h('span', { class: 'tabular-nums' }, money(tot.net_cents, doc.currency))),
           ...tot.groups.filter((g) => g.rate > 0).map((g) => h('div', { class: 'flex justify-between text-gray-600' }, h('span', {}, `USt. ${g.rate} %`), h('span', { class: 'tabular-nums' }, money(g.tax_cents, doc.currency)))),
           h('div', { class: 'flex justify-between border-t pt-1 font-semibold' }, h('span', {}, 'Brutto'), h('span', { class: 'tabular-nums' }, money(tot.gross_cents, doc.currency))),
+          ...(doc.deducts || []).map((p) => h('div', { class: 'flex justify-between text-gray-600' }, h('a', { href: `#/doc/${p.id}`, class: 'text-blue-600' }, `abzgl. ${p.number}`), h('span', { class: 'tabular-nums' }, `−${money(p.gross_cents, doc.currency)}`))),
+          tot.prepaid_cents ? h('div', { class: 'flex justify-between font-semibold' }, h('span', {}, 'Zu zahlen'), h('span', { class: 'tabular-nums' }, money(due(doc), doc.currency))) : null,
+          doc.skonto && doc.type === 'invoice' ? h('div', { class: 'text-xs text-gray-500' }, `Skonto ${String(doc.skonto.percent).replace('.', ',')} % bei Zahlung innerhalb ${doc.skonto.days} Tagen`) : null,
           doc.type !== 'quote' ? h('div', { class: 'flex justify-between text-gray-600' }, h('span', {}, 'Bezahlt'), h('span', { class: 'tabular-nums' }, money(doc.paid_cents, doc.currency))) : null,
           doc.type !== 'quote' ? h('div', { class: `flex justify-between font-medium ${open > 0 ? 'text-red-700' : 'text-green-700'}` }, h('span', {}, 'Offen'), h('span', { class: 'tabular-nums' }, money(open, doc.currency))) : null))),
       table(['Pos.', 'Bezeichnung', { label: 'Menge', right: true }, 'Einheit', { label: 'Einzelpreis', right: true }, { label: 'USt', right: true }, { label: 'Netto', right: true }],
@@ -676,10 +756,19 @@
         })))) : null,
       doc.payments && doc.payments.length ? h('div', {}, h('h3', { class: 'mb-2 mt-4 text-sm font-semibold' }, 'Zahlungen'),
         table(['Datum', 'Art', 'Referenz', { label: 'Betrag', right: true }, ''], doc.payments.map((p) => ({
-          cells: [date(p.date), p.method, p.reference || p.note || '', money(p.amount_cents, doc.currency),
+          cells: [date(p.date), p.method === 'discount' ? (p.discount_kind === 'skonto' ? 'Skonto' : 'Differenz ausgebucht') : (PAYMETHOD[p.method] || p.method), p.reference || p.note || '', money(p.amount_cents, doc.currency),
             p.method === 'offset' ? '' : btn('entfernen', (e) => { e.stopPropagation(); run(async () => { if (!confirmBox('Zahlung entfernen?')) return; await api('DELETE', `/payments/${p.id}`); route(); }); }, 'link')],
         })))) : null,
-      doc.public_url ? h('p', { class: 'text-xs text-gray-500' }, 'Kunden-Link: ', h('a', { href: doc.public_url, class: 'text-blue-600 break-all', target: '_blank', rel: 'noopener' }, doc.public_url)) : null,
+      doc.quote_response ? h('div', { class: `rounded-md p-3 text-sm ${doc.quote_response.status === 'accepted' ? 'bg-green-50 text-green-800' : 'bg-gray-50 text-gray-700'}` },
+        `${doc.quote_response.status === 'accepted' ? 'Angenommen' : 'Abgelehnt'} am ${date(doc.quote_response.at)}${doc.quote_response.via === 'portal' ? ' online im Kundenportal' : ''}${doc.quote_response.name ? ` von ${doc.quote_response.name}` : ''}`,
+        doc.accepted_options && doc.accepted_options.length ? ` · gewählte Optionen: ${doc.lines.filter((l) => doc.accepted_options.includes(l.id)).map((l) => l.name).join(', ')}` : '',
+        doc.quote_response.note ? h('div', { class: 'mt-1 italic' }, `„${doc.quote_response.note}“`) : null) : null,
+      doc.order_confirmation ? h('p', { class: 'text-sm text-gray-600' }, `Auftragsbestätigung vom ${date(doc.order_confirmation.date)}${doc.order_confirmation.sent_to ? ` an ${doc.order_confirmation.sent_to} gesendet` : ''} · `,
+        btn('PDF', () => download(`/files/${doc.order_confirmation.pdf_id}`), 'link')) : null,
+      doc.public_url ? h('div', { class: 'flex flex-wrap items-center gap-2 text-xs text-gray-500' }, 'Kundenportal: ',
+        h('a', { href: doc.public_url, class: 'text-blue-600 break-all', target: '_blank', rel: 'noopener' }, doc.public_url),
+        btn('Link kopieren', () => run(async () => { await navigator.clipboard.writeText(doc.public_url); }, 'Link kopiert'), 'link'),
+        h('span', {}, doc.type === 'quote' ? '— dort kann der Kunde das Angebot annehmen (inkl. optionaler Positionen).' : '— Ansicht, PDF, GiroCode und Zahlungsdaten.')) : null,
       doc.content_hash ? h('p', { class: 'text-xs text-gray-400' }, `GoBD-Prüfsumme: ${doc.content_hash.slice(0, 16)}…  · abgeschlossen ${date(doc.finalized_at)}`) : null);
     return box;
   }
@@ -705,13 +794,23 @@
   }
 
   function paymentDialog(doc, refund) {
-    const amount = input({ value: centsInput(doc.totals.gross_cents - doc.paid_cents) });
+    const open = due(doc) - doc.paid_cents;
+    // Within the Skonto period, suggest the discounted amount.
+    const skUntil = doc.skonto && doc.issue_date ? new Date(Date.parse(`${doc.issue_date}T12:00:00Z`) + doc.skonto.days * 864e5).toISOString().slice(0, 10) : null;
+    const skAmount = doc.skonto ? Math.round((due(doc) * doc.skonto.percent) / 100) : 0;
+    const inSkonto = !refund && skUntil && today() <= skUntil && doc.paid_cents === 0;
+    const amount = input({ value: centsInput(inSkonto ? open - skAmount : open) });
     const d = input({ type: 'date', value: today() });
     const method = select({}, [['bank', 'Überweisung'], ['cash', 'Bar'], ['stripe', 'Stripe'], ['paypal', 'PayPal'], ['card', 'Karte'], ['other', 'Sonstige']], 'bank');
     const ref = input({});
-    modal(refund ? 'Erstattung erfassen' : 'Zahlung erfassen', h('div', { class: 'grid grid-cols-2 gap-3' }, field('Betrag', amount), field('Datum', d), field('Art', method), field('Referenz', ref)),
+    const settle = select({}, [['', 'Rest bleibt offen'], ...(doc.skonto ? [['skonto', `Rest als Skonto buchen (${String(doc.skonto.percent).replace('.', ',')} %)`]] : []), ['difference', 'Rest als Differenz ausbuchen']], inSkonto ? 'skonto' : '');
+    const hint = h('p', { class: 'col-span-2 text-xs text-gray-500' },
+      `Offen: ${money(open, doc.currency)}${doc.skonto ? ` · Skonto ${money(skAmount, doc.currency)} bis ${date(skUntil)}` : ''}. Skonto und ausgebuchte Differenzen mindern Umsatz und Umsatzsteuer (§ 17 UStG).`);
+    modal(refund ? 'Erstattung erfassen' : 'Zahlung erfassen', h('div', { class: 'grid grid-cols-2 gap-3' }, field('Betrag', amount), field('Datum', d), field('Art', method), field('Referenz', ref),
+      refund || doc.type !== 'invoice' ? null : h('div', { class: 'col-span-2' }, field('Wenn weniger als offen gezahlt wurde', settle)), refund ? null : hint),
       (close) => [btn('Abbrechen', close), btn('Speichern', () => run(async () => {
-        await api('POST', `/documents/${doc.id}/payments`, { amount_cents: parseMoney(amount.value), date: d.value, method: method.value, reference: ref.value });
+        const cents = parseMoney(amount.value);
+        await api('POST', `/documents/${doc.id}/payments`, { amount_cents: cents, date: d.value, method: method.value, reference: ref.value, ...(settle.value && cents < open ? { settle: settle.value } : {}) });
         close();
         route();
       }, 'Zahlung gespeichert'), 'primary')]);
@@ -723,7 +822,7 @@
     const all = await api('GET', '/contacts?archived=1');
     const list = h('div', {});
     const view = { q: '', archived: false };
-    const draw = () => list.replaceChildren(table(['Nr.', 'Name', 'E-Mail', 'Ort', 'USt-IdNr.', 'Rolle'],
+    const draw = () => fill(list, table(['Nr.', 'Name', 'E-Mail', 'Ort', 'USt-IdNr.', 'Rolle'],
       all.filter((c) => !!c.archived === view.archived).filter((c) => !view.q || JSON.stringify(c).toLowerCase().includes(view.q.toLowerCase())).map((c) => ({
         c, cells: [c.customer_number || c.vendor_number || '', c.company_name || [c.first_name, c.last_name].filter(Boolean).join(' '), c.email || '',
           [c.billing_address.zip, c.billing_address.city, c.billing_address.country !== 'DE' ? c.billing_address.country : ''].filter(Boolean).join(' '), c.vat_id || '',
@@ -755,6 +854,8 @@
       buyer_reference: input({ value: c.buyer_reference || '' }),
       einvoice_format: select({}, [['', 'Standard'], ['zugferd', 'ZUGFeRD'], ['xrechnung', 'XRechnung'], ['pdf', 'Nur PDF']], c.einvoice_format),
       payment_days: input({ type: 'number', value: c.payment_days ?? '' }), datev_account: input({ type: 'number', value: c.datev_account ?? '' }),
+      skonto_percent: input({ type: 'number', min: 0, max: 10, step: '0.5', value: c.skonto ? c.skonto.percent : '', placeholder: 'Standard' }),
+      skonto_days: input({ type: 'number', min: 0, max: 90, value: c.skonto ? c.skonto.days : '', placeholder: 'Tage' }),
       customer: h('input', { type: 'checkbox', checked: c.roles.customer }), vendor: h('input', { type: 'checkbox', checked: c.roles.vendor }),
       notes: textarea({ value: c.notes || '' }),
     };
@@ -765,6 +866,7 @@
         billing_address: { street: f.street.value, supplement: f.supplement.value, zip: f.zip.value, city: f.city.value, country: f.country.value.toUpperCase() },
         vat_id: f.vat_id.value, tax_number: f.tax_number.value, buyer_reference: f.buyer_reference.value, einvoice_format: f.einvoice_format.value || undefined,
         payment_days: f.payment_days.value === '' ? null : Number(f.payment_days.value), datev_account: f.datev_account.value ? Number(f.datev_account.value) : null,
+        skonto: Number(f.skonto_percent.value) > 0 && Number(f.skonto_days.value) > 0 ? { percent: Number(f.skonto_percent.value), days: Number(f.skonto_days.value) } : null,
         roles: { customer: f.customer.checked, vendor: f.vendor.checked }, notes: f.notes.value,
       };
       const saved = id === 'new' ? await api('POST', '/contacts', body) : await api('PUT', `/contacts/${id}`, body);
@@ -792,6 +894,7 @@
           field('USt-IdNr.', f.vat_id, 'Pflicht für Reverse Charge in der EU'), field('Steuernummer', f.tax_number),
           field('Käuferreferenz / Leitweg-ID', f.buyer_reference, 'Behörden: Leitweg-ID (XRechnung)'), field('E-Rechnungs-Format', f.einvoice_format),
           field('Zahlungsziel (Tage)', f.payment_days), field('DATEV-Personenkonto', f.datev_account),
+          h('div', { class: 'col-span-2' }, h('span', { class: 'mb-1 block text-xs font-medium text-gray-600' }, 'Skonto für diesen Kunden (% / Tage, leer = Firmen-Standard)'), h('div', { class: 'flex gap-2' }, f.skonto_percent, f.skonto_days)),
           h('div', { class: 'col-span-2' }, field('Notizen', f.notes))))),
       c.documents && c.documents.length ? h('div', {}, h('h3', { class: 'mb-2 text-sm font-semibold' }, 'Belege'),
         table(['Nr.', 'Typ', 'Datum', { label: 'Betrag', right: true }, 'Status'], c.documents.map((d) => ({ d, cells: [d.number || 'Entwurf', TYPE[d.type], date(d.issue_date), money(d.gross_cents, d.currency), badge(d.status)] })), (r) => go(`#/doc/${r.d.id}`))) : null);
@@ -852,12 +955,12 @@
       const q = view.q.toLowerCase();
       const rows = all.filter((e) => !view.status || (view.status === 'no_receipt' ? e.status !== 'draft' && !e.file_id && !e.xml_file_id : e.status === view.status))
         .filter((e) => !q || [e.supplier_name, e.invoice_number, e.note].some((v) => (v || '').toLowerCase().includes(q)));
-      listBox.replaceChildren(table(['Datum', 'Lieferant', 'Beleg-Nr.', 'Kategorie', { label: 'Brutto', right: true }, 'Status', ''], rows.map((e) => ({
+      fill(listBox, table(['Datum', 'Lieferant', 'Beleg-Nr.', 'Kategorie', { label: 'Brutto', right: true }, 'Status', ''], rows.map((e) => ({
         e, cells: [date(e.date), e.supplier_name, e.invoice_number || '', cat(e.lines[0] && e.lines[0].category), money(e.gross_cents, e.currency),
           h('span', { class: 'inline-block rounded-full px-2 py-0.5 text-xs font-medium ' + (STATUS[e.status] || ['', ''])[1] }, e.status === 'draft' ? 'Entwurf' : e.status === 'paid' ? 'Bezahlt' : 'Offen'),
           e.file_id || e.xml_file_id ? '📎' : h('span', { class: 'text-xs text-amber-600' }, 'kein Beleg')],
       })), (r) => go(`#/expense/${r.e.id}`)), h('p', { class: 'mt-2 text-right text-xs text-gray-500' }, `${rows.length} Ausgaben · Summe ${money(rows.reduce((t, e) => t + e.gross_cents, 0))}`));
-      chipRow.replaceChildren(...chips.map(([k, l]) => h('button', { type: 'button', class: `rounded-full px-3 py-1 text-xs font-medium ${view.status === k ? 'bg-gray-900 text-white' : 'bg-white text-gray-600 ring-1 ring-gray-200 hover:bg-gray-50'}`, onclick: () => { view.status = k; draw(); } }, l)));
+      fill(chipRow, ...chips.map(([k, l]) => h('button', { type: 'button', class: `rounded-full px-3 py-1 text-xs font-medium ${view.status === k ? 'bg-gray-900 text-white' : 'bg-white text-gray-600 ring-1 ring-gray-200 hover:bg-gray-50'}`, onclick: () => { view.status = k; draw(); } }, l)));
     };
     draw();
     return h('div', { class: 'space-y-4' },
@@ -885,7 +988,7 @@
       sum.textContent = `Brutto ${money(g)}`;
     };
     const drawLines = () => {
-      linesBox.replaceChildren(...lines.map((l, i) => {
+      fill(linesBox, ...lines.map((l, i) => {
         const gross = input({ value: centsInput(l.net_cents + l.tax_cents) });
         const rate = select({}, [[19, '19 %'], [7, '7 %'], [0, '0 %']], l.tax_rate);
         const net = input({ value: centsInput(l.net_cents) });
@@ -1020,12 +1123,50 @@
     const ivl = { monthly: 'monatlich', quarterly: 'quartalsweise', yearly: 'jährlich' };
     return h('div', {},
       title('Wiederkehrende Rechnungen',
-        btn('Fällige jetzt erstellen', () => run(async () => { const r = await api('POST', '/recurring/run'); toast(`${r.created.length} Rechnung(en) erstellt${r.errors.length ? ` · ${r.errors.join('; ')}` : ''}`); }), 'secondary'),
+        btn('Fällige jetzt erstellen', () => run(async () => { const r = await api('POST', '/recurring/run'); toast(`${r.created.length} Rechnung(en), ${(r.expenses || []).length} Ausgabe(n) erstellt${r.errors.length ? ` · ${r.errors.join('; ')}` : ''}`); route(); }), 'secondary'),
         btn('+ Vorlage', () => go('#/rec/new'), 'primary')),
       h('p', { class: 'mb-3 text-xs text-gray-500' }, 'Für Retainer, Wartungsverträge, Hosting und Lizenzen. Fällige Rechnungen werden automatisch im Hintergrund erstellt (stündlich geprüft, abschaltbar unter Einstellungen) — oder sofort per Knopf bzw. API/MCP (POST /recurring/run). Ohne „automatisch abschließen“ entsteht nur ein Entwurf zur Prüfung.'),
       table(['Name', 'Kunde', 'Intervall', 'Nächste', { label: 'Netto', right: true }, 'Aktiv'], list.map((r) => ({
         r, cells: [r.name, name(r.contact_id), ivl[r.interval], date(r.next_date), money(r.lines.reduce((s, l) => s + (l.type === 'item' ? Math.round(l.quantity * l.unit_price_cents) : 0), 0)), r.active ? '✓' : '—'],
-      })), (x) => go(`#/rec/${x.r.id}`)));
+      })), (x) => go(`#/rec/${x.r.id}`)),
+      await standingExpenses(ivl));
+  }
+
+  /** Dauerbelege: rent, servers, insurance — booked as an expense every period. */
+  async function standingExpenses(ivl) {
+    const list = await api('GET', '/recurring-expenses');
+    const edit = (r) => {
+      r = r || { name: '', supplier_name: '', category: 'other', gross_cents: 0, tax_rate: 19, interval: 'monthly', next_date: today(), active: true, book_as_paid: false };
+      const f = {
+        name: input({ value: r.name }), supplier: input({ value: r.supplier_name }), gross: input({ value: centsInput(r.gross_cents) }),
+        rate: select({}, [[19, '19 %'], [7, '7 %'], [0, '0 %']], r.tax_rate),
+        category: select({}, META.categories.map((c) => [c.key, c.de]), r.category),
+        interval: select({}, [['monthly', 'monatlich'], ['quarterly', 'quartalsweise'], ['yearly', 'jährlich']], r.interval),
+        next: input({ type: 'date', value: r.next_date }), end: input({ type: 'date', value: r.end_date || '' }),
+        active: h('input', { type: 'checkbox', checked: r.active }), paid: h('input', { type: 'checkbox', checked: r.book_as_paid }),
+      };
+      modal(r.id ? `Dauerbeleg: ${r.name}` : 'Neuer Dauerbeleg', h('div', { class: 'grid grid-cols-2 gap-3' },
+        field('Bezeichnung', f.name, 'z. B. Büromiete, Hetzner Server'), field('Lieferant', f.supplier), field('Betrag brutto', f.gross), field('USt', f.rate),
+        field('Kategorie', f.category), field('Intervall', f.interval), field('Nächste Buchung', f.next), field('Ende (optional)', f.end),
+        h('label', { class: 'flex items-center gap-2 text-sm' }, f.active, 'aktiv'), h('label', { class: 'flex items-center gap-2 text-sm' }, f.paid, 'als bezahlt buchen (Lastschrift)'),
+        h('p', { class: 'col-span-2 text-xs text-gray-500' }, 'Der Vertrag oder die Dauerrechnung ist der Beleg — lade ihn einmal bei der ersten Ausgabe hoch.')),
+      (close) => [
+        r.id ? btn('Löschen', () => run(async () => { await api('DELETE', `/recurring-expenses/${r.id}`); close(); route(); }), 'danger') : null,
+        btn('Abbrechen', close),
+        btn('Speichern', () => run(async () => {
+          const body = { name: f.name.value, supplier_name: f.supplier.value, gross_cents: parseMoney(f.gross.value), tax_rate: Number(f.rate.value), category: f.category.value,
+            interval: f.interval.value, next_date: f.next.value, end_date: f.end.value || null, active: f.active.checked, book_as_paid: f.paid.checked };
+          if (r.id) await api('PUT', `/recurring-expenses/${r.id}`, body); else await api('POST', '/recurring-expenses', body);
+          close();
+          route();
+        }, 'Gespeichert'), 'primary')].filter(Boolean));
+    };
+    return h('div', { class: 'mt-8' },
+      h('div', { class: 'mb-2 flex items-center justify-between' }, h('h3', { class: 'text-base font-semibold' }, 'Wiederkehrende Ausgaben (Dauerbelege)'), btn('+ Dauerbeleg', () => edit(), 'secondary')),
+      h('p', { class: 'mb-3 text-xs text-gray-500' }, 'Miete, Server, Versicherungen: jede Periode wird automatisch eine Ausgabe gebucht — mit demselben Lauf wie die wiederkehrenden Rechnungen.'),
+      list.length ? table(['Bezeichnung', 'Lieferant', 'Intervall', 'Nächste', { label: 'Brutto', right: true }, 'Aktiv'], list.map((r) => ({
+        r, cells: [r.name, r.supplier_name, ivl[r.interval], date(r.next_date), money(r.gross_cents), r.active ? '✓' : '—'],
+      })), (x) => edit(x.r)) : h('p', { class: 'text-sm text-gray-500' }, 'Noch keine Dauerbelege.'));
   }
 
   async function recurringEditor(id) {
@@ -1043,7 +1184,7 @@
     };
     const lines = r.lines.map((l) => ({ ...l }));
     const box = h('div', { class: 'space-y-2' });
-    const draw = () => box.replaceChildren(h('div', { class: 'grid grid-cols-12 gap-2 px-1 text-xs font-medium text-gray-500' },
+    const draw = () => fill(box, h('div', { class: 'grid grid-cols-12 gap-2 px-1 text-xs font-medium text-gray-500' },
         h('div', { class: 'col-span-5' }, 'Leistung'), h('div', { class: 'col-span-1' }, 'Menge'), h('div', { class: 'col-span-2' }, 'Einheit'),
         h('div', { class: 'col-span-2' }, 'Preis (netto)'), h('div', { class: 'col-span-1' }, 'USt %'), h('div', { class: 'col-span-1' }, '')),
       ...lines.map((l, i) => h('div', { class: 'grid grid-cols-12 gap-2' },
@@ -1156,7 +1297,7 @@
       ['vat_id', 'USt-IdNr.'], ['tax_number', 'Steuernummer'], ['email', 'E-Mail'], ['einvoice_email', 'E-Rechnungs-Adresse (optional)'], ['phone', 'Telefon'],
       ['contact_person', 'Ansprechpartner'], ['website', 'Website'], ['bank_name', 'Bank'], ['iban', 'IBAN'], ['bic', 'BIC'], ['account_holder', 'Kontoinhaber'],
       ['datev_consultant_number', 'DATEV Beraternummer'], ['datev_client_number', 'DATEV Mandantennummer'], ['default_payment_days', 'Zahlungsziel Standard (Tage)'],
-      ['accent_color', 'Akzentfarbe (#hex)'],
+      ['accent_color', 'Akzentfarbe (#hex)'], ['paypal_me', 'PayPal.Me-Name (optional)'],
     ];
     const ctl = {};
     for (const [k] of fields) ctl[k] = input({ value: c[k] ?? '' });
@@ -1165,6 +1306,8 @@
     ctl.chart = select({}, [['SKR03', 'SKR03'], ['SKR04', 'SKR04']], c.chart);
     ctl.document_language = select({}, [['de', 'Deutsch'], ['en', 'English']], c.document_language);
     ctl.fiscal_year_start_month = input({ type: 'number', min: 1, max: 12, value: c.fiscal_year_start_month });
+    ctl.skonto_percent = input({ type: 'number', min: 0, max: 10, step: '0.5', value: c.default_skonto ? c.default_skonto.percent : '', placeholder: 'kein Skonto' });
+    ctl.skonto_days = input({ type: 'number', min: 0, max: 90, value: c.default_skonto ? c.default_skonto.days : '', placeholder: 'Tage' });
     let logo = c.logo_data_url;
     const logoInfo = h('span', { class: 'text-xs text-gray-500' }, logo ? 'Logo gesetzt' : 'kein Logo');
     const saveCompany = () => run(async () => {
@@ -1172,7 +1315,8 @@
       for (const [k] of fields) body[k] = ctl[k].value;
       for (const k of ['datev_consultant_number', 'datev_client_number', 'default_payment_days']) body[k] = body[k] === '' ? undefined : Number(body[k]);
       Object.assign(body, { small_business: ctl.small_business.checked, vat_basis: ctl.vat_basis.value, chart: ctl.chart.value, document_language: ctl.document_language.value,
-        fiscal_year_start_month: Number(ctl.fiscal_year_start_month.value) || 1, logo_data_url: logo || undefined });
+        fiscal_year_start_month: Number(ctl.fiscal_year_start_month.value) || 1, logo_data_url: logo || undefined,
+        default_skonto: Number(ctl.skonto_percent.value) > 0 && Number(ctl.skonto_days.value) > 0 ? { percent: Number(ctl.skonto_percent.value), days: Number(ctl.skonto_days.value) } : null });
       await api('PUT', '/company', body);
     }, 'Firmendaten gespeichert');
 
@@ -1229,6 +1373,7 @@
         'E-Mail-Versand ist nicht eingerichtet — Rechnungen und Mahnungen können nicht verschickt werden. Hinterlege einen SMTP-/E-Mail-Dienst in den AstroBaaS-Einstellungen. PDF-Download und Link-Teilen funktionieren weiterhin.') : null,
       card(h('h3', { class: 'mb-3 text-sm font-semibold' }, 'Firma (Pflichtangaben auf Rechnungen, § 14 UStG / § 35a GmbHG)'),
         h('div', { class: 'grid grid-cols-2 gap-3 lg:grid-cols-4' }, fields.map(([k, l]) => field(l, ctl[k])),
+          h('div', {}, h('span', { class: 'mb-1 block text-xs font-medium text-gray-600' }, 'Standard-Skonto (% / Tage)'), h('div', { class: 'flex gap-1' }, ctl.skonto_percent, ctl.skonto_days)),
           field('Kontenrahmen', ctl.chart), field('Versteuerung', ctl.vat_basis), field('Dokumentsprache', ctl.document_language), field('Beginn Wirtschaftsjahr (Monat)', ctl.fiscal_year_start_month),
           h('label', { class: 'flex items-end gap-2 pb-2 text-sm' }, ctl.small_business, 'Kleinunternehmer (§ 19 UStG)'),
           h('div', { class: 'flex items-end gap-2' }, btn('Logo hochladen', () => pickFile('image/png,image/jpeg', (file) => {

@@ -11,6 +11,17 @@ semver yet because the API surface is pre-alpha.
 A new bundled plugin, **ECWS Billing** (E-Commerce Web Services; plugin id
 `finance`, `src/plugins/finance`), under **Admin → Billing**, limited to admins and managers.
 
+- Lexware parity pass (see `src/plugins/finance/LEXWARE-COMPARISON.md`): Skonto with
+  automatic settlement and § 17 UStG correction, write-off of small differences,
+  optional/alternative quote lines, customer portal with online quote acceptance,
+  GiroCode and PayPal.Me, Abschlags-/Schlussrechnung, standing expenses
+  (Dauerbelege), order confirmations, Leitweg-ID check digits.
+- Second review: concurrency fixes (payments never overwritten, one bank
+  transaction pays one invoice, draft edits locked against finalize), bounded
+  ZUGFeRD decompression, impossible dates and negative prices refused, foreign VAT
+  out of Kz 66, DATEV creditor accounts for dual-role contacts, recurring retries,
+  gap-free log verification, CSV formula neutralisation. `PluginStore.list` gains
+  an opt-in `{ uncapped: true }`.
 - Review pass: GiroCode (EPC QR) on invoice PDFs, Mahnwesen tab and dunning history, Zusammenfassende Meldung (ZM) report + CSV, expense from bank transaction, automatic recurring invoices via the new `SCHEDULER_TICK` hook, customer reference on documents/XRechnung, German error messages, e-mail-not-configured guard, Basiszinssatz 1,52 %.
 - Quotes, invoices and credit notes with GoBD-safe numbering: numbers are
   assigned at finalization under a lock and never reused; finalized documents

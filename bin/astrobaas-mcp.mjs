@@ -472,6 +472,8 @@ function financeTools() {
       unit_price_cents: { type: 'integer', description: 'Net unit price in cents (gross when price_mode is gross).' },
       tax_rate: { type: 'number', description: '19, 7 or 0 for German VAT.' },
       discount_percent: { type: 'number' },
+      optional: { type: 'boolean', description: 'Quotes only: optional item, priced but not in the total.' },
+      alternative: { type: 'boolean', description: 'Quotes only: alternative to another item, not in the total.' },
       period_start: date,
       period_end: date,
     },
@@ -519,6 +521,10 @@ function financeTools() {
           price_mode: { type: 'string', enum: ['net', 'gross'] },
           tax_treatment: { type: 'string', enum: ['domestic', 'small_business', 'reverse_charge_eu', 'intra_community_supply', 'third_country_service', 'export'] },
           einvoice_format: { type: 'string', enum: ['zugferd', 'xrechnung', 'pdf'] },
+          reference: { type: 'string', description: "The customer's order / PO number (BT-13)." },
+          invoice_kind: { type: 'string', enum: ['standard', 'partial', 'final'], description: 'partial = Abschlagsrechnung, final = Schlussrechnung (pass deducts).' },
+          deducts: { type: 'array', items: { type: 'string' }, description: 'Final invoice: ids of the down-payment invoices it settles.' },
+          skonto: { type: 'object', properties: { percent: { type: 'number' }, days: { type: 'integer' } }, description: 'Early-payment discount, e.g. {percent:2, days:7}. null for none.' },
           finalize: { type: 'boolean' },
         },
         required: ['contact_id', 'lines'],
@@ -552,10 +558,10 @@ function financeTools() {
     },
     {
       name: 'finance_record_payment',
-      description: 'Record money received for an invoice. Omit amount_cents to pay the full open amount.',
+      description: 'Record money received for an invoice. Omit amount_cents to pay the full open amount. settle:"skonto" books the rest as the agreed early-payment discount; settle:"difference" writes a small rest off (both reduce revenue and VAT).',
       inputSchema: {
         type: 'object',
-        properties: { id, amount_cents: { type: 'integer' }, date, method: { type: 'string', enum: ['bank', 'cash', 'stripe', 'paypal', 'card', 'other'] }, reference: { type: 'string' } },
+        properties: { id, amount_cents: { type: 'integer' }, date, method: { type: 'string', enum: ['bank', 'cash', 'stripe', 'paypal', 'card', 'other'] }, reference: { type: 'string' }, settle: { type: 'string', enum: ['skonto', 'difference'] } },
         required: ['id'],
         additionalProperties: false,
       },
@@ -679,9 +685,21 @@ function financeTools() {
     },
     {
       name: 'finance_run_recurring',
-      description: 'Create every recurring invoice that is due (retainers, hosting, licences). Idempotent per period.',
+      description: 'Create every recurring invoice and standing expense (rent, servers) that is due. Idempotent per period.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       run: () => apiRequest('POST', `/api/plugin/finance/recurring/run`),
+    },
+    {
+      name: 'finance_order_confirmation',
+      description: 'Issue an Auftragsbestätigung (PDF) for an ACCEPTED quote; send:true emails it to the customer — confirm first.',
+      inputSchema: { type: 'object', properties: { id, send: { type: 'boolean' } }, required: ['id'], additionalProperties: false },
+      run: (a) => apiRequest('POST', `/api/plugin/finance/documents/${encodeURIComponent(a.id)}/order-confirmation`, { send: !!a.send }),
+    },
+    {
+      name: 'finance_zm_report',
+      description: 'Zusammenfassende Meldung (§ 18a UStG) figures: EU supplies and § 13b services per customer VAT id for a period.',
+      inputSchema: { type: 'object', properties: { from: date, to: date }, additionalProperties: false },
+      run: (a) => apiRequest('GET', `/api/plugin/finance/reports/zm?${new URLSearchParams(Object.entries(a).filter(([, v]) => v))}`),
     },
   ];
 }

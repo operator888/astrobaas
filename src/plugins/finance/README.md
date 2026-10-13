@@ -2,7 +2,9 @@
 
 A bundled plugin that does what Lexware Office does for a small German
 company, and talks to everything else you run: the admin, a REST API, signed
-webhooks in and out, and MCP for agents.
+webhooks in and out, and MCP for agents. See
+[LEXWARE-COMPARISON.md](LEXWARE-COMPARISON.md) for a feature-by-feature
+comparison with Lexware Office.
 
 Activate it under **Admin → Plugins → ECWS Billing**. The app lives at
 **Admin → Billing** (`/admin/plugin/finance`). It is limited to the
@@ -13,17 +15,20 @@ Activate it under **Admin → Plugins → ECWS Billing**. The app lives at
 | Area | Features |
 | --- | --- |
 | Documents | Quotes, invoices, credit notes. Drafts are editable; finalizing assigns the number, freezes seller/buyer, archives the PDF (and XML) and makes the document immutable (GoBD). Cancel = full credit note offset against the open amount. Quote → invoice. Duplicate. |
+| Quotes | Optional and alternative lines (priced, not in the total). The customer accepts or declines online in the portal and picks optional items; an order confirmation (Auftragsbestätigung) PDF is issued from the accepted scope. |
+| Projects | Down-payment invoices (Abschlagsrechnung, TypeCode 326) and a final invoice (Schlussrechnung) that deducts them — XML `TotalPrepaidAmount`, VAT return, ZM, P&L and DATEV count the work once. |
+| Skonto | Default per company or contact, overridable per invoice; printed, and in XRechnung as the structured `#SKONTO#` line. A bank payment of the Skonto amount in time settles the invoice; the discount reduces revenue and VAT (§ 17 UStG) and books to *Gewährte Skonti* (8736/8731 · 4736/4731). Small rests can be written off ("Differenz ausbuchen"). |
 | Numbers | Per type, with `{YYYY} {YY} {MM} {SEQ:n}` patterns, reset yearly / monthly / never. Assigned under a lock; every issued number is recorded and never reused. |
 | Tax | Domestic 19 / 7 / 0 %, Kleinunternehmer (§ 19), EU reverse charge (§ 3a / § 13b), intra-Community supply, third-country services, export. Suggested from the customer's country and VAT id; legal notes printed automatically. EN 16931 rounding (VAT per rate group). Net or gross prices. |
 | E-invoicing | **Out:** ZUGFeRD / Factur-X EN 16931 as PDF/A-3b with embedded `factur-x.xml`, or XRechnung 3.0 (CII) with the Leitweg-ID. **In:** upload an XRechnung/ZUGFeRD/UBL file and it becomes a complete expense. |
 | PDF | DIN 5008 layout with window-envelope address, mandatory footer (§ 14 UStG, § 35a GmbHG), logo, accent colour, German/English, Greek-safe font, pagination. |
-| Sending | Email with the PDF (and XML) attached, plus a customer link (`/api/plugin/finance/public/<id>/<token>`). |
+| Sending | Email with the PDF (and XML) attached, plus a link to the customer portal (`/api/plugin/finance/public/<id>/<token>/view`): document at a glance, PDF/XML download, payment details with GiroCode and PayPal.Me, quote acceptance. Script-free, own CSP, no-index. |
 | Payments | Manual, from bank import, from integrations; partial payments; status open → partially paid → paid. |
 | Dunning | Suggestions by days overdue, three levels with fees and optional § 288 BGB interest, archived PDF, optional email. |
-| Recurring | Monthly / quarterly / yearly templates with billing periods, catch-up, auto-finalize and auto-send. Idempotent per period. |
+| Recurring | Monthly / quarterly / yearly templates with billing periods, catch-up, auto-finalize and auto-send — run by the scheduler. Idempotent per period; a failed finalize is resumed. Standing expenses (Dauerbelege: rent, servers) are booked by the same run. |
 | Expenses | Receipts (PDF/photo/e-invoice) archived; categories mapped to SKR03/SKR04; reverse-charge purchases (Google, Meta, AWS…). |
 | Bank | Import camt.053, MT940 or CSV from any German bank; re-import is harmless; payments auto-matched when the invoice number is in the purpose; suggestions otherwise; bank fees bookable without a receipt. |
-| Reports | UStVA Kennzahlen (Soll or Ist), profit & loss by category, open items with ageing, dashboard. |
+| Reports | UStVA Kennzahlen (Soll or Ist), Zusammenfassende Meldung (with CSV), profit & loss by category, open items with ageing, dashboard. |
 | Steuerberater | DATEV EXTF Buchungsstapel (v700/13, 125 columns, CP1252) and a ZIP package with the DATEV file, every archived invoice and receipt, a document list and a list of missing receipts. |
 | Import | Lexware Office via its Public API (contacts, articles, invoices and credit notes with their original PDFs); contacts from CSV. |
 | Audit | Hash-chained change log with a verify button. |
@@ -97,7 +102,9 @@ Steuerberater package as an archive copy.
 - XML: `@attestwire/en16931` (XRechnung 3.0 + EN 16931 rules, BR-DE-*) and the
   `factur-x` Python library (CEN XSD + EN 16931 schematron) — invoice, credit
   note, gross prices, discounts, Kleinunternehmer, reverse charge,
-  intra-Community supply, export, third-country.
+  intra-Community supply, export, third-country; and (October 2026) Skonto,
+  down-payment (326) and final invoices with prepaid amounts, negative-quantity
+  deductions.
 - PDF: XML extraction with `factur-x`; PDF/A-3b conformance should be
   confirmed once with veraPDF on the production server.
 - DATEV: `@seamless-engineering/datev-extf` validator — 0 findings, SKR03 and SKR04.
@@ -108,3 +115,6 @@ Steuerberater package as an archive copy.
 - Kleinunternehmer revenue account (`rev:small_business`: 8192 / 4184 in 2026 charts).
 - Whether personal accounts (Debitoren/Kreditoren) or collective accounts are wanted.
 - The UStVA Kennzahlen mapping against the current year's form.
+- Down-payment invoices are booked as revenue when issued; under balance-sheet
+  accounting the Steuerberater may prefer *erhaltene Anzahlungen* (1718 / 3272).
+- Skonto accounts (`rev:discount:19`, `rev:discount:7`, `rev:discount:0`).

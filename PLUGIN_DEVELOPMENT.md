@@ -1023,7 +1023,10 @@ namespace. `list()` filters in-process and is **capped at 5,000 records**. Past
 that it returns the first 5,000 and logs a `console.warn` — the caller gets a
 prefix with no error and no flag to check, so a plugin that can grow past the
 cap must page or count some other way rather than trusting the array it got
-back. A plugin regularly hitting it has outgrown this store.
+back. A plugin regularly hitting it has outgrown this store. A plugin whose
+records must never silently drop off the end (bookkeeping kept for ten years)
+can pass `list(collection, { uncapped: true })` and accept the memory cost of
+reading the whole collection.
 
 Collection names may not begin with `_`; those are reserved for the platform.
 
