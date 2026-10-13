@@ -7,7 +7,7 @@
  * recomputed; numbers are only ever assigned at finalization.
  */
 import type {
-  Address, Article, CompanyProfile, Contact, ExpenseLine, LineItem, RecurringTemplate, TaxTreatment,
+  Address, Article, CompanyProfile, Contact, ExpenseLine, LineItem, RecurringTemplate, SkontoTerms, TaxTreatment,
 } from './types';
 import { parseAmountToCents, parseDate } from './format';
 import { categoryByKey, EXPENSE_CATEGORIES } from './accounts';
@@ -119,6 +119,7 @@ export function normContact(input: unknown, existing?: Contact): Omit<Contact, '
     buyer_reference: pick('buyer_reference', (v) => str(v, 100)),
     einvoice_format: pick('einvoice_format', (v) => (v === 'xrechnung' || v === 'zugferd' || v === 'pdf' ? v : undefined)),
     payment_days: pick('payment_days', (v) => (v === undefined || v === null || v === '' ? undefined : num(v, 14, 0, 365))),
+    skonto: pick('skonto', normSkonto),
     datev_account: pick('datev_account', (v) => (v ? Math.round(num(v, 0, 0, 999999999)) || undefined : undefined)),
     notes: pick('notes', (v) => str(v, 4000)),
     tags: pick('tags', (v) => (Array.isArray(v) ? v.map((t) => str(t, 40)).filter(Boolean).slice(0, 20) as string[] : undefined)),
@@ -157,6 +158,15 @@ export function lineId(): string {
   return `ln_${Date.now().toString(36)}${lineCounter.toString(36)}`;
 }
 
+/** Skonto terms, or undefined for "none" (empty, 0 %, or 0 days). */
+export function normSkonto(v: unknown): SkontoTerms | undefined {
+  if (v === null || v === undefined || v === '' || v === false) return undefined;
+  const o = asObj(v);
+  const percent = Math.round(num(o.percent, 0, 0, 10) * 100) / 100;
+  const days = Math.round(num(o.days, 0, 0, 90));
+  return percent > 0 && days > 0 ? { percent, days } : undefined;
+}
+
 export function normLines(v: unknown): LineItem[] {
   if (!Array.isArray(v)) return [];
   if (v.length > 500) throw new FinanceError('A document can have at most 500 lines.');
@@ -176,6 +186,8 @@ export function normLines(v: unknown): LineItem[] {
       unit: str(l.unit, 8)?.toUpperCase() ?? 'C62',
       unit_price_cents: type === 'text' ? 0 : cents(l, 'unit_price'),
       discount_percent: l.discount_percent !== undefined ? num(l.discount_percent, 0, 0, 100) : undefined,
+      optional: type === 'item' && bool(l.optional) ? true : undefined,
+      alternative: type === 'item' && bool(l.alternative) ? true : undefined,
       tax_rate: num(l.tax_rate, 19, 0, 100),
       period_start: date(l.period_start, 'period_start'),
       period_end: date(l.period_end, 'period_end'),
@@ -240,6 +252,8 @@ export function normCompany(input: unknown, existing: CompanyProfile): CompanyPr
     datev_client_number: 'datev_client_number' in i ? (num(i.datev_client_number, 0, 0, 99999) || undefined) : existing.datev_client_number,
     fiscal_year_start_month: 'fiscal_year_start_month' in i ? Math.round(num(i.fiscal_year_start_month, 1, 1, 12)) : existing.fiscal_year_start_month,
     default_payment_days: 'default_payment_days' in i ? Math.round(num(i.default_payment_days, 14, 0, 365)) : existing.default_payment_days,
+    default_skonto: 'default_skonto' in i ? normSkonto(i.default_skonto) : existing.default_skonto,
+    paypal_me: 'paypal_me' in i ? (str(i.paypal_me, 60)?.replace(/^https?:\/\/(www\.)?paypal\.me\//i, '').replace(/[^A-Za-z0-9_.-]/g, '') || undefined) : existing.paypal_me,
     default_currency: ('default_currency' in i ? str(i.default_currency, 3)?.toUpperCase() : existing.default_currency) ?? 'EUR',
     logo_data_url: logo,
     accent_color: accent,

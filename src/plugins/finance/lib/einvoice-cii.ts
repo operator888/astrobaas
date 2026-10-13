@@ -20,7 +20,7 @@
  */
 import type { FinanceDocument, TaxGroup } from './types';
 import { centsToDecimal, escapeXml as x, legalName } from './format';
-import { validIban } from './tax';
+import { dueCents, validIban } from './tax';
 
 export type CiiProfile = 'xrechnung' | 'en16931';
 
@@ -136,13 +136,18 @@ export function buildCii(doc: FinanceDocument, profile: CiiProfile): string {
   const s = doc.seller!;
   const r = doc.recipient;
   const isCredit = doc.type === 'credit_note';
-  const typeCode = isCredit ? '381' : '380';
+  // 326 = partial (down-payment) invoice; a final invoice is a normal 380
+  // that carries the prepaid amount.
+  const typeCode = isCredit ? '381' : doc.invoice_kind === 'partial' ? '326' : '380';
   const lang = s.document_language || 'de';
 
   const notes: string[] = [];
   if (doc.intro) notes.push(doc.intro);
   const exemption = doc.totals.groups.find((g) => g.exemption_reason)?.exemption_reason;
   if (exemption) notes.push(exemption);
+  if (doc.deducts?.length) {
+    notes.push(`${lang === 'de' ? 'Abzüglich Abschlagsrechnungen' : 'Less down-payment invoices'}: ${doc.deducts.map((p) => `${p.number} (${centsToDecimal(p.gross_cents)} ${doc.currency})`).join(', ')}`);
+  }
   // Company registration details as a #REG note — the conventional place in
   // German e-invoices for what the letterhead footer says on paper.
   const reg = [s.register_court, s.register_number, s.managing_directors && `${lang === 'de' ? 'Geschäftsführung' : 'Managing director'}: ${s.managing_directors}`]
@@ -150,7 +155,7 @@ export function buildCii(doc: FinanceDocument, profile: CiiProfile): string {
 
   const lineById = new Map(doc.lines.map((l) => [l.id, l]));
   let lineNo = 0;
-  const lines = doc.totals.lines.map((cl) => {
+  const lines = doc.totals.lines.filter((cl) => !cl.excluded).map((cl) => {
     const l = lineById.get(cl.id)!;
     lineNo += 1;
     const qty = Number(l.quantity) || 0;
@@ -226,8 +231,14 @@ export function buildCii(doc: FinanceDocument, profile: CiiProfile): string {
     ? `<ram:BillingSpecifiedPeriod>${dateEl('ram:StartDateTime', doc.service_date)}${dateEl('ram:EndDateTime', doc.service_date_end)}</ram:BillingSpecifiedPeriod>`
     : '';
 
-  const termsText = doc.payment_terms_text
+  const plainTerms = doc.payment_terms_text
     || (doc.due_date ? (lang === 'de' ? `Zahlbar bis ${doc.due_date.split('-').reverse().join('.')}` : `Payable by ${doc.due_date}`) : '');
+  // XRechnung's structured Skonto line (BT-20): "#SKONTO#TAGE=7#PROZENT=2.00#"
+  // followed by a line break, before any free text. Receivers' software
+  // parses it to pre-fill the discounted payment.
+  const termsText = doc.type === 'invoice' && doc.skonto
+    ? `#SKONTO#TAGE=${doc.skonto.days}#PROZENT=${doc.skonto.percent.toFixed(2)}#${doc.totals.prepaid_cents ? `BASISBETRAG=${centsToDecimal(dueCents(doc))}#` : ''}\n${plainTerms}`
+    : plainTerms;
   const terms = isCredit ? '' : (termsText || doc.due_date)
     ? '<ram:SpecifiedTradePaymentTerms>'
       + (termsText ? `<ram:Description>${x(termsText)}</ram:Description>` : '')
@@ -241,7 +252,8 @@ export function buildCii(doc: FinanceDocument, profile: CiiProfile): string {
     + `<ram:TaxBasisTotalAmount>${centsToDecimal(t.net_cents)}</ram:TaxBasisTotalAmount>`
     + `<ram:TaxTotalAmount currencyID="${x(doc.currency)}">${centsToDecimal(t.tax_cents)}</ram:TaxTotalAmount>`
     + `<ram:GrandTotalAmount>${centsToDecimal(t.gross_cents)}</ram:GrandTotalAmount>`
-    + `<ram:DuePayableAmount>${centsToDecimal(t.gross_cents)}</ram:DuePayableAmount>`
+    + (t.prepaid_cents ? `<ram:TotalPrepaidAmount>${centsToDecimal(t.prepaid_cents)}</ram:TotalPrepaidAmount>` : '')
+    + `<ram:DuePayableAmount>${centsToDecimal(dueCents(doc))}</ram:DuePayableAmount>`
     + '</ram:SpecifiedTradeSettlementHeaderMonetarySummation>';
 
   const referenced = isCredit && doc.refers_to_number

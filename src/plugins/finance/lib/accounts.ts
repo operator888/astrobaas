@@ -61,6 +61,10 @@ export const REVENUE_ACCOUNTS: Record<string, AccountDef> = {
   intra_community_supply: { SKR03: 8125, SKR04: 4125, automatic: true },
   third_country_service: { SKR03: 8338, SKR04: 4338, automatic: true },
   export: { SKR03: 8120, SKR04: 4120, automatic: true },
+  // Gewährte Skonti — revenue reductions; 19 % / 7 % are Automatikkonten.
+  'discount:19': { SKR03: 8736, SKR04: 4736, automatic: true },
+  'discount:7': { SKR03: 8731, SKR04: 4731, automatic: true },
+  'discount:0': { SKR03: 8730, SKR04: 4730 },
 };
 
 export const LEDGER: Record<string, AccountDef> = {

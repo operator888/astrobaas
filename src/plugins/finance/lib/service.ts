@@ -22,12 +22,12 @@ import type {
   Article, BankAccount, BankTransaction, CompanyProfile, Contact, Counter, DocumentType, Expense,
   FinanceDocument, FinanceSettings, LogEntry, Payment, RecurringTemplate, TaxTreatment,
 } from './types';
-import { computeTotals, suggestTreatment } from './tax';
+import { computeTotals, dueCents, skontoFor, splitByGroups, suggestTreatment, withDeductions } from './tax';
 import { nextNumber, patternProblem, periodKey } from './numbering';
 import { addDays, addMonthsAnchored, contactDisplayName, daysBetween, formatMoney, legalName, todayIso } from './format';
 import {
   FinanceError, asObj, normArticle, normCompany, normContact, normExpenseLines, normLines, normRecurring,
-  readCents, readDate, str, treatment as readTreatment,
+  normSkonto, readCents, readDate, str, treatment as readTreatment,
 } from './normalize';
 import { DEFAULT_COMPANY, DEFAULT_SETTINGS } from './defaults';
 import { buildCii, preflight } from './einvoice-cii';
@@ -422,6 +422,33 @@ export class Finance {
     });
   }
 
+  /** Totals of a document as stored: lines → VAT groups, then down payments deducted. */
+  private totalsOf(d: Pick<FinanceDocument, 'lines' | 'tax_treatment' | 'price_mode' | 'deducts'>, lang: 'de' | 'en'): FinanceDocument['totals'] {
+    return withDeductions(computeTotals(d.lines, d.tax_treatment, d.price_mode, lang), d.deducts);
+  }
+
+  /**
+   * The down-payment invoices a final invoice deducts, frozen as snapshots.
+   * Each must be a finalized, uncancelled Abschlagsrechnung of the same
+   * customer, and not already settled by another final invoice.
+   */
+  private async deductionsFor(ids: unknown, contactId: string | undefined, selfId?: string): Promise<FinanceDocument['deducts']> {
+    if (!Array.isArray(ids) || !ids.length) return undefined;
+    const all = await this.listDocuments({ type: 'invoice' });
+    const out: NonNullable<FinanceDocument['deducts']> = [];
+    for (const raw of ids.slice(0, 50)) {
+      const p = all.find((d) => d.id === String(raw));
+      if (!p || p.invoice_kind !== 'partial' || p.status === 'draft' || p.status === 'cancelled') {
+        throw new FinanceError('A final invoice can only deduct finalized down-payment invoices (Abschlagsrechnungen).', 422);
+      }
+      if (contactId && p.contact_id !== contactId) throw new FinanceError(`Down-payment invoice ${p.number} belongs to another customer.`, 422);
+      const taken = all.find((d) => d.id !== selfId && d.invoice_kind === 'final' && d.status !== 'cancelled' && d.deducts?.some((x) => x.id === p.id));
+      if (taken) throw new FinanceError(`Down-payment invoice ${p.number} is already settled by ${taken.number ?? 'another final invoice draft'}.`, 409);
+      out.push({ id: p.id, number: p.number!, net_cents: p.totals.net_cents, tax_cents: p.totals.tax_cents, gross_cents: p.totals.gross_cents, groups: p.totals.groups });
+    }
+    return out;
+  }
+
   private recipientFromContact(c: Contact): FinanceDocument['recipient'] {
     return {
       name: contactDisplayName(c),
@@ -461,6 +488,13 @@ export class Finance {
       ?? suggestTreatment(company, { country: recipient.country, vat_id: recipient.vat_id }, kind);
     const priceMode = ('price_mode' in i ? (i.price_mode === 'gross' ? 'gross' : 'net') : base.price_mode) ?? 'net';
     const paymentDays = 'payment_days' in i ? Math.max(0, Math.round(Number(i.payment_days) || 0)) : base.payment_days ?? contact?.payment_days ?? company.default_payment_days;
+    const invoiceKind: FinanceDocument['invoice_kind'] = type !== 'invoice' ? undefined
+      : 'invoice_kind' in i ? (i.invoice_kind === 'partial' || i.invoice_kind === 'final' ? i.invoice_kind : 'standard') : base.invoice_kind;
+    const deducts = invoiceKind === 'final'
+      ? ('deducts' in i ? await this.deductionsFor(i.deducts, contactId, base.id) : base.deducts)
+      : undefined;
+    const skonto = type !== 'invoice' ? undefined
+      : 'skonto' in i ? normSkonto(i.skonto) : base.id ? base.skonto : (contact?.skonto ?? company.default_skonto);
     const texts = settings.texts;
     const defaultIntro = type === 'quote' ? texts.quote_intro : type === 'credit_note' ? texts.credit_note_intro : texts.invoice_intro;
     const defaultClosing = type === 'quote' ? texts.quote_closing : texts.invoice_closing;
@@ -484,7 +518,10 @@ export class Finance {
       einvoice_format: (['pdf', 'zugferd', 'xrechnung'].includes(String(i.einvoice_format)) ? i.einvoice_format : base.einvoice_format ?? contact?.einvoice_format ?? 'zugferd') as FinanceDocument['einvoice_format'],
       internal_note: 'internal_note' in i ? str(i.internal_note, 4000) : base.internal_note,
       tags: Array.isArray(i.tags) ? i.tags.map((t) => String(t).slice(0, 40)).slice(0, 20) : base.tags,
-      totals: computeTotals(lines, tt, priceMode as 'net' | 'gross', company.document_language),
+      skonto,
+      invoice_kind: invoiceKind,
+      deducts,
+      totals: this.totalsOf({ lines, tax_treatment: tt, price_mode: priceMode as 'net' | 'gross', deducts }, company.document_language),
     };
   }
 
@@ -572,6 +609,19 @@ export class Finance {
     d.lines.forEach((l, n) => {
       if (l.type === 'item' && l.unit_price_cents < 0) errors.push(`Line ${n + 1}: the unit price must not be negative — use a negative quantity for a deduction.`);
     });
+    if (d.type !== 'quote' && d.lines.some((l) => l.optional || l.alternative)) {
+      errors.push('Optional and alternative lines belong in quotes only — remove the flag or the line.');
+    }
+    if (d.invoice_kind === 'final') {
+      if (!d.deducts?.length) warnings.push('This final invoice deducts no down payments — pick the Abschlagsrechnungen it settles.');
+      else {
+        try { await this.deductionsFor(d.deducts.map((x) => x.id), d.contact_id, d.id); } catch (e) { errors.push((e as Error).message); }
+        if (dueCents(d) < 0) errors.push('The down payments exceed the final invoice total — correct the amounts or issue a credit note.');
+      }
+    }
+    if (d.skonto && d.skonto.days >= (d.payment_days ?? company.default_payment_days)) {
+      warnings.push(`The Skonto period (${d.skonto.days} days) is not shorter than the payment term — customers will always deduct it.`);
+    }
     if (d.type !== 'quote' && d.totals.gross_cents < 0) {
       errors.push(d.type === 'invoice'
         ? 'The invoice total is negative — issue a credit note instead.'
@@ -638,9 +688,13 @@ export class Finance {
       }
       const contact = d.contact_id ? await this.store.get<Contact>(COL.contacts, d.contact_id) : undefined;
       const recipient = contact ? { ...this.recipientFromContact(contact), ...pickDefined(d.recipient) } : d.recipient;
-      const totals = computeTotals(d.lines, d.tax_treatment, d.price_mode, company.document_language);
+      // Down payments are re-read: one cancelled since the draft was saved
+      // must not be deducted.
+      const deducts = d.invoice_kind === 'final' ? await this.deductionsFor((d.deducts ?? []).map((x) => x.id), d.contact_id, d.id) : undefined;
+      const totals = this.totalsOf({ ...d, deducts }, company.document_language);
       const finalized: FinanceDocument = {
         ...d,
+        deducts,
         number,
         status: 'open',
         issue_date: issue,
@@ -705,7 +759,7 @@ export class Finance {
     }
     const company = d.seller ?? await this.company();
     const contact = d.contact_id ? await this.store.get<Contact>(COL.contacts, d.contact_id) : undefined;
-    const preview = { ...d, totals: computeTotals(d.lines, d.tax_treatment, d.price_mode, company.document_language) };
+    const preview = { ...d, totals: this.totalsOf(d, company.document_language) };
     const bytes = await renderDocumentPdf(preview, company, { fontBytes: await this.deps.fontBytes(), customerNumber: contact?.customer_number, now: this.now() });
     return { bytes, filename: pdfFilename(`${prefix}-Entwurf`, d.number ?? d.id.slice(-6)) };
   }
@@ -726,7 +780,7 @@ export class Finance {
   async setQuoteStatus(did: string, status: 'accepted' | 'rejected', actor: string): Promise<FinanceDocument> {
     const d = await this.getDocument(did);
     if (d.type !== 'quote' || d.status === 'draft' || d.status === 'invoiced') throw new FinanceError('Only a sent quote can be accepted or rejected.', 409);
-    const next = await this.patchDocument(did, () => ({ status }));
+    const next = await this.patchDocument(did, () => ({ status, quote_response: { status, at: this.stamp(), via: 'admin' as const } }));
     await this.log(actor, `quote.${status}`, 'quote', did, d.number);
     this.deps.fire?.(`quote.${status}`, publicDoc(next));
     return next;
@@ -737,7 +791,12 @@ export class Finance {
     if (q.type !== 'quote' || q.status === 'draft') throw new FinanceError('Finalize the quote first.', 409);
     if (q.invoice_id) throw new FinanceError('This quote was already turned into an invoice.', 409);
     const inv = await this.createDocument({
-      type: 'invoice', contact_id: q.contact_id, recipient: q.recipient, lines: q.lines.map((l) => ({ ...l, id: undefined })),
+      type: 'invoice', contact_id: q.contact_id, recipient: q.recipient, reference: q.reference,
+      // Alternatives were for comparison; optional lines go over only when
+      // the customer chose them when accepting.
+      lines: q.lines
+        .filter((l) => !l.alternative && (!l.optional || (q.accepted_options ?? []).includes(l.id)))
+        .map((l) => ({ ...l, id: undefined, optional: undefined })),
       tax_treatment: q.tax_treatment, price_mode: q.price_mode, currency: q.currency, title: undefined,
       einvoice_format: q.einvoice_format,
     }, actor, { from_quote_id: q.id });
@@ -772,7 +831,7 @@ export class Finance {
     const finalCn = await this.finalize(cn.id, actor);
     return withLock(async () => {
       const fresh = await this.getDocument(did);
-      const open = fresh.totals.gross_cents - fresh.paid_cents;
+      const open = dueCents(fresh) - fresh.paid_cents;
       if (open > 0) {
         // Offset the open part of the invoice against the credit note.
         await this.addPaymentRecord({ document_id: fresh.id, amount_cents: open, method: 'offset', reference: finalCn.number, date: finalCn.issue_date! });
@@ -805,7 +864,7 @@ export class Finance {
     const paid = (await this.listPayments(did)).reduce((s, p) => s + p.amount_cents, 0);
     let status = d.status;
     if (d.status !== 'cancelled' && d.status !== 'draft' && d.type !== 'quote') {
-      status = paid >= d.totals.gross_cents ? 'paid' : paid > 0 ? 'partially_paid' : 'open';
+      status = paid >= dueCents(d) ? 'paid' : paid > 0 ? 'partially_paid' : 'open';
     }
     const next = { ...d, paid_cents: paid, status, updated_at: this.stamp() };
     await this.putDocument(next);
@@ -817,16 +876,33 @@ export class Finance {
     const out = await withLock(async () => {
       const d = await this.getDocument(did);
       if (d.status === 'draft' || d.type === 'quote') throw new FinanceError('Payments can only be recorded on finalized invoices and credit notes.', 409);
-      const open = d.totals.gross_cents - d.paid_cents;
+      const open = dueCents(d) - d.paid_cents;
       const amount = 'amount' in i || 'amount_cents' in i ? readCents(i, 'amount') : open;
       if (!amount) throw new FinanceError('The payment amount is zero.');
       const method = (['bank', 'cash', 'stripe', 'paypal', 'card', 'other'].includes(String(i.method)) ? i.method : 'bank') as Payment['method'];
+      const date = readDate(i.date, 'date') ?? this.today();
+      const settle = i.settle === 'skonto' || i.settle === 'difference' ? i.settle : undefined;
+      if (settle && d.type !== 'invoice') throw new FinanceError('Only an invoice can be settled with a Skonto or a written-off difference.', 409);
+      const rest = open - amount;
+      if (settle && rest <= 0) throw new FinanceError('Nothing is left to settle — the payment covers the whole amount.', 409);
+      if (settle === 'skonto') {
+        const sk = skontoFor(d);
+        if (!sk) throw new FinanceError('This invoice offers no Skonto.', 409);
+        // The customer may round; a cent more than the printed Skonto is fine.
+        if (rest > sk.discount_cents + 1) throw new FinanceError(`The difference (${formatMoney(rest, d.currency)}) is larger than the Skonto (${formatMoney(sk.discount_cents, d.currency)}).`, 422);
+      }
       const payment = await this.addPaymentRecord({
-        document_id: did, amount_cents: amount, date: readDate(i.date, 'date') ?? this.today(), method,
+        document_id: did, amount_cents: amount, date, method,
         reference: str(i.reference, 200), bank_tx_id: str(i.bank_tx_id, 60), note: str(i.note, 500),
       });
+      if (settle) {
+        await this.addPaymentRecord({
+          document_id: did, amount_cents: rest, date, method: 'discount', discount_kind: settle,
+          note: settle === 'skonto' ? 'Skonto' : 'Differenz ausgebucht', bank_tx_id: str(i.bank_tx_id, 60),
+        });
+      }
       const document = await this.recalcPaid(did);
-      await this.log(actor, 'payment.create', d.type, did, `${formatMoney(amount, d.currency)} via ${method}`);
+      await this.log(actor, 'payment.create', d.type, did, `${formatMoney(amount, d.currency)} via ${method}${settle ? ` + ${formatMoney(rest, d.currency)} ${settle}` : ''}`);
       return { payment, document };
     });
     if (out.document.status === 'paid') this.deps.fire?.('invoice.paid', publicDoc(out.document));
@@ -849,7 +925,38 @@ export class Finance {
 
   async publicLink(d: FinanceDocument): Promise<string> {
     const origin = (await this.deps.siteUrl?.()) ?? '';
-    return `${origin.replace(/\/+$/, '')}/api/plugin/finance/public/${d.id}/${d.public_token}`;
+    return `${origin.replace(/\/+$/, '')}/api/plugin/finance/public/${d.id}/${d.public_token}/view`;
+  }
+
+  /**
+   * A customer accepts or declines a quote in the portal. The token in the
+   * link is the authorisation; the answer is final (a second click, or an
+   * answer after the validity date, is refused) and goes into the log.
+   */
+  async respondToQuote(did: string, input: unknown): Promise<FinanceDocument> {
+    const i = asObj(input);
+    const decision = i.decision === 'accept' ? 'accepted' : i.decision === 'reject' ? 'rejected' : null;
+    if (!decision) throw new FinanceError('Please choose to accept or decline.', 422);
+    const name = str(i.name, 120);
+    if (decision === 'accepted' && !name) throw new FinanceError('Please enter your name to accept the quote.', 422);
+    const next = await withLock(async () => {
+      const d = await this.getDocument(did);
+      if (d.type !== 'quote' || d.status !== 'open') throw new FinanceError('This quote has already been answered.', 409);
+      if (d.valid_until && d.valid_until < this.today()) throw new FinanceError('This quote has expired.', 409);
+      const optionIds = new Set(d.lines.filter((l) => l.optional).map((l) => l.id));
+      const chosen = (Array.isArray(i.options) ? i.options : i.options ? [i.options] : []).map(String).filter((x) => optionIds.has(x));
+      const out: FinanceDocument = {
+        ...d, status: decision,
+        accepted_options: decision === 'accepted' ? chosen : undefined,
+        quote_response: { status: decision, at: this.stamp(), name, note: str(i.note, 1000), via: 'portal' },
+        updated_at: this.stamp(),
+      };
+      await this.putDocument(out);
+      return out;
+    });
+    await this.log(`portal:${name ?? 'customer'}`, `quote.${decision}`, 'quote', did, `${next.number} ${decision} online${next.accepted_options?.length ? ` with ${next.accepted_options.length} option(s)` : ''}`);
+    this.deps.fire?.(`quote.${decision}`, { ...publicDoc(next), accepted_options: next.accepted_options, response_note: next.quote_response?.note });
+    return next;
   }
 
   async sendDocument(did: string, input: unknown, actor: string): Promise<FinanceDocument> {
@@ -866,7 +973,7 @@ export class Finance {
     const link = await this.publicLink(d);
     const fill = (tpl: string) => tpl
       .replace(/\{type\}/g, typeName).replace(/\{number\}/g, d.number ?? '')
-      .replace(/\{company\}/g, legalName(company)).replace(/\{amount\}/g, formatMoney(d.totals.gross_cents, d.currency, lang))
+      .replace(/\{company\}/g, legalName(company)).replace(/\{amount\}/g, formatMoney(dueCents(d), d.currency, lang))
       .replace(/\{link\}/g, link).replace(/\{due\}/g, d.due_date ?? '');
     const pdf = await this.documentPdf(did);
     const attachments = [{ filename: pdf.filename, contentType: 'application/pdf', content: pdf.bytes }];
@@ -926,7 +1033,7 @@ export class Finance {
     const idx = level - 1;
     const today = this.today();
     const payBy = addDays(today, 10);
-    const open = d.totals.gross_cents - d.paid_cents;
+    const open = dueCents(d) - d.paid_cents;
     let interest = 0;
     if (s.dunning.charge_interest && level >= 2 && d.due_date) {
       // §288 BGB: base rate + 9 points between businesses (Abs. 2), + 5 for a
@@ -946,7 +1053,7 @@ export class Finance {
     const body = `${greeting}\n\n${s.dunning.texts[idx].replace(/\{pay_by\}/g, payBy.split('-').reverse().join('.'))}\n\n${lang === 'de' ? 'Mit freundlichen Grüßen' : 'Kind regards'}\n${company.contact_person || legalName(company)}`;
     const pdf = await renderDunningPdf({
       level, title: s.dunning.titles[idx], body, date: today, recipient: d.recipient,
-      invoices: [{ number: d.number!, date: d.issue_date!, due_date: d.due_date, gross_cents: d.totals.gross_cents, paid_cents: d.paid_cents }],
+      invoices: [{ number: d.number!, date: d.issue_date!, due_date: d.due_date, gross_cents: dueCents(d), paid_cents: d.paid_cents }],
       fee_cents: fee, interest_cents: interest, currency: d.currency, pay_by: payBy, customerNumber: contact?.customer_number,
     }, company, { fontBytes: await this.deps.fontBytes(), now: this.now() });
     const meta = await archiveFile(pdf, `${s.dunning.titles[idx]}-${d.number}.pdf`, 'pdf');
@@ -1203,7 +1310,7 @@ export class Finance {
     const items: OpenItem[] = [];
     for (const d of await this.listDocuments({ type: 'invoice' })) {
       if (d.status !== 'open' && d.status !== 'partially_paid') continue;
-      items.push({ kind: 'document', id: d.id, number: d.number, name: d.recipient.name ?? '', open_cents: d.totals.gross_cents - d.paid_cents, date: d.issue_date ?? '' });
+      items.push({ kind: 'document', id: d.id, number: d.number, name: d.recipient.name ?? '', open_cents: dueCents(d) - d.paid_cents, date: d.issue_date ?? '' });
     }
     for (const e of await this.listExpenses()) {
       if (e.status !== 'open') continue;
@@ -1242,7 +1349,7 @@ export class Finance {
     let amount: number;
     if (kind === 'document') {
       const d = await this.getDocument(target);
-      const open = d.totals.gross_cents - d.paid_cents;
+      const open = dueCents(d) - d.paid_cents;
       amount = 'amount_cents' in i || 'amount' in i ? Math.abs(readCents(i, 'amount')) : Math.min(remaining, open > 0 ? open : remaining);
       if (amount > remaining) throw new FinanceError(`Only ${formatMoney(remaining, d.currency)} of this transaction is still unassigned.`, 422);
       if (!amount) throw new FinanceError('The amount to assign is zero.');
@@ -1250,7 +1357,15 @@ export class Finance {
       // for a credit note. The other direction undoes a settlement.
       const settles = (t.amount_cents > 0) === (d.type !== 'credit_note');
       const signed = settles ? amount : -amount;
-      await this.recordPayment(target, { amount_cents: signed, date: t.booking_date, method: 'bank', reference: t.purpose.slice(0, 200), bank_tx_id: t.id }, actor);
+      // A customer who paid the Skonto amount in time settles the invoice:
+      // the missing few percent are booked as Skonto, not left open.
+      const sk = skontoFor(d);
+      const takesSkonto = settles && !!sk && amount < open && t.booking_date <= addDays(sk.until, 3)
+        && Math.abs(open - amount - sk.discount_cents) <= 1 && i.settle !== false;
+      await this.recordPayment(target, {
+        amount_cents: signed, date: t.booking_date, method: 'bank', reference: t.purpose.slice(0, 200), bank_tx_id: t.id,
+        ...(takesSkonto ? { settle: 'skonto' } : i.settle === 'skonto' || i.settle === 'difference' ? { settle: i.settle } : {}),
+      }, actor);
     } else {
       const e = await this.getExpense(target);
       amount = 'amount_cents' in i || 'amount' in i ? Math.abs(readCents(i, 'amount')) : Math.min(remaining, e.gross_cents - e.paid_cents);
@@ -1461,8 +1576,15 @@ export class Finance {
       final = await this.finalize(doc.id, actor);
       const paid = asObj(i.paid);
       if (i.paid) {
+        const paidCents = 'amount_cents' in paid || 'amount' in paid ? readCents(paid, 'amount') : dueCents(final);
+        // Gross prices re-split into net + VAT per rate can land a cent or two
+        // above what the checkout charged. That is a rounding difference, not
+        // an open receivable to dun: write it off.
+        const diff = dueCents(final) - paidCents;
+        const roundingOnly = diff > 0 && diff <= Math.max(2, final.lines.length);
         const r = await this.recordPayment(final.id, {
-          amount_cents: 'amount_cents' in paid || 'amount' in paid ? readCents(paid, 'amount') : final.totals.gross_cents,
+          ...(roundingOnly ? { settle: 'difference' } : {}),
+          amount_cents: paidCents,
           date: paid.date, method: paid.method ?? 'other', reference: paid.reference,
         }, actor);
         final = r.document;
@@ -1492,7 +1614,7 @@ export function publicDoc(d: FinanceDocument) {
     id: d.id, type: d.type, status: d.status, number: d.number, contact_id: d.contact_id,
     recipient: { name: d.recipient.name, email: d.recipient.email, country: d.recipient.country },
     issue_date: d.issue_date, due_date: d.due_date, currency: d.currency,
-    net_cents: d.totals.net_cents, tax_cents: d.totals.tax_cents, gross_cents: d.totals.gross_cents,
+    net_cents: d.totals.net_cents, tax_cents: d.totals.tax_cents, gross_cents: d.totals.gross_cents, due_cents: dueCents(d),
     paid_cents: d.paid_cents, external_ref: d.external_ref, source: d.source,
   };
 }

@@ -160,6 +160,11 @@ export function computeTotals(
     // In gross mode a forced-zero treatment still treats the typed price as
     // the final price: dividing by (100+0)/100 is the identity.
     const net = lineNetCents(line, priceMode, rate);
+    if (line.optional || line.alternative) {
+      // Shown with its price on the quote, but not part of the sum.
+      computed.push({ id: line.id, net_cents: net, category, rate, excluded: true });
+      continue;
+    }
     computed.push({ id: line.id, net_cents: net, category, rate });
     const key = `${category}:${rate}`;
     const g = groups.get(key) ?? {
@@ -182,6 +187,70 @@ export function computeTotals(
   // Stable order: highest rate first, as invoices conventionally print it.
   out.sort((a, b) => b.rate - a.rate || a.category.localeCompare(b.category));
   return { net_cents: net, tax_cents: tax, gross_cents: net + tax, groups: out, lines: computed };
+}
+
+/** What is still payable on a document, before payments: gross − down payments. */
+export function dueCents(d: { totals: DocumentTotals }): number {
+  return d.totals.due_cents ?? d.totals.gross_cents;
+}
+
+/**
+ * Final invoice (Schlussrechnung): the full work is invoiced, the down
+ * payments already invoiced are deducted from what is payable. The VAT
+ * groups stay those of the full work — the deduction is shown below them.
+ */
+export function withDeductions(t: DocumentTotals, deducts: readonly { gross_cents: number }[] | undefined): DocumentTotals {
+  if (!deducts?.length) return { ...t, prepaid_cents: undefined, due_cents: undefined };
+  const prepaid = deducts.reduce((s, d) => s + d.gross_cents, 0);
+  return { ...t, prepaid_cents: prepaid, due_cents: t.gross_cents - prepaid };
+}
+
+/**
+ * The VAT groups a document contributes to the books: a final invoice
+ * contributes only what its down payments have not already declared.
+ */
+export function bookingGroups(d: { totals: DocumentTotals; deducts?: { groups: TaxGroup[] }[] }): TaxGroup[] {
+  if (!d.deducts?.length) return d.totals.groups;
+  const out = new Map(d.totals.groups.map((g) => [`${g.category}:${g.rate}`, { ...g }]));
+  for (const p of d.deducts) {
+    for (const g of p.groups) {
+      const key = `${g.category}:${g.rate}`;
+      const cur = out.get(key) ?? { ...g, net_cents: 0, tax_cents: 0 };
+      cur.net_cents -= g.net_cents;
+      cur.tax_cents -= g.tax_cents;
+      out.set(key, cur);
+    }
+  }
+  return [...out.values()].filter((g) => g.net_cents || g.tax_cents);
+}
+
+/** Skonto on one invoice: the deadline, the discount and what to pay then. */
+export function skontoFor(d: { type: string; issue_date?: string; skonto?: { percent: number; days: number }; totals: DocumentTotals }):
+  { percent: number; days: number; until: string; discount_cents: number; pay_cents: number } | null {
+  if (d.type !== 'invoice' || !d.skonto || !d.issue_date) return null;
+  const base = dueCents(d);
+  if (base <= 0) return null;
+  const discount = roundCents((base * d.skonto.percent) / 100);
+  const until = new Date(`${d.issue_date}T12:00:00Z`);
+  until.setUTCDate(until.getUTCDate() + d.skonto.days);
+  return { percent: d.skonto.percent, days: d.skonto.days, until: until.toISOString().slice(0, 10), discount_cents: discount, pay_cents: base - discount };
+}
+
+/**
+ * Split an amount across a document's VAT groups in proportion to their
+ * gross — how a Skonto or a written-off difference reduces each rate.
+ * The parts add up exactly to `amount`.
+ */
+export function splitByGroups(amount: number, groups: readonly TaxGroup[]): { group: TaxGroup; gross_cents: number; net_cents: number; tax_cents: number }[] {
+  const total = groups.reduce((s, g) => s + g.net_cents + g.tax_cents, 0);
+  if (!total) return [];
+  let left = amount;
+  return groups.map((g, i) => {
+    const gross = i === groups.length - 1 ? left : roundCents((amount * (g.net_cents + g.tax_cents)) / total);
+    left -= gross;
+    const tax = g.rate > 0 ? gross - roundCents((gross * 100) / (100 + g.rate)) : 0;
+    return { group: g, gross_cents: gross, net_cents: gross - tax, tax_cents: tax };
+  });
 }
 
 /**

@@ -16,7 +16,7 @@ import fontkit from '@pdf-lib/fontkit';
 import type { CompanyProfile, FinanceDocument } from './types';
 import { DOC_STRINGS, unitLabel } from './strings';
 import { formatAmount, formatDate, formatMoney, formatQty, legalName } from './format';
-import { treatmentNote } from './tax';
+import { dueCents, skontoFor, treatmentNote } from './tax';
 import { makePdfA3, type FacturxLevel } from './facturx';
 import { epcPayload, qrEncode } from './qr';
 
@@ -198,7 +198,8 @@ function infoBlock(c: Ctx, rows: [string, string][]) {
 function drawGiroCode(c: Ctx, doc: FinanceDocument) {
   const co = c.company;
   if (doc.type !== 'invoice' || doc.currency !== 'EUR' || !doc.number || !co.iban) return;
-  const open = doc.totals.gross_cents - (doc.paid_cents ?? 0);
+  const open = dueCents(doc) - (doc.paid_cents ?? 0);
+  if (open <= 0) return;
   const payload = epcPayload({
     name: co.account_holder || legalName(co), iban: co.iban, bic: co.bic,
     amount_cents: open, reference: `${c.s.invoice} ${doc.number}`,
@@ -263,7 +264,7 @@ export async function renderDocumentPdf(doc: FinanceDocument, company: CompanyPr
   const font = await pdf.embedFont(opts.fontBytes, { subset: true });
   const lang = company.document_language || 'de';
   const s = DOC_STRINGS[lang] as (typeof DOC_STRINGS)['de'];
-  const title = s[doc.type];
+  const title = doc.invoice_kind === 'partial' ? s.partialInvoice : doc.invoice_kind === 'final' ? s.finalInvoice : s[doc.type];
   const numberLabel = s.number[doc.type];
   const c: Ctx = {
     pdf, font, page: undefined as unknown as PDFPage, y: 0,
@@ -306,7 +307,8 @@ export async function renderDocumentPdf(doc: FinanceDocument, company: CompanyPr
   let zebra = false;
   for (const line of doc.lines) {
     const descLines = line.description ? wrapText(line.description, font, 8, COLS.descW) : [];
-    const nameLines = wrapText(line.name || '', font, 9, COLS.descW);
+    const marker = line.optional ? ` (${s.optional})` : line.alternative ? ` (${s.alternative})` : '';
+    const nameLines = wrapText(`${line.name || ''}${marker}`, font, 9, COLS.descW);
     const periodLine = line.period_start && line.period_end
       ? `${formatDate(line.period_start, lang)} – ${formatDate(line.period_end, lang)}` : '';
     const rowH = nameLines.length * 12 + descLines.length * 10.5 + (periodLine ? 10.5 : 0) + 7;
@@ -338,7 +340,8 @@ export async function renderDocumentPdf(doc: FinanceDocument, company: CompanyPr
     const lineAmount = doc.price_mode === 'gross'
       ? Math.round((computed?.net_cents ?? 0) * (1 + (computed?.rate ?? 0) / 100))
       : computed?.net_cents ?? 0;
-    text(c, formatAmount(lineAmount, lang), COLS.total, c.y, 9, { align: 'right' });
+    // Optional / alternative lines: the price in brackets, not in the sum.
+    text(c, computed?.excluded ? `(${formatAmount(lineAmount, lang)})` : formatAmount(lineAmount, lang), COLS.total, c.y, 9, { align: 'right', ...(computed?.excluded ? { color: MUTED } : {}) });
     c.y -= rowH;
   }
   c.page.drawLine({ start: { x: LEFT, y: c.y + 6 }, end: { x: RIGHT, y: c.y + 6 }, thickness: 0.6, color: RULE });
@@ -363,6 +366,19 @@ export async function renderDocumentPdf(doc: FinanceDocument, company: CompanyPr
   c.y -= 3;
   text(c, t.tax_cents ? s.grossIncl : s.gross, labelX, c.y, 10.5, { bold: true });
   text(c, formatMoney(t.gross_cents, cur, lang), RIGHT, c.y, 10.5, { bold: true, align: 'right' });
+  if (doc.deducts?.length) {
+    c.y -= 15;
+    for (const p of doc.deducts) {
+      ensure(c, 13);
+      text(c, s.lessDownPayment(p.number), labelX, c.y, 9);
+      text(c, `−${formatMoney(p.gross_cents, cur, lang)}`, RIGHT, c.y, 9, { align: 'right' });
+      c.y -= 13;
+    }
+    c.page.drawLine({ start: { x: labelX, y: c.y + 9 }, end: { x: RIGHT, y: c.y + 9 }, thickness: 0.6, color: INK });
+    c.y -= 3;
+    text(c, s.amountDue, labelX, c.y, 10.5, { bold: true });
+    text(c, formatMoney(dueCents(doc), cur, lang), RIGHT, c.y, 10.5, { bold: true, align: 'right' });
+  }
   c.y -= 24;
 
   const paragraphs: string[] = [];
@@ -370,8 +386,12 @@ export async function renderDocumentPdf(doc: FinanceDocument, company: CompanyPr
   if (note) paragraphs.push(note);
   if (doc.type === 'invoice' && doc.due_date) {
     paragraphs.push(doc.payment_terms_text || s.payWithin(doc.payment_days ?? 14, formatDate(doc.due_date, lang)));
+    const sk = skontoFor(doc);
+    if (sk) paragraphs.push(s.skonto(formatQty(sk.percent, lang), formatDate(sk.until, lang), formatMoney(sk.discount_cents, cur, lang), formatMoney(sk.pay_cents, cur, lang)));
     if (doc.number) paragraphs.push(s.payReference(doc.number));
+    if (company.paypal_me && cur === 'EUR') paragraphs.push(s.paypal(`paypal.me/${company.paypal_me}/${(dueCents(doc) / 100).toFixed(2)}EUR`));
   }
+  if (doc.type === 'quote' && doc.totals.lines.some((l) => l.excluded)) paragraphs.push(s.excludedNote);
   if (doc.closing) paragraphs.push(doc.closing);
   for (const p of paragraphs) {
     const lines = wrapText(p, font, 9, CONTENT);

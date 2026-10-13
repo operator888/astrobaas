@@ -11,10 +11,10 @@
  * payment date, if the Finanzamt granted it).
  */
 import type {
-  BankTransaction, ChartOfAccounts, Contact, Expense, FinanceDocument, FinanceSettings, Payment, VatBasis,
+  BankTransaction, ChartOfAccounts, Contact, Expense, FinanceDocument, FinanceSettings, Payment, TaxGroup, VatBasis,
 } from './types';
 import { accountFor, categoryByKey, inputTaxKey, revenueKey } from './accounts';
-import { isEu } from './tax';
+import { bookingGroups, dueCents, isEu, splitByGroups } from './tax';
 import { latinize, type DatevBooking } from './datev';
 import { daysBetween } from './format';
 
@@ -55,8 +55,8 @@ export function vatReturn(
   };
   const notes: string[] = [];
   let foreignVat = 0;
-  const add = (doc: FinanceDocument, factor: number) => {
-    for (const g of doc.totals.groups) {
+  const add = (doc: FinanceDocument, factor: number, groups: readonly TaxGroup[] = bookingGroups(doc)) => {
+    for (const g of groups) {
       const net = Math.round(g.net_cents * factor) * sign(doc);
       const tax = Math.round(g.tax_cents * factor) * sign(doc);
       switch (doc.tax_treatment) {
@@ -75,15 +75,25 @@ export function vatReturn(
   const booked = bookedDocuments(docs);
   if (basis === 'soll') {
     for (const d of booked) if (inPeriod(d.issue_date, period)) add(d, 1);
+    // Skonto and written-off differences reduce the taxable amount in the
+    // period they happen (§ 17 Abs. 1 UStG), split across the invoice's rates.
+    const byId = new Map(booked.map((d) => [d.id, d]));
+    for (const p of payments) {
+      if (p.method !== 'discount' || !inPeriod(p.date, period)) continue;
+      const d = byId.get(p.document_id);
+      if (!d) continue;
+      add(d, -1, splitByGroups(p.amount_cents, bookingGroups(d)).map((x) => ({ ...x.group, net_cents: x.net_cents, tax_cents: x.tax_cents })));
+    }
   } else {
     // Ist: the share of each document paid inside the period.
     const byId = new Map(booked.map((d) => [d.id, d]));
     for (const p of payments) {
-      if (!inPeriod(p.date, period)) continue;
+      // A discount is money never received: under Ist it is simply never taxed.
+      if (!inPeriod(p.date, period) || p.method === 'discount') continue;
       const d = byId.get(p.document_id);
-      if (!d || d.totals.gross_cents === 0) continue;
+      if (!d || dueCents(d) === 0) continue;
       // Signed: a refund (negative payment) takes the VAT back out again.
-      add(d, p.amount_cents / d.totals.gross_cents);
+      add(d, p.amount_cents / dueCents(d));
     }
   }
   // Input tax always follows the invoice date (§15 UStG needs the invoice and
@@ -151,7 +161,7 @@ export function zusammenfassendeMeldung(period: Period, docs: readonly FinanceDo
     const kind: 'L' | 'S' = d.tax_treatment === 'intra_community_supply' ? 'L' : 'S';
     const key = `${vat}|${kind}`;
     const row = map.get(key) ?? { country: vat.slice(0, 2), vat_id: vat, name: d.recipient.name ?? '', kind, amount_cents: 0 };
-    row.amount_cents += d.totals.net_cents * sign(d);
+    row.amount_cents += bookingGroups(d).reduce((t, g) => t + g.net_cents, 0) * sign(d);
     map.set(key, row);
   }
   const rows = [...map.values()].sort((a, b) => a.vat_id.localeCompare(b.vat_id) || a.kind.localeCompare(b.kind));
@@ -170,18 +180,31 @@ export interface ProfitLoss {
   top_customers: { name: string; net_cents: number }[];
 }
 
-export function profitLoss(period: Period, docs: readonly FinanceDocument[], expenses: readonly Expense[], bankTx: readonly BankTransaction[] = []): ProfitLoss {
+export function profitLoss(period: Period, docs: readonly FinanceDocument[], expenses: readonly Expense[], bankTx: readonly BankTransaction[] = [], payments: readonly Payment[] = []): ProfitLoss {
   const byMonth: Record<string, number> = {};
   const byCustomer = new Map<string, number>();
   let revenue = 0;
   for (const d of bookedDocuments(docs)) {
     if (!inPeriod(d.issue_date, period)) continue;
-    const net = d.totals.net_cents * sign(d);
+    const net = bookingGroups(d).reduce((t, g) => t + g.net_cents, 0) * sign(d);
     revenue += net;
     const m = d.issue_date!.slice(0, 7);
     byMonth[m] = (byMonth[m] ?? 0) + net;
     const name = d.recipient.name || '—';
     byCustomer.set(name, (byCustomer.get(name) ?? 0) + net);
+  }
+  // Skonto / write-offs lower revenue when they are granted.
+  const docById = new Map(docs.map((d) => [d.id, d]));
+  for (const p of payments) {
+    if (p.method !== 'discount' || !inPeriod(p.date, period)) continue;
+    const d = docById.get(p.document_id);
+    if (!d) continue;
+    const net = splitByGroups(p.amount_cents, bookingGroups(d)).reduce((t, x) => t + x.net_cents, 0);
+    revenue -= net;
+    const m = p.date.slice(0, 7);
+    byMonth[m] = (byMonth[m] ?? 0) - net;
+    const name = d.recipient.name || '—';
+    byCustomer.set(name, (byCustomer.get(name) ?? 0) - net);
   }
   const byCat: Record<string, number> = {};
   let exp = 0;
@@ -228,7 +251,7 @@ export function openItems(docs: readonly FinanceDocument[], expenses: readonly E
   const rows: OpenItemRow[] = [];
   for (const d of bookedDocuments(docs)) {
     if (d.type !== 'invoice' || d.status === 'cancelled' || d.status === 'paid') continue;
-    const open = d.totals.gross_cents - d.paid_cents;
+    const open = dueCents(d) - d.paid_cents;
     if (open <= 0) continue;
     rows.push({
       kind: 'receivable', id: d.id, number: d.number, name: d.recipient.name || '—', date: d.issue_date!,
@@ -305,7 +328,8 @@ export function datevBookings(
   for (const d of bookedDocuments(docs)) {
     if (!inPeriod(d.issue_date, period)) continue;
     const deb = debitor(ctx, d.contact_id);
-    for (const g of d.totals.groups) {
+    if (d.invoice_kind === 'partial') warnings.push(`${d.number}: down-payment invoice booked as revenue — your Steuerberater may move it to "erhaltene Anzahlungen".`);
+    for (const g of bookingGroups(d)) {
       let rev: number;
       let automatic: boolean;
       try {
@@ -335,9 +359,26 @@ export function datevBookings(
     }
   }
 
+  // Skonto / written-off differences: revenue reduction against the debtor,
+  // per VAT rate on the "Gewährte Skonti" Automatikkonten.
+  for (const p of payments) {
+    if (p.method !== 'discount' || !inPeriod(p.date, period)) continue;
+    const d = docById.get(p.document_id);
+    if (!d) continue;
+    for (const part of splitByGroups(p.amount_cents, bookingGroups(d))) {
+      if (!part.gross_cents) continue;
+      const key = d.tax_treatment === 'domestic' && (part.group.rate === 19 || part.group.rate === 7) ? `discount:${part.group.rate}` : 'discount:0';
+      const { account } = accountFor('rev', key, ctx.chart, ov);
+      out.push({
+        amount_cents: Math.abs(part.gross_cents), sh: part.gross_cents >= 0 ? 'S' : 'H', account, contra: debitor(ctx, d.contact_id),
+        date: p.date, doc_no: d.number ?? '', text: latinize(`${p.discount_kind === 'skonto' ? 'Skonto' : 'Differenz'} ${d.recipient.name ?? ''}`),
+      });
+    }
+  }
+
   // Payments received / refunded.
   for (const p of payments) {
-    if (!inPeriod(p.date, period) || p.method === 'offset') continue;
+    if (!inPeriod(p.date, period) || p.method === 'offset' || p.method === 'discount') continue;
     const d = docById.get(p.document_id);
     if (!d) continue;
     const bank = p.bank_tx_id

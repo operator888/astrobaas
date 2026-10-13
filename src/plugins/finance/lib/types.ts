@@ -64,6 +64,10 @@ export interface CompanyProfile {
   /** First month of the fiscal year, 1–12. */
   fiscal_year_start_month: number;
   default_payment_days: number;
+  /** Default Skonto offered on new invoices (none when unset). */
+  default_skonto?: SkontoTerms;
+  /** PayPal.Me name (paypal.me/<name>) printed as a payment option. */
+  paypal_me?: string;
   default_currency: string;
   /** Logo as a data: URL (PNG/JPEG), drawn on PDFs. Optional. */
   logo_data_url?: string;
@@ -112,6 +116,7 @@ export interface Contact {
   /** Preferred e-invoice format for this customer. */
   einvoice_format?: 'pdf' | 'zugferd' | 'xrechnung';
   payment_days?: number;
+  skonto?: SkontoTerms;
   /** DATEV personal account (Debitor 10000–69999, Kreditor 70000–99999). */
   datev_account?: number;
   notes?: string;
@@ -214,6 +219,13 @@ export interface LineItem {
   unit_price_cents: number;
   /** Line discount in percent, 0–100. */
   discount_percent?: number;
+  /**
+   * Quotes only. An optional line ("auf Wunsch") or an alternative to
+   * another line is shown with its price but is not part of the total; the
+   * customer can pick optional lines when accepting the quote online.
+   */
+  optional?: boolean;
+  alternative?: boolean;
   tax_rate: number;
   /** Optional service period for this line. */
   period_start?: ISODate;
@@ -225,6 +237,8 @@ export interface ComputedLine {
   net_cents: number;
   category: VatCategory;
   rate: number;
+  /** Optional / alternative quote line: priced, but not in the total. */
+  excluded?: boolean;
 }
 
 export interface DocumentTotals {
@@ -233,6 +247,15 @@ export interface DocumentTotals {
   gross_cents: number;
   groups: TaxGroup[];
   lines: ComputedLine[];
+  /** Final invoice: gross of the down-payment invoices it deducts. */
+  prepaid_cents?: number;
+  /** What the customer still has to pay: gross − prepaid. */
+  due_cents?: number;
+}
+
+export interface SkontoTerms {
+  percent: number;
+  days: number;
 }
 
 export interface PartySnapshot {
@@ -276,6 +299,19 @@ export interface FinanceDocument {
   valid_until?: ISODate;
   payment_days?: number;
   payment_terms_text?: string;
+  /** Cash discount for early payment (Skonto), e.g. 2 % within 7 days. */
+  skonto?: SkontoTerms;
+  /**
+   * Down-payment / final invoices. 'partial' is an Abschlagsrechnung; 'final'
+   * is the Schlussrechnung that deducts the listed down payments.
+   */
+  invoice_kind?: 'standard' | 'partial' | 'final';
+  /** Final invoice: the down-payment invoices it settles (ids). */
+  deducts?: { id: string; number: string; net_cents: number; tax_cents: number; gross_cents: number; groups: TaxGroup[] }[];
+  /** Quotes accepted online: which optional lines the customer chose. */
+  accepted_options?: string[];
+  /** Who accepted / rejected a quote online, and when. */
+  quote_response?: { status: 'accepted' | 'rejected'; at: ISODateTime; name?: string; note?: string; via: 'portal' | 'admin' };
   /** Cached totals — recomputed on every write, never trusted from input. */
   totals: DocumentTotals;
   paid_cents: number;
@@ -323,7 +359,13 @@ export interface Payment {
   /** Positive = money received. A refund on a credit note is negative. */
   amount_cents: number;
   date: ISODate;
-  method: 'bank' | 'cash' | 'stripe' | 'paypal' | 'card' | 'offset' | 'other';
+  /**
+   * 'discount' is not money: it settles the rest of an invoice as an
+   * Erlösschmälerung — Skonto taken by the customer, or a small difference
+   * written off. It lowers revenue and VAT (§ 17 UStG).
+   */
+  method: 'bank' | 'cash' | 'stripe' | 'paypal' | 'card' | 'offset' | 'discount' | 'other';
+  discount_kind?: 'skonto' | 'difference';
   reference?: string;
   bank_tx_id?: string;
   note?: string;

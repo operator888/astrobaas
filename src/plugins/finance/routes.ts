@@ -26,9 +26,17 @@ import { UNITS } from './lib/strings';
 import { EU_COUNTRIES } from './lib/tax';
 import { startLexwareImport, importContactsCsv } from './lib/importer';
 import { contactDisplayName, addDays, addMonths } from './lib/format';
-import type { BankTransaction, Contact, DocumentType, Expense } from './lib/types';
+import type { BankTransaction, Contact, DocumentType, Expense, FinanceDocument } from './lib/types';
+import { portalCsp, renderPortal } from './lib/portal';
 
 const P = '/api/plugin/finance';
+
+const PORTAL_ERRORS: Record<string, string> = {
+  answered: 'Dieses Angebot wurde bereits beantwortet.',
+  expired: 'Dieses Angebot ist abgelaufen.',
+  name: 'Bitte geben Sie Ihren Namen an, um das Angebot anzunehmen.',
+  invalid: 'Ihre Antwort konnte nicht verarbeitet werden. Bitte versuchen Sie es erneut.',
+};
 const FINANCE_ROLES = new Set(['admin', 'manager']);
 
 function json(data: unknown, status = 200, extra: Record<string, string> = {}): Response {
@@ -112,8 +120,8 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
       const month = today.slice(0, 7);
       const [docs, expenses, company, payments] = await Promise.all([fin.listDocuments(), fin.listExpenses(), fin.company(), fin.listPayments()]);
       const bankYear = await fin.listBankTx(year);
-      const pnlYear = profitLoss({ from: `${year}-01-01`, to: `${year}-12-31` }, docs, expenses, bankYear);
-      const pnlMonth = profitLoss({ from: `${month}-01`, to: `${month}-31` }, docs, expenses, bankYear);
+      const pnlYear = profitLoss({ from: `${year}-01-01`, to: `${year}-12-31` }, docs, expenses, bankYear, payments);
+      const pnlMonth = profitLoss({ from: `${month}-01`, to: `${month}-31` }, docs, expenses, bankYear, payments);
       const items = openItems(docs, expenses, today);
       const q = Math.floor((Number(today.slice(5, 7)) - 1) / 3);
       const qFrom = `${year}-${String(q * 3 + 1).padStart(2, '0')}-01`;
@@ -322,7 +330,7 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
       // A period can span years; bank lines are stored per year.
       const bank: BankTransaction[] = [];
       for (let y = Number(p.from.slice(0, 4)); y <= Number(p.to.slice(0, 4)); y++) bank.push(...await fin.listBankTx(String(y)));
-      return json(profitLoss(p, await fin.listDocuments(), await fin.listExpenses(), bank));
+      return json(profitLoss(p, await fin.listDocuments(), await fin.listExpenses(), bank, await fin.listPayments()));
     }),
     r('GET', '/reports/open-items', async ({ fin }) => json(openItems(await fin.listDocuments(), await fin.listExpenses(), fin.today()))),
 
@@ -417,6 +425,65 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
     },
   });
   routes.push(publicDocRoute('pdf'), publicDocRoute('xml'));
+
+  // The customer portal page behind the email link, and the quote answer.
+  const portalAuth = async (ctx: PluginRouteContext) => {
+    const d = await ctx.store.get<FinanceDocument>(COL.documents, ctx.params.id);
+    return d?.public_token && d.status !== 'draft' && safeEqual(d.public_token, ctx.params.token) ? d : null;
+  };
+  const portalPage = (html: string, status = 200) => new Response(html, {
+    status,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': portalCsp(),
+      'Referrer-Policy': 'no-referrer', 'X-Robots-Tag': 'noindex, nofollow', 'X-Frame-Options': 'DENY',
+    },
+  });
+  routes.push({
+    method: 'GET',
+    path: `${P}/public/:id/:token/view`,
+    access: 'public',
+    description: 'Customer portal page for a finalized document (view, download, pay, accept a quote).',
+    handler: async (ctx) => {
+      const d = await portalAuth(ctx);
+      if (!d) return portalPage('<!doctype html><meta charset="utf-8"><title>Nicht gefunden</title><p>Dieser Link ist ungültig.</p>', 404);
+      const fin = new Finance(ctx.store, depsFor(ctx));
+      const base = `${P}/public/${encodeURIComponent(d.id)}/${encodeURIComponent(ctx.params.token)}`;
+      const notice = ({ accepted: 'Vielen Dank — Ihre Annahme ist bei uns eingegangen.', rejected: 'Ihre Absage ist bei uns eingegangen. Vielen Dank für die Rückmeldung.' } as Record<string, string>)[ctx.url.searchParams.get('done') ?? '']
+        // Only fixed texts: a message taken from the URL would let anyone put
+        // their own words (another IBAN…) on this page.
+        ?? PORTAL_ERRORS[ctx.url.searchParams.get('error') ?? ''];
+      return portalPage(renderPortal(d, d.seller ?? await fin.company(), {
+        pdf: base, xml: d.einvoice_format === 'xrechnung' && d.type !== 'quote' ? `${base}/xml` : undefined,
+        respond: d.type === 'quote' ? `${base}/respond` : undefined,
+      }, { today: fin.today(), notice }));
+    },
+  });
+  routes.push({
+    method: 'POST',
+    path: `${P}/public/:id/:token/respond`,
+    access: 'public',
+    // The per-document token in the URL is the credential; the form is
+    // served from our own origin (form-action 'self').
+    csrf: 'exempt',
+    description: 'A customer accepts or declines a quote from the portal.',
+    handler: async (ctx) => {
+      const d = await portalAuth(ctx);
+      if (!d) return fail('Not found.', 404, 'NOT_FOUND');
+      const view = `${P}/public/${encodeURIComponent(d.id)}/${encodeURIComponent(ctx.params.token)}/view`;
+      const form = await ctx.request.formData().catch(() => null);
+      const input = form ? { decision: form.get('decision'), name: form.get('name'), note: form.get('note'), options: form.getAll('option') } : await body(ctx.request);
+      try {
+        const res = await new Finance(ctx.store, depsFor(ctx)).respondToQuote(d.id, input);
+        return new Response(null, { status: 303, headers: { Location: `${view}?done=${res.status}` } });
+      } catch (e) {
+        if (e instanceof FinanceError) {
+          const code = /already been answered/.test(e.message) ? 'answered' : /expired/.test(e.message) ? 'expired' : /name/.test(e.message) ? 'name' : 'invalid';
+          return new Response(null, { status: 303, headers: { Location: `${view}?error=${code}` } });
+        }
+        throw e;
+      }
+    },
+  });
 
   // Signed webhook for sales from other backends that cannot hold an API key
   // safely (or prefer HMAC). Header: X-Finance-Signature: t=<unix>,v1=<hex>

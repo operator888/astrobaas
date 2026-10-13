@@ -665,9 +665,9 @@ function memoryStore() {
   check('plugin: ships its script', typeof def.adminPages[0].script === 'string' && def.adminPages[0].script.length > 10000);
   const routes = def.routes;
   check('plugin: every route lives under /api/plugin/finance/', routes.every((r) => r.path.startsWith('/api/plugin/finance/')));
-  check('plugin: only the customer link and the signed webhook are public', routes.filter((r) => r.access === 'public').map((r) => r.path).sort().join()
-    === ['/api/plugin/finance/inbound/sale', '/api/plugin/finance/public/:id/:token', '/api/plugin/finance/public/:id/:token/xml'].join());
-  check('plugin: only the signed webhook skips CSRF', routes.filter((r) => r.csrf === 'exempt').map((r) => r.path).join() === '/api/plugin/finance/inbound/sale');
+  check('plugin: only the customer link (PDF, XML, portal, quote answer) and the signed webhook are public', routes.filter((r) => r.access === 'public').map((r) => r.path).sort().join()
+    === ['/api/plugin/finance/inbound/sale', '/api/plugin/finance/public/:id/:token', '/api/plugin/finance/public/:id/:token/respond', '/api/plugin/finance/public/:id/:token/view', '/api/plugin/finance/public/:id/:token/xml'].join());
+  check('plugin: only the signed webhook and the token-bound quote answer skip CSRF', routes.filter((r) => r.csrf === 'exempt').map((r) => r.path).sort().join() === '/api/plugin/finance/inbound/sale,/api/plugin/finance/public/:id/:token/respond');
   check('plugin: every staff route declares a finance scope', routes.filter((r) => r.access !== 'public').every((r) => /^finance:(read|write)$/.test(r.scope)));
   const editor = { request: new Request('http://x/'), url: new URL('http://x/'), params: {}, user: { id: 'u', role: 'editor' }, locals: {}, store: memoryStore(), settings: async () => ({}) };
   const summary = routes.find((r) => r.path.endsWith('/summary'));
@@ -789,6 +789,89 @@ function memoryStore() {
     store.data.get(logCol).delete('log_000000001');
     check('log: deleting the very first entry is detected', !(await fin.verifyLog('2026')).ok);
   }
+}
+
+// ---- Lexware parity: Skonto, optional quote lines, portal, down-payment / final invoices
+{
+  const TX = T;
+  const PT = await loadTs('src/plugins/finance/lib/portal.ts');
+  const store = memoryStore();
+  let clock = new Date('2026-10-13T09:00:00Z');
+  const events = [];
+  const fin = new S.Finance(store, { fontBytes: async () => font, fire: (e, d) => events.push([e, d]), sendEmail: async () => {}, emailStatus: () => ({ active: true, label: 'smtp' }), siteUrl: async () => 'https://cms.example.com', now: () => clock });
+  await fin.saveCompany({ ...seller, default_skonto: { percent: 2, days: 7 }, paypal_me: 'https://paypal.me/ecws' }, 'a');
+  const co = await fin.company();
+  check('company: PayPal.Me name is normalised from a URL', co.paypal_me === 'ecws' && co.default_skonto.percent === 2);
+  const cust = await fin.createContact({ company_name: 'Kunde GmbH', email: 'ap@kunde.de', billing_address: { street: 'Weg 1', zip: '80331', city: 'München', country: 'DE' } }, 'a');
+
+  // Skonto
+  const d = await fin.createDocument({ contact_id: cust.id, einvoice_format: 'xrechnung', lines: [{ name: 'Website', quantity: 1, unit_price_cents: 100000, tax_rate: 19 }] }, 'a');
+  check('skonto: company default applied to a new invoice', d.skonto?.percent === 2 && d.skonto?.days === 7);
+  const inv = await fin.finalize(d.id, 'a');
+  const sk = TX.skontoFor(inv);
+  check('skonto: 2 % of 1.190,00 = 23,80 until issue + 7', sk.discount_cents === 2380 && sk.pay_cents === 116620 && sk.until === '2026-10-20');
+  const { xml } = await fin.documentXml(inv.id);
+  check('skonto: XRechnung carries the structured #SKONTO# line', xml.includes('#SKONTO#TAGE=7#PROZENT=2.00#'));
+  await rejects('skonto: a difference larger than the Skonto is refused', () => fin.recordPayment(inv.id, { amount_cents: 100000, settle: 'skonto' }, 'a'), /larger than the Skonto/);
+  const acct = await fin.saveBankAccount(null, { name: 'Giro' }, 'a');
+  await fin.addBankTransactions(acct.id, [{ booking_date: '2026-10-18', amount_cents: 116620, purpose: `Zahlung ${inv.number}`, counterparty_name: 'Kunde GmbH' }], 'a');
+  const paidInv = await fin.getDocument(inv.id);
+  const pays = await fin.listPayments(inv.id);
+  check('skonto: a bank payment of the Skonto amount in time settles the invoice', paidInv.status === 'paid' && pays.some((p) => p.method === 'discount' && p.discount_kind === 'skonto' && p.amount_cents === 2380));
+  const vr = R.vatReturn({ from: '2026-10-01', to: '2026-10-31' }, 'soll', await fin.listDocuments(), await fin.listPayments(), [], false);
+  check('skonto: VAT return base and tax reduced (§ 17 UStG)', vr.kz['81'] === 100000 - 2000 && vr.kz['81_tax'] === 19000 - 380);
+  const ctx = { chart: 'SKR03', settings: { account_overrides: {}, datev_use_personal_accounts: true }, contacts: new Map([[cust.id, cust]]), bankAccounts: new Map() };
+  const bk = R.datevBookings({ from: '2026-10-01', to: '2026-10-31' }, ctx, await fin.listDocuments(), await fin.listPayments(), [], []);
+  check('skonto: DATEV books 23,80 on 8736 against the debtor', bk.bookings.some((b) => b.account === 8736 && b.amount_cents === 2380 && b.sh === 'S'));
+  const pnl = R.profitLoss({ from: '2026-10-01', to: '2026-10-31' }, await fin.listDocuments(), [], [], await fin.listPayments());
+  check('skonto: P&L revenue reduced by the net Skonto', pnl.revenue_net_cents === 98000);
+
+  // Write off a small difference
+  const d2 = await fin.finalize((await fin.createDocument({ contact_id: cust.id, skonto: null, lines: [{ name: 'A', quantity: 1, unit_price_cents: 1000 }] }, 'a')).id, 'a');
+  const r2 = await fin.recordPayment(d2.id, { amount_cents: 1185, settle: 'difference' }, 'a');
+  check('difference: the rest is written off and the invoice is paid', r2.document.status === 'paid' && (await fin.listPayments(d2.id)).some((p) => p.method === 'discount' && p.amount_cents === 5));
+
+  // Optional / alternative lines
+  const q = await fin.createDocument({ type: 'quote', contact_id: cust.id, lines: [
+    { name: 'Basis', quantity: 1, unit_price_cents: 50000 },
+    { name: 'SEO-Paket', quantity: 1, unit_price_cents: 20000, optional: true },
+    { name: 'Premium statt Basis', quantity: 1, unit_price_cents: 80000, alternative: true },
+  ] }, 'a');
+  check('quote: optional and alternative lines are not in the total', q.totals.net_cents === 50000 && q.totals.lines.filter((l) => l.excluded).length === 2);
+  const badInv = await fin.createDocument({ contact_id: cust.id, lines: [{ name: 'X', quantity: 1, unit_price_cents: 100, optional: true }, { name: 'Y', quantity: 1, unit_price_cents: 100 }] }, 'a');
+  check('invoice: optional lines are refused on invoices', (await fin.check(badInv.id)).errors.some((e) => /quotes only/.test(e)));
+  const qf = await fin.finalize(q.id, 'a');
+  const html = PT.renderPortal(qf, co, { pdf: '/p', respond: '/r' }, { today: '2026-10-13' });
+  check('portal: quote page offers the optional line as a choice', html.includes('name="option"') && html.includes('SEO-Paket') && !/<script/i.test(html));
+  const evil = { ...qf, recipient: { ...qf.recipient, name: '<img src=x onerror=alert(1)>' } };
+  check('portal: customer data is escaped', !PT.renderPortal(evil, co, { pdf: '/p' }, { today: '2026-10-13' }).includes('<img src=x'));
+  await rejects('portal: accepting needs a name', () => fin.respondToQuote(qf.id, { decision: 'accept' }), /name/);
+  const seo = qf.lines.find((l) => l.name === 'SEO-Paket').id;
+  const acc = await fin.respondToQuote(qf.id, { decision: 'accept', name: 'Max Kunde', options: [seo, 'bogus'] });
+  check('portal: accepted online with the chosen option, webhook fired', acc.status === 'accepted' && acc.accepted_options.join() === seo && acc.quote_response.via === 'portal' && events.some(([e]) => e === 'quote.accepted'));
+  await rejects('portal: a second answer is refused', () => fin.respondToQuote(qf.id, { decision: 'reject' }), /already been answered/);
+  const fromQ = await fin.quoteToInvoice(qf.id, 'a');
+  check('quote→invoice: chosen option included, alternative dropped', fromQ.lines.map((l) => l.name).join() === 'Basis,SEO-Paket' && fromQ.totals.net_cents === 70000 && !fromQ.lines.some((l) => l.optional));
+
+  // Down-payment and final invoices
+  const a1 = await fin.finalize((await fin.createDocument({ contact_id: cust.id, invoice_kind: 'partial', skonto: null, lines: [{ name: '1. Abschlag Website', quantity: 1, unit_price_cents: 30000 }] }, 'a')).id, 'a');
+  check('partial: down-payment invoice is TypeCode 326', a1.invoice_kind === 'partial' && /<rsm:ExchangedDocument>.*?<ram:TypeCode>326<\/ram:TypeCode>/s.test(C.buildCii(a1, 'en16931')));
+  const fdraft = await fin.createDocument({ contact_id: cust.id, invoice_kind: 'final', deducts: [a1.id], skonto: null, lines: [{ name: 'Website gesamt', quantity: 1, unit_price_cents: 100000 }] }, 'a');
+  check('final: totals deduct the down payment', fdraft.totals.gross_cents === 119000 && fdraft.totals.prepaid_cents === 35700 && fdraft.totals.due_cents === 83300);
+  await rejects('final: a down payment cannot be deducted twice', () => fin.createDocument({ contact_id: cust.id, invoice_kind: 'final', deducts: [a1.id], lines: [{ name: 'X', quantity: 1, unit_price_cents: 100 }] }, 'a'), /already settled/);
+  const fin1 = await fin.finalize(fdraft.id, 'a');
+  const fx = C.buildCii(fin1, 'en16931');
+  check('final: CII has TotalPrepaidAmount and DuePayableAmount', fx.includes('<ram:TotalPrepaidAmount>357.00</ram:TotalPrepaidAmount>') && fx.includes('<ram:DuePayableAmount>833.00</ram:DuePayableAmount>'));
+  const vr2 = R.vatReturn({ from: '2026-10-13', to: '2026-10-13' }, 'soll', [a1, fin1], [], [], false);
+  check('final: VAT return counts the work once (down payment + remainder)', vr2.kz['81'] === 100000 && vr2.kz['81_tax'] === 19000);
+  const pr = await fin.recordPayment(fin1.id, {}, 'a');
+  check('final: paying the due amount marks it paid', pr.payment.amount_cents === 83300 && pr.document.status === 'paid');
+  await checkAsync('final: PDF renders the deduction', async () => (await fin.documentPdf(fin1.id)).bytes.length > 1000);
+
+  // Shop rounding difference is written off, not dunned
+  const sale = await fin.inboundSale({ source: 'shop', external_id: 'o-round', price_mode: 'gross', customer: { company_name: 'Shopper', email: 's@x.de', address: { street: 'a', zip: '1', city: 'B', country: 'DE' } },
+    lines: [{ name: 'A', quantity: 1, unit_price_cents: 100, tax_rate: 19 }, { name: 'B', quantity: 1, unit_price_cents: 191, tax_rate: 19 }], paid: { amount_cents: 291, method: 'stripe' } }, 'a');
+  check('shop: a cent of rounding is written off, invoice paid', sale.document.status === 'paid' && sale.document.paid_cents === TX.dueCents(sale.document));
 }
 
 await fs.rm(tmp, { recursive: true, force: true });
