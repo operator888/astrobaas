@@ -118,7 +118,7 @@ export async function readArchived(id: unknown): Promise<{ meta: ArchivedFile; b
     // Integrity: the bytes must still hash to what was archived.
     const sha = crypto.createHash('sha256').update(bytes).digest('hex');
     if (sha !== meta.sha256) {
-      console.error(`[finance] archived file ${id} fails its checksum — it was altered on disk.`);
+      console.error(`[ecws-billing] archived file ${id} fails its checksum — it was altered on disk.`);
       return null;
     }
     return { meta, bytes };

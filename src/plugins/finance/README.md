@@ -1,11 +1,11 @@
-# Finance — invoicing and bookkeeping for AstroBaaS
+# ECWS Billing — invoicing and bookkeeping for AstroBaaS
 
 A bundled plugin that does what Lexware Office does for a small German
 company, and talks to everything else you run: the admin, a REST API, signed
 webhooks in and out, and MCP for agents.
 
-Activate it under **Admin → Plugins → Finance**. The app lives at
-**Admin → Finanzen** (`/admin/plugin/finance`). It is limited to the
+Activate it under **Admin → Plugins → ECWS Billing**. The app lives at
+**Admin → Billing** (`/admin/plugin/finance`). It is limited to the
 `admin` and `manager` roles.
 
 ## What it does

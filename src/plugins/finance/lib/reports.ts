@@ -107,6 +107,51 @@ export function vatReturn(
   return { period, basis, kz, payable_cents: payable, notes };
 }
 
+/* ------------------------------ Zusammenfassende Meldung ------------------------------ */
+
+export interface ZmRow {
+  /** Country prefix of the customer's VAT id. */
+  country: string;
+  vat_id: string;
+  name: string;
+  /** L = Lieferung (goods), S = sonstige Leistung (services, § 18b). */
+  kind: 'L' | 'S';
+  amount_cents: number;
+}
+
+export interface ZusammenfassendeMeldung {
+  period: Period;
+  rows: ZmRow[];
+  total_cents: number;
+  notes: string[];
+}
+
+/**
+ * The figures for the Zusammenfassende Meldung (§ 18a UStG): every
+ * intra-Community supply of goods and every § 13b service to an EU business,
+ * summed per customer VAT id. Due by the 25th after the quarter (monthly above
+ * the threshold). The BZSt portal takes whole euros per line, so the amounts
+ * are shown in cents here and rounded when entered. Credit notes reduce the
+ * customer's figure; always by invoice date — the ZM does not follow Ist-basis.
+ */
+export function zusammenfassendeMeldung(period: Period, docs: readonly FinanceDocument[]): ZusammenfassendeMeldung {
+  const map = new Map<string, ZmRow>();
+  const notes: string[] = [];
+  for (const d of bookedDocuments(docs)) {
+    if (!inPeriod(d.issue_date, period)) continue;
+    if (d.tax_treatment !== 'intra_community_supply' && d.tax_treatment !== 'reverse_charge_eu') continue;
+    const vat = (d.recipient.vat_id ?? '').replace(/\s+/g, '').toUpperCase();
+    if (!vat) { notes.push(`${d.number}: the customer has no VAT id — it cannot be reported.`); continue; }
+    const kind: 'L' | 'S' = d.tax_treatment === 'intra_community_supply' ? 'L' : 'S';
+    const key = `${vat}|${kind}`;
+    const row = map.get(key) ?? { country: vat.slice(0, 2), vat_id: vat, name: d.recipient.name ?? '', kind, amount_cents: 0 };
+    row.amount_cents += d.totals.net_cents * sign(d);
+    map.set(key, row);
+  }
+  const rows = [...map.values()].sort((a, b) => a.vat_id.localeCompare(b.vat_id) || a.kind.localeCompare(b.kind));
+  return { period, rows, total_cents: rows.reduce((t, r) => t + r.amount_cents, 0), notes };
+}
+
 /* ------------------------------ Profit & loss ------------------------------ */
 
 export interface ProfitLoss {

@@ -15,9 +15,10 @@ import { PDFDocument, degrees, rgb, type PDFFont, type PDFImage, type PDFPage, t
 import fontkit from '@pdf-lib/fontkit';
 import type { CompanyProfile, FinanceDocument } from './types';
 import { DOC_STRINGS, unitLabel } from './strings';
-import { formatAmount, formatDate, formatMoney, formatQty } from './format';
+import { formatAmount, formatDate, formatMoney, formatQty, legalName } from './format';
 import { treatmentNote } from './tax';
 import { makePdfA3, type FacturxLevel } from './facturx';
+import { epcPayload, qrEncode } from './qr';
 
 const MM = 72 / 25.4;
 const W = 595.28;
@@ -88,7 +89,7 @@ function footer(c: Ctx) {
   const top = FOOTER_TOP - 6;
   c.page.drawLine({ start: { x: LEFT, y: FOOTER_TOP }, end: { x: RIGHT, y: FOOTER_TOP }, thickness: 0.5, color: RULE });
   const cols: string[][] = [
-    [co.name + (co.legal_form && !co.name.includes(co.legal_form) ? ` ${co.legal_form}` : ''), co.street, `${co.zip} ${co.city}`, co.country !== 'DE' ? co.country : ''],
+    [legalName(co), co.street, `${co.zip} ${co.city}`, co.country !== 'DE' ? co.country : ''],
     [co.phone ? `Tel. ${co.phone}` : '', co.email, co.website ?? ''],
     co.iban ? [co.bank_name ?? s.bank, `IBAN ${co.iban.replace(/(.{4})/g, '$1 ').trim()}`, co.bic ? `BIC ${co.bic}` : ''] : [],
     [
@@ -120,7 +121,7 @@ function newPage(c: Ctx, first: boolean) {
     const h = c.logo.height * scale;
     c.page.drawImage(c.logo, { x: RIGHT - w, y: H - 12 * MM - h, width: w, height: h });
   } else if (first) {
-    text(c, c.company.name, RIGHT, H - 22 * MM, 15, { color: c.accent, bold: true, align: 'right' });
+    text(c, legalName(c.company), RIGHT, H - 22 * MM, 15, { color: c.accent, bold: true, align: 'right' });
     if (c.company.tagline) text(c, c.company.tagline, RIGHT, H - 22 * MM - 13, 8.5, { color: MUTED, align: 'right' });
   }
   if (first) {
@@ -153,7 +154,7 @@ async function embedLogo(pdf: PDFDocument, dataUrl?: string): Promise<PDFImage |
 function addressBlock(c: Ctx, recipient: FinanceDocument['recipient']) {
   const co = c.company;
   // DIN 5008 B: return-address line, then the address field.
-  const sender = [co.name, co.street, `${co.zip} ${co.city}`].filter(Boolean).join(' · ');
+  const sender = [legalName(co), co.street, `${co.zip} ${co.city}`].filter(Boolean).join(' · ');
   text(c, sender, LEFT, c.y, 6.5, { color: MUTED });
   c.page.drawLine({ start: { x: LEFT, y: c.y - 2.5 }, end: { x: LEFT + Math.min(85 * MM, c.font.widthOfTextAtSize(sender, 6.5)), y: c.y - 2.5 }, thickness: 0.3, color: MUTED });
   let y = c.y - 16;
@@ -187,6 +188,42 @@ function infoBlock(c: Ctx, rows: [string, string][]) {
     text(c, value, RIGHT, y, 8.5, { align: 'right' });
     y -= 12.5;
   }
+}
+
+/**
+ * GiroCode (EPC QR) under an invoice: a banking app scans it and prefills the
+ * transfer with IBAN, amount and invoice number — the cheapest way to make a
+ * customer pay on time. Only for an unpaid EUR invoice with a valid IBAN.
+ */
+function drawGiroCode(c: Ctx, doc: FinanceDocument) {
+  const co = c.company;
+  if (doc.type !== 'invoice' || doc.currency !== 'EUR' || !doc.number || !co.iban) return;
+  const open = doc.totals.gross_cents - (doc.paid_cents ?? 0);
+  const payload = epcPayload({
+    name: co.account_holder || legalName(co), iban: co.iban, bic: co.bic,
+    amount_cents: open, reference: `${c.s.invoice} ${doc.number}`,
+  });
+  if (!payload) return;
+  const matrix = qrEncode(new TextEncoder().encode(payload));
+  const quiet = 2;
+  const side = 27 * MM;
+  const mod = side / (matrix.length + quiet * 2);
+  ensure(c, side + 8);
+  const top = c.y;
+  c.page.drawRectangle({ x: LEFT, y: top - side, width: side, height: side, color: rgb(1, 1, 1) });
+  for (let y = 0; y < matrix.length; y++) {
+    for (let x = 0; x < matrix.length; x++) {
+      if (!matrix[y][x]) continue;
+      c.page.drawRectangle({
+        x: LEFT + (x + quiet) * mod, y: top - (y + quiet + 1) * mod,
+        width: mod + 0.02, height: mod + 0.02, color: rgb(0, 0, 0),
+      });
+    }
+  }
+  for (const [i, l] of wrapText(c.s.giroCode, c.font, 8, CONTENT - side - 14).entries()) {
+    text(c, l, LEFT + side + 12, top - 16 - i * 11, 8, { color: MUTED });
+  }
+  c.y = top - side - 8;
 }
 
 export interface RenderOptions {
@@ -243,6 +280,7 @@ export async function renderDocumentPdf(doc: FinanceDocument, company: CompanyPr
     [numberLabel, doc.number ?? (lang === 'de' ? 'ENTWURF' : 'DRAFT')],
     [s.date, formatDate(doc.issue_date, lang)],
     [s.customerNo, opts.customerNumber ?? ''],
+    [s.yourRef, doc.reference ?? ''],
     [period ? s.servicePeriod : s.serviceDate, period || (doc.type !== 'quote' ? formatDate(doc.service_date || doc.issue_date, lang) : '')],
     [doc.type === 'quote' ? s.validUntil : s.dueDate, formatDate(doc.type === 'quote' ? doc.valid_until : doc.type === 'invoice' ? doc.due_date : undefined, lang)],
     [s.refersTo, doc.refers_to_number ?? ''],
@@ -342,10 +380,11 @@ export async function renderDocumentPdf(doc: FinanceDocument, company: CompanyPr
     c.y -= 6;
   }
 
+  drawGiroCode(c, doc);
   finishPages(c, doc.status === 'draft');
   const created = opts.now ?? new Date();
   makePdfA3(pdf, {
-    title: `${title} ${doc.number ?? ''}`.trim(), author: company.name, created,
+    title: `${title} ${doc.number ?? ''}`.trim(), author: legalName(company), created,
     xml: opts.xml, level: opts.level,
   });
   return pdf.save({ useObjectStreams: false, updateFieldAppearances: false });
@@ -424,7 +463,7 @@ export async function renderDunningPdf(d: DunningInput, company: CompanyProfile,
   text(c, s.openAmount, RIGHT - 190, c.y, 10.5, { bold: true });
   text(c, formatMoney(open + d.fee_cents + d.interest_cents, d.currency, lang), RIGHT, c.y, 10.5, { bold: true, align: 'right' });
   finishPages(c, false);
-  makePdfA3(pdf, { title: d.title, author: company.name, created: opts.now ?? new Date() });
+  makePdfA3(pdf, { title: d.title, author: legalName(company), created: opts.now ?? new Date() });
   return pdf.save({ useObjectStreams: false, updateFieldAppearances: false });
 }
 

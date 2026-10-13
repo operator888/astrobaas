@@ -24,7 +24,7 @@ import type {
 } from './types';
 import { computeTotals, suggestTreatment } from './tax';
 import { nextNumber, patternProblem, periodKey } from './numbering';
-import { addDays, addMonths, contactDisplayName, daysBetween, formatMoney, todayIso } from './format';
+import { addDays, addMonthsAnchored, contactDisplayName, daysBetween, formatMoney, legalName, todayIso } from './format';
 import {
   FinanceError, asObj, normArticle, normCompany, normContact, normExpenseLines, normLines, normRecurring,
   readCents, readDate, str, treatment as readTreatment,
@@ -66,6 +66,11 @@ export interface Deps {
   sendEmail?: (msg: { to: string; subject: string; text: string; replyTo?: string; attachments?: { filename: string; contentType: string; content: Uint8Array }[] }) => Promise<unknown>;
   /** Absolute origin for customer links, e.g. https://cms.example.com */
   siteUrl?: () => Promise<string>;
+  /**
+   * Does mail actually leave this server? False while it only goes to the
+   * console, where "Sent" would be a lie the operator acts on.
+   */
+  emailStatus?: () => { active: boolean; label: string | null };
   now?: () => Date;
 }
 
@@ -183,6 +188,7 @@ export class Finance {
       };
     }
     if ('auto_invoice_shop_orders' in i) next.auto_invoice_shop_orders = !!i.auto_invoice_shop_orders;
+    if ('auto_run_recurring' in i) next.auto_run_recurring = !!i.auto_run_recurring;
     if ('datev_use_personal_accounts' in i) next.datev_use_personal_accounts = !!i.datev_use_personal_accounts;
     if (i.account_overrides) {
       const o: Record<string, number> = {};
@@ -341,6 +347,24 @@ export class Finance {
       .sort((a, b) => (b.issue_date ?? b.created_at).localeCompare(a.issue_date ?? a.created_at));
   }
 
+  /**
+   * Refuse to "send" when nothing can deliver. With the default console
+   * transport sendEmail succeeds by printing to a log, which would stamp an
+   * invoice "sent" that the customer never received.
+   */
+  private requireRealEmail(): void {
+    if (!this.deps.sendEmail) throw new FinanceError('Email is not configured on this server.', 503);
+    const st = this.deps.emailStatus?.();
+    if (st && !st.active) {
+      throw new FinanceError('E-Mail-Versand ist nicht eingerichtet: Mails werden nur in die Server-Konsole geschrieben. Setze EMAIL_TRANSPORT=smtp (SMTP_HOST, SMTP_USER, SMTP_PASS, EMAIL_FROM) oder aktiviere das SMTP2GO-Plugin.', 503);
+    }
+  }
+
+  /** Whether outgoing mail is real (see Deps.emailStatus). Unknown counts as not active. */
+  emailStatus(): { active: boolean; label: string | null } {
+    return this.deps.emailStatus?.() ?? { active: false, label: null };
+  }
+
   isOverdue(d: FinanceDocument): boolean {
     return d.type === 'invoice' && (d.status === 'open' || d.status === 'partially_paid') && !!d.due_date && d.due_date < this.today();
   }
@@ -401,6 +425,7 @@ export class Finance {
       contact_id: contactId,
       recipient,
       title: 'title' in i ? str(i.title, 200) : base.title,
+      reference: 'reference' in i ? str(i.reference, 120) : base.reference,
       intro: 'intro' in i ? str(i.intro, 4000) : base.intro ?? defaultIntro,
       closing: 'closing' in i ? str(i.closing, 4000) : base.closing ?? defaultClosing,
       currency: ('currency' in i ? str(i.currency, 3)?.toUpperCase() : base.currency) ?? company.default_currency,
@@ -510,6 +535,12 @@ export class Finance {
       }
     }
     if (d.type === 'invoice' && d.issue_date && daysBetween(d.issue_date, this.today()) > 30) warnings.push('The issue date is more than 30 days in the past.');
+    // A zero-priced line is legal (a free item, an included service) but far
+    // more often an amount that was never typed — and a finalized invoice
+    // cannot be corrected, only cancelled. Say so before the point of no return.
+    d.lines.filter((l) => l.type === 'item').forEach((l, i) => {
+      if (l.unit_price_cents === 0) warnings.push(`Line ${i + 1} ("${l.name || '—'}") has a price of 0,00 — check that this is intended.`);
+    });
     return { errors: [...new Set(errors)], warnings: [...new Set(warnings)] };
   }
 
@@ -561,7 +592,7 @@ export class Finance {
       const artefacts = await this.renderArtefacts(finalized, contact);
       finalized.archived_pdf_id = artefacts.pdfId;
       finalized.archived_xml_id = artefacts.xmlId;
-      finalized.content_hash = sha256(canonical({ number, issue: finalized.issue_date, recipient, seller: company, lines: d.lines, totals, treatment: d.tax_treatment }));
+      finalized.content_hash = sha256(canonical({ number, issue: finalized.issue_date, recipient, seller: company, lines: d.lines, totals, treatment: d.tax_treatment, ...(d.reference ? { reference: d.reference } : {}) }));
       // Order: claim the number first, then write the document.
       await this.store.put(COL.numbers, number, { document_id: d.id, at: this.stamp() });
       await this.store.put(COL.counters, counterKey, nextCounter as unknown as Record<string, unknown>);
@@ -759,7 +790,7 @@ export class Finance {
     const i = asObj(input);
     const d = await this.getDocument(did);
     if (d.status === 'draft') throw new FinanceError('Finalize the document before sending it.', 409);
-    if (!this.deps.sendEmail) throw new FinanceError('Email is not configured on this server.', 503);
+    this.requireRealEmail();
     const to = str(i.to, 254) ?? d.recipient.email;
     if (!to) throw new FinanceError('No recipient email address — add one to the contact or pass "to".');
     const company = d.seller ?? await this.company();
@@ -769,7 +800,7 @@ export class Finance {
     const link = await this.publicLink(d);
     const fill = (tpl: string) => tpl
       .replace(/\{type\}/g, typeName).replace(/\{number\}/g, d.number ?? '')
-      .replace(/\{company\}/g, company.name).replace(/\{amount\}/g, formatMoney(d.totals.gross_cents, d.currency, lang))
+      .replace(/\{company\}/g, legalName(company)).replace(/\{amount\}/g, formatMoney(d.totals.gross_cents, d.currency, lang))
       .replace(/\{link\}/g, link).replace(/\{due\}/g, d.due_date ?? '');
     const pdf = await this.documentPdf(did);
     const attachments = [{ filename: pdf.filename, contentType: 'application/pdf', content: pdf.bytes }];
@@ -777,7 +808,7 @@ export class Finance {
       const x = await this.documentXml(did);
       attachments.push({ filename: x.filename, contentType: 'application/xml', content: new TextEncoder().encode(x.xml) });
     }
-    await this.deps.sendEmail({
+    await this.deps.sendEmail!({
       to,
       subject: str(i.subject, 300) ?? fill(settings.texts.email_subject),
       text: str(i.message, 8000) ?? fill(settings.texts.email_body),
@@ -811,10 +842,20 @@ export class Finance {
     return out;
   }
 
+  /** The letters already sent for one invoice, oldest first. */
+  async listDunnings(did: string): Promise<{ id: string; document_id: string; level: number; date: string; fee_cents: number; interest_cents: number; pdf_id: string; sent_to?: string }[]> {
+    const all = (await this.store.list<{ id: string; document_id: string; level: number; date: string; fee_cents: number; interest_cents: number; pdf_id: string; sent_to?: string }>(COL.dunnings)).map((r) => r.data);
+    return all.filter((r) => r.document_id === did).sort((a, b) => a.level - b.level || a.date.localeCompare(b.date));
+  }
+
   async createDunning(did: string, input: unknown, actor: string): Promise<{ document: FinanceDocument; pdf_id: string; fee_cents: number; interest_cents: number }> {
     const i = asObj(input);
     const d = await this.getDocument(did);
     if (d.type !== 'invoice' || !(d.status === 'open' || d.status === 'partially_paid')) throw new FinanceError('Only open invoices can be dunned.', 409);
+    // A reminder before the due date is not a reminder: the debtor is not in
+    // default (§ 286 BGB), and a letter claiming otherwise damages the
+    // relationship and any later claim to fees or interest.
+    if (!this.isOverdue(d)) throw new FinanceError(`Invoice ${d.number} is not overdue yet (due ${d.due_date ?? 'n/a'}) — it cannot be dunned.`, 409);
     const s = await this.settings();
     const level = Math.min(3, (d.dunning_level ?? 0) + 1);
     const idx = level - 1;
@@ -835,7 +876,7 @@ export class Finance {
     const contact = d.contact_id ? await this.store.get<Contact>(COL.contacts, d.contact_id) : undefined;
     const lang = company.document_language || 'de';
     const greeting = lang === 'de' ? 'Sehr geehrte Damen und Herren,' : 'Dear Sir or Madam,';
-    const body = `${greeting}\n\n${s.dunning.texts[idx].replace(/\{pay_by\}/g, payBy.split('-').reverse().join('.'))}\n\n${lang === 'de' ? 'Mit freundlichen Grüßen' : 'Kind regards'}\n${company.contact_person || company.name}`;
+    const body = `${greeting}\n\n${s.dunning.texts[idx].replace(/\{pay_by\}/g, payBy.split('-').reverse().join('.'))}\n\n${lang === 'de' ? 'Mit freundlichen Grüßen' : 'Kind regards'}\n${company.contact_person || legalName(company)}`;
     const pdf = await renderDunningPdf({
       level, title: s.dunning.titles[idx], body, date: today, recipient: d.recipient,
       invoices: [{ number: d.number!, date: d.issue_date!, due_date: d.due_date, gross_cents: d.totals.gross_cents, paid_cents: d.paid_cents }],
@@ -843,8 +884,9 @@ export class Finance {
     }, company, { fontBytes: await this.deps.fontBytes(), now: this.now() });
     const meta = await archiveFile(pdf, `${s.dunning.titles[idx]}-${d.number}.pdf`, 'pdf');
     const rec = { id: id('dun'), document_id: did, level, date: today, fee_cents: fee, interest_cents: interest, pdf_id: meta.id, sent_to: undefined as string | undefined };
-    if (i.send && this.deps.sendEmail && d.recipient.email) {
-      await this.deps.sendEmail({
+    if (i.send && d.recipient.email) {
+      this.requireRealEmail();
+      await this.deps.sendEmail!({
         to: d.recipient.email,
         subject: `${s.dunning.titles[idx]}: ${d.number}`,
         text: body,
@@ -1149,6 +1191,34 @@ export class Finance {
     return next;
   }
 
+  /**
+   * A bank debit with no receipt yet becomes a booked, paid expense — the
+   * quick way to turn "Hetzner −45,80 €" into something with input VAT. The
+   * receipt can be attached afterwards; until then it shows as "kein Beleg" and
+   * is listed as missing in the accountant package.
+   */
+  async expenseFromBankTx(txId: string, input: unknown, actor: string): Promise<{ expense: Expense; transaction: BankTransaction }> {
+    const i = asObj(input);
+    const t = await this.findBankTx(txId);
+    if (!t) throw new FinanceError('Bank transaction not found.', 404);
+    if (t.amount_cents >= 0) throw new FinanceError('Only money going out can become an expense.', 409);
+    if (t.status !== 'unmatched' || (t.matches?.length ?? 0) > 0) throw new FinanceError('This transaction is already booked.', 409);
+    const rate = [19, 7, 0].includes(Number(i.tax_rate)) ? Number(i.tax_rate) : 19;
+    const expense = await this.saveExpense(null, {
+      supplier_name: str(i.supplier_name, 200) ?? t.counterparty_name ?? 'Unbekannt',
+      invoice_number: str(i.invoice_number, 100),
+      date: t.booking_date,
+      status: 'open',
+      category: str(i.category, 40) ?? 'other',
+      gross_cents: -t.amount_cents,
+      tax_rate: rate,
+      description: t.purpose.slice(0, 200),
+      note: 'Aus Bankumsatz angelegt — Beleg nachreichen.',
+    }, actor, { source: 'bank' });
+    const transaction = await this.matchBankTx(txId, { kind: 'expense', id: expense.id }, actor);
+    return { expense: await this.getExpense(expense.id), transaction };
+  }
+
   async categorizeBankTx(txId: string, input: unknown, actor: string): Promise<BankTransaction> {
     const i = asObj(input);
     const t = await this.findBankTx(txId);
@@ -1225,12 +1295,14 @@ export class Finance {
       while (tpl.active && tpl.next_date <= today && (!tpl.end_date || tpl.next_date <= tpl.end_date) && guard++ < 24) {
         const ref = `recurring:${tpl.id}:${tpl.next_date}`;
         const months = tpl.interval === 'yearly' ? 12 : tpl.interval === 'quarterly' ? 3 : 1;
-        const periodEnd = addDays(addMonths(tpl.next_date, months), -1);
+        const periodEnd = addDays(addMonthsAnchored(tpl.next_date, months, tpl.anchor_day ?? Number(tpl.next_date.slice(8, 10))), -1);
         try {
           if (!(await this.store.get(COL.refs, ref))) {
             const doc = await this.createDocument({
               type: 'invoice', contact_id: tpl.contact_id, title: tpl.title, intro: tpl.intro, closing: tpl.closing,
               price_mode: tpl.price_mode, issue_date: tpl.next_date,
+              ...(tpl.tax_treatment ? { tax_treatment: tpl.tax_treatment } : {}),
+              ...(tpl.payment_days !== undefined ? { payment_days: tpl.payment_days } : {}),
               service_date: tpl.next_date, service_date_end: periodEnd,
               lines: tpl.lines.map((l) => ({ ...l, id: undefined, ...(tpl.bill_period && l.type === 'item' ? { period_start: tpl.next_date, period_end: periodEnd } : {}) })),
             }, actor, { recurring_id: tpl.id, external_ref: ref, source: 'recurring' });
@@ -1246,7 +1318,7 @@ export class Finance {
           errors.push(`${tpl.name}: ${(e as Error).message}`);
           break;
         }
-        tpl = { ...tpl, next_date: addMonths(tpl.next_date, months), updated_at: this.stamp() };
+        tpl = { ...tpl, next_date: addMonthsAnchored(tpl.next_date, months, tpl.anchor_day ?? Number(tpl.next_date.slice(8, 10))), updated_at: this.stamp() };
         await this.store.put(COL.recurring, tpl.id, tpl as unknown as Record<string, unknown>);
       }
     }

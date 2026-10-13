@@ -1,5 +1,5 @@
 /*
- * AstroBaaS Finance — admin app.
+ * ECWS Billing — admin app.
  *
  * Plain browser JavaScript, served same-origin from /plugin-admin.js under the
  * admin's hash-based CSP (no inline script, no inline style attributes; widths
@@ -61,7 +61,11 @@
   const fmt = new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const money = (c, cur = 'EUR') => `${fmt.format((c || 0) / 100)} ${cur === 'EUR' ? '€' : cur}`;
   const date = (iso) => (iso ? iso.slice(0, 10).split('-').reverse().join('.') : '—');
-  const today = () => new Date().toISOString().slice(0, 10);
+  // The calendar date in Germany, not in UTC: between midnight and 02:00 local
+  // time the UTC date is still yesterday, which would pre-fill yesterday on
+  // every new invoice, payment and expense.
+  const todayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const today = () => todayFmt.format(new Date());
   const parseMoney = (s) => {
     if (typeof s === 'number') return Math.round(s * 100);
     let t = String(s || '').replace(/[\s€]/g, '');
@@ -91,13 +95,49 @@
     setTimeout(() => t.remove(), kind === 'err' ? 7000 : 3500);
   }
 
+  /**
+   * The API speaks English (it also serves MCP and websites); the screens are
+   * German. The messages an operator meets most are translated here, the rest
+   * pass through unchanged.
+   */
+  const DE_MESSAGES = [
+    [/^Add at least one billable line\.?$/, 'Mindestens eine Position mit Leistung hinzufügen.'],
+    [/^Fill in the company profile first.*$/, 'Bitte zuerst die Firmendaten ausfüllen (Einstellungen → Firma).'],
+    [/^Your company needs a tax number or VAT id.*$/, 'Die Firma braucht eine Steuernummer oder USt-IdNr. (§ 14 Abs. 4 Nr. 2 UStG) — Einstellungen → Firma.'],
+    [/^The recipient needs a name and an address.*$/, 'Der Empfänger braucht einen Namen und eine Adresse (§ 14 Abs. 4 Nr. 1 UStG).'],
+    [/^Reverse charge \/ intra-Community supply needs YOUR VAT id.*$/, 'Reverse Charge / innergemeinschaftliche Lieferung braucht DEINE USt-IdNr. (§ 14a UStG).'],
+    [/^Reverse charge \/ intra-Community supply needs the CUSTOMER's VAT id.*$/, 'Reverse Charge / innergemeinschaftliche Lieferung braucht die USt-IdNr. des KUNDEN (§ 14a UStG).'],
+    [/^The issue date is more than 30 days in the past\.?$/, 'Das Rechnungsdatum liegt mehr als 30 Tage zurück.'],
+    [/^Line (\d+) \("(.*)"\) has a price of 0,00.*$/, (m) => `Position ${m[1]} („${m[2]}“) hat den Preis 0,00 — bitte prüfen, ob das beabsichtigt ist.`],
+    [/^Only the German VAT rates 19 %, 7 % and 0 %.*$/, 'Es werden nur die deutschen Steuersätze 19 %, 7 % und 0 % unterstützt (kein OSS).'],
+    [/^Only EUR documents are supported.*$/, 'Es werden nur EUR-Belege unterstützt.'],
+    [/^Invoice (.+) is not overdue yet.*$/, (m) => `Rechnung ${m[1]} ist noch nicht überfällig — eine Mahnung ist erst nach Ablauf der Zahlungsfrist möglich.`],
+    [/^Only open invoices can be dunned\.?$/, 'Nur offene Rechnungen können gemahnt werden.'],
+    [/^Already finalized\.?$/, 'Bereits abgeschlossen.'],
+    [/^No recipient email address.*$/, 'Keine E-Mail-Adresse des Empfängers — am Kontakt eintragen oder im Dialog angeben.'],
+    [/^Finalize the document before sending it\.?$/, 'Das Dokument muss zuerst abgeschlossen werden.'],
+    [/^Only money going out can become an expense\.?$/, 'Nur Abbuchungen können zu einer Ausgabe werden.'],
+    [/^This transaction is already booked\.?$/, 'Dieser Umsatz ist bereits zugeordnet.'],
+    [/^An expense needs a supplier\.?$/, 'Eine Ausgabe braucht einen Lieferanten.'],
+    [/^An expense needs at least one amount line\.?$/, 'Eine Ausgabe braucht mindestens einen Betrag.'],
+    [/^Booked expenses are kept \(GoBD\).*$/, 'Gebuchte Ausgaben bleiben erhalten (GoBD); nur Entwürfe können gelöscht werden.'],
+  ];
+  const deMsg = (m) => {
+    const text = String(m || '');
+    for (const [re, to] of DE_MESSAGES) {
+      const hit = text.match(re);
+      if (hit) return typeof to === 'function' ? to(hit) : to;
+    }
+    return text;
+  };
+
   async function run(fn, okMsg) {
     try {
       const r = await fn();
       if (okMsg) toast(okMsg);
       return r;
     } catch (e) {
-      toast(e.message || String(e), 'err');
+      toast(deMsg(e.message || String(e)), 'err');
       return undefined;
     }
   }
@@ -160,15 +200,28 @@
           }) : h('tr', {}, h('td', { class: 'px-3 py-6 text-center text-gray-400', colspan: headers.length }, 'Keine Einträge')))));
   }
 
+  /**
+   * `body` is a node, or a function (close) => node for a dialog whose own
+   * buttons have to close it. Returns `close`. Callers must never look the
+   * dialog up in the DOM: the admin layout's hidden mobile-menu overlay shares
+   * the `fixed inset-0` classes and comes first, so a querySelector found IT.
+   */
   function modal(titleText, body, actions) {
     const wrap = h('div', { class: 'fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/40 p-4' });
     const close = () => wrap.remove();
     const box = h('div', { class: 'mt-12 w-full max-w-2xl rounded-lg bg-white p-5 shadow-xl' },
       h('div', { class: 'mb-4 flex items-center justify-between' }, h('h3', { class: 'text-base font-semibold' }, titleText), btn('✕', close, 'link')),
-      body, h('div', { class: 'mt-5 flex justify-end gap-2' }, ...(actions ? actions(close) : [btn('Schließen', close)])));
+      typeof body === 'function' ? body(close) : body, h('div', { class: 'mt-5 flex justify-end gap-2' }, ...(actions ? actions(close) : [btn('Schließen', close)])));
     wrap.addEventListener('click', (e) => { if (e.target === wrap) close(); });
+    wrap.setAttribute('role', 'dialog');
+    wrap.setAttribute('aria-modal', 'true');
+    wrap.setAttribute('aria-label', titleText);
     wrap.appendChild(box);
     document.body.appendChild(wrap);
+    const onKey = (e) => { if (e.key === 'Escape' && wrap.isConnected) { close(); } };
+    document.addEventListener('keydown', onKey);
+    const origRemove = wrap.remove.bind(wrap);
+    wrap.remove = () => { document.removeEventListener('keydown', onKey); origRemove(); };
     return close;
   }
 
@@ -198,9 +251,13 @@
     ['articles', 'Artikel'], ['expenses', 'Ausgaben'], ['bank', 'Bank'], ['recurring', 'Wiederkehrend'],
     ['reports', 'Auswertungen'], ['export', 'Export'], ['settings', 'Einstellungen'],
   ];
-  const nav = h('nav', { class: 'mb-5 flex flex-wrap gap-1 border-b border-gray-200 pb-2' });
+  const brand = h('div', { class: 'mb-3 flex items-center gap-3' },
+    h('div', { class: 'flex h-9 w-9 items-center justify-center rounded-lg bg-blue-600 text-sm font-bold tracking-tight text-white', 'aria-hidden': 'true' }, 'E'),
+    h('div', {}, h('div', { class: 'text-base font-semibold leading-tight text-gray-900' }, 'ECWS Billing'),
+      h('div', { class: 'text-xs leading-tight text-gray-500' }, 'E-Commerce Web Services · Rechnungen, Belege, Bank & Steuer')));
+  const nav = h('nav', { class: 'mb-5 flex flex-wrap gap-1 border-b border-gray-200 pb-2', 'aria-label': 'ECWS Billing' });
   const main = h('div', {});
-  root.replaceChildren(nav, main);
+  root.replaceChildren(brand, nav, main);
 
   function renderNav(active) {
     nav.replaceChildren(...NAV.map(([k, l]) => h('a', {
@@ -215,7 +272,8 @@
     const parts = path.split('/').filter(Boolean);
     const params = new URLSearchParams(query || '');
     const section = parts[0] || '';
-    renderNav(['doc'].includes(section) ? (params.get('type') === 'quote' ? 'quotes' : 'invoices') : section === 'contact' ? 'contacts' : section === 'expense' ? 'expenses' : section);
+    renderNav(['doc'].includes(section) ? (params.get('type') === 'quote' ? 'quotes' : 'invoices') : section === 'contact' ? 'contacts' : section === 'expense' ? 'expenses' : section === 'rec' ? 'recurring' : ['credit_notes', 'dunning'].includes(section) ? 'invoices' : section);
+    document.title = 'ECWS Billing';
     main.replaceChildren(h('p', { class: 'text-sm text-gray-400' }, 'Lädt…'));
     try {
       await meta();
@@ -223,7 +281,7 @@
         '': dashboard, invoices: () => docList('invoice'), quotes: () => docList('quote'), credit_notes: () => docList('credit_note'),
         doc: () => docEditor(parts[1], params), contacts: contactList, contact: () => contactEditor(parts[1]),
         articles: articleList, expenses: expenseList, expense: () => expenseEditor(parts[1]), bank: bankView,
-        recurring: recurringList, rec: () => recurringEditor(parts[1]), reports: reportsView, export: exportView, settings: settingsView,
+        dunning: dunningView, recurring: recurringList, rec: () => recurringEditor(parts[1]), reports: reportsView, export: exportView, settings: settingsView,
       }[section] || dashboard;
       const node = await view();
       main.replaceChildren(node);
@@ -246,8 +304,21 @@
     if (!s.company_ready) todos.push(['Firmendaten vervollständigen (Pflichtangaben für Rechnungen)', '#/settings']);
     if (s.drafts) todos.push([`${s.drafts} Entwürfe abschließen`, '#/invoices?status=draft']);
     if (s.overdue_count) todos.push([`${s.overdue_count} überfällige Rechnungen (${money(s.overdue_cents)})`, '#/invoices?status=overdue']);
-    if (s.dunning_due) todos.push([`${s.dunning_due} Mahnungen fällig`, '#/invoices?status=overdue']);
+    if (s.dunning_due) todos.push([`${s.dunning_due} Mahnungen fällig`, '#/dunning']);
     if (s.unmatched_bank) todos.push([`${s.unmatched_bank} Bankumsätze zuordnen`, '#/bank']);
+    if (s.expense_drafts) todos.push([`${s.expense_drafts} Beleg-Entwürfe prüfen und buchen`, '#/expenses?status=draft']);
+    if (s.expenses_without_receipt) todos.push([`${s.expenses_without_receipt} gebuchte Ausgaben ohne Beleg (für die Betriebsprüfung nachreichen)`, '#/expenses?status=no_receipt']);
+    if (s.quotes_expiring) todos.push([`${s.quotes_expiring} Angebote laufen diese Woche ab`, '#/quotes?status=open']);
+
+    // First-run checklist: shown until everything the module needs is in place.
+    const setup = [
+      [s.company_ready, 'Firmendaten und Steuernummer / USt-IdNr. eintragen', '#/settings'],
+      [s.bank_accounts > 0, 'Bankkonto anlegen und Kontoauszug importieren', '#/bank'],
+      [s.email && s.email.active, 'E-Mail-Versand einrichten (sonst können Rechnungen nicht verschickt werden)', '#/settings'],
+      [s.datev_ready, 'DATEV Berater- und Mandantennummer für den Export eintragen', '#/settings'],
+      [s.has_logo, 'Logo hochladen (optional)', '#/settings'],
+    ];
+    const openSetup = setup.filter(([ok]) => !ok);
 
     const months = [];
     const y = today().slice(0, 4);
@@ -262,6 +333,8 @@
 
     return h('div', { class: 'space-y-5' },
       title('Übersicht', btn('+ Rechnung', () => go('#/doc/new?type=invoice'), 'primary'), btn('+ Angebot', () => go('#/doc/new?type=quote')), btn('+ Ausgabe', () => go('#/expense/new'))),
+      openSetup.length ? card(h('div', { class: 'mb-2 flex items-center justify-between' }, h('div', { class: 'text-sm font-semibold' }, `Einrichtung (${setup.length - openSetup.length} von ${setup.length} erledigt)`)),
+        h('ul', { class: 'space-y-1 text-sm' }, setup.map(([ok, label, href]) => h('li', { class: ok ? 'text-gray-400 line-through' : '' }, ok ? `✓ ${label}` : h('a', { href, class: 'text-blue-700 hover:underline' }, `→ ${label}`))))) : null,
       h('div', { class: 'grid grid-cols-2 gap-3 lg:grid-cols-4' },
         kpi('Umsatz Monat (netto)', money(s.revenue_month_cents)),
         kpi(`Umsatz ${y} (netto)`, money(s.revenue_year_cents), `Ergebnis: ${money(s.result_year_cents)}`),
@@ -314,12 +387,38 @@
     const search = input({ placeholder: 'Suchen (Nr., Kunde)…', oninput: (e) => { clearTimeout(timer); timer = setTimeout(() => { state.q = e.target.value; load(); }, 250); } });
     await load();
     const tabs = h('div', { class: 'mb-3 flex gap-3 text-sm' },
-      [['invoice', 'Rechnungen', '#/invoices'], ['credit_note', 'Gutschriften', '#/credit_notes'], ['quote', 'Angebote', '#/quotes']]
+      [['invoice', 'Rechnungen', '#/invoices'], ['credit_note', 'Gutschriften', '#/credit_notes'], ['quote', 'Angebote', '#/quotes'], ['dunning', 'Mahnwesen', '#/dunning']]
         .map(([t, l, href]) => h('a', { href, class: t === type ? 'font-semibold text-blue-700' : 'text-gray-500 hover:text-gray-800' }, l)));
     return h('div', {},
       title(type === 'quote' ? 'Angebote' : type === 'credit_note' ? 'Gutschriften' : 'Rechnungen',
         type !== 'credit_note' ? btn(`+ ${TYPE[type]}`, () => go(`#/doc/new?type=${type}`), 'primary') : null),
       tabs, h('div', { class: 'mb-3 flex flex-wrap items-center justify-between gap-2' }, chipRow, h('div', { class: 'w-64' }, search)), list);
+  }
+
+  /* ------------------------------------------------------------------ dunning */
+
+  async function dunningView() {
+    const [list, settings] = await Promise.all([api('GET', '/dunning'), api('GET', '/settings')]);
+    const d = settings.dunning;
+    const levelName = (lvl) => d.titles[lvl - 1] || `Stufe ${lvl}`;
+    const create = (doc, send) => run(async () => {
+      if (send && META.email && !META.email.active) throw new Error('E-Mail-Versand ist nicht eingerichtet — bitte „Nur PDF“ wählen oder den Versand unter Einstellungen einrichten.');
+      const r = await api('POST', `/documents/${doc.id}/dunning`, { send });
+      download(`/files/${r.pdf_id}`);
+      toast(`${levelName(r.document.dunning_level)} für ${doc.number} erstellt${send ? ' und gesendet' : ''}`);
+      route();
+    });
+    return h('div', { class: 'space-y-4' },
+      title('Mahnwesen'),
+      h('div', { class: 'mb-1 flex gap-3 text-sm' }, [['#/invoices', 'Rechnungen'], ['#/credit_notes', 'Gutschriften'], ['#/quotes', 'Angebote'], ['#/dunning', 'Mahnwesen']]
+        .map(([href, l]) => h('a', { href, class: href === '#/dunning' ? 'font-semibold text-blue-700' : 'text-gray-500 hover:text-gray-800' }, l))),
+      h('p', { class: 'text-xs text-gray-500' }, `Mahnstufen nach ${d.level_days.join(' / ')} Tagen Verzug (Zahlungserinnerung, 1. und 2. Mahnung). Mindestens 7 Tage zwischen zwei Schreiben. Verzugszinsen (§ 288 BGB) ${d.charge_interest ? `ab Stufe 2, Basiszins ${d.base_rate_percent} %` : 'sind ausgeschaltet'}. Gesendet wird nie automatisch — jedes Schreiben löst du hier selbst aus.`),
+      emailWarning(),
+      table(['Rechnung', 'Kunde', 'Fällig', { label: 'Tage', right: true }, { label: 'Offen', right: true }, 'Nächste Stufe', ''],
+        list.map((x) => ({ x, cells: [x.number, x.recipient.name, date(x.due_date), String(x.days_overdue), money(x.gross_cents - x.paid_cents, x.currency), levelName(x.next_level),
+          h('span', { class: 'flex justify-end gap-1' }, btn('Nur PDF', (e) => { e.stopPropagation(); create(x, false); }), btn('Senden', (e) => { e.stopPropagation(); create(x, true); }, 'primary'))] })),
+        (r) => go(`#/doc/${r.x.id}`)),
+      list.length ? null : h('p', { class: 'text-sm text-green-700' }, 'Aktuell ist keine Mahnung fällig.'));
   }
 
   /** Client-side mirror of computeTotals, for the live preview only. The server recomputes. */
@@ -364,6 +463,7 @@
     const contactSel = select({}, [['', '— Kontakt wählen —'], ...contacts.filter((c) => c.roles.customer).map((c) => [c.id, `${c.company_name || [c.first_name, c.last_name].filter(Boolean).join(' ')}${c.customer_number ? ` (${c.customer_number})` : ''}`])], doc.contact_id);
     const f = {
       title: input({ value: doc.title || '', placeholder: TYPE[doc.type] }),
+      reference: input({ value: doc.reference || '', placeholder: 'z. B. Bestellnummer des Kunden', maxlength: 120 }),
       issue_date: input({ type: 'date', value: doc.issue_date || '' }),
       service_date: input({ type: 'date', value: doc.service_date || '' }),
       service_date_end: input({ type: 'date', value: doc.service_date_end || '' }),
@@ -388,6 +488,19 @@
         h('div', { class: 'flex justify-between border-t border-gray-300 pt-1 font-semibold' }, h('span', {}, 'Gesamt'), h('span', { class: 'tabular-nums' }, money(t.gross))));
     }
 
+    const lineNet = (l) => Math.round((Number(l.quantity) || 0) * (l.unit_price_cents || 0) * (1 - (Number(l.discount_percent) || 0) / 100));
+    const move = (i, d) => {
+      const j = i + d;
+      if (j < 0 || j >= lines.length) return;
+      [lines[i], lines[j]] = [lines[j], lines[i]];
+      renderLines();
+      renderTotals();
+    };
+    const rowActions = (i) => h('div', { class: 'flex items-center gap-1' },
+      h('button', { type: 'button', class: 'rounded px-1 text-gray-500 hover:bg-gray-100 disabled:opacity-30', title: 'nach oben', 'aria-label': 'Position nach oben', disabled: i === 0, onclick: () => move(i, -1) }, '↑'),
+      h('button', { type: 'button', class: 'rounded px-1 text-gray-500 hover:bg-gray-100 disabled:opacity-30', title: 'nach unten', 'aria-label': 'Position nach unten', disabled: i === lines.length - 1, onclick: () => move(i, 1) }, '↓'),
+      h('button', { type: 'button', class: 'rounded px-1 text-red-600 hover:bg-red-50', title: 'Position entfernen', 'aria-label': 'Position entfernen', onclick: () => { lines.splice(i, 1); renderLines(); renderTotals(); } }, '✕'));
+
     function renderLines() {
       linesBox.replaceChildren(
         h('div', { class: 'grid grid-cols-12 gap-2 px-1 text-xs font-medium text-gray-500' },
@@ -398,7 +511,7 @@
           if (l.type === 'text') {
             return h('div', { class: 'grid grid-cols-12 items-start gap-2 rounded-md bg-gray-50 p-1' },
               h('div', { class: 'col-span-11' }, input({ value: l.name, placeholder: 'Zwischenüberschrift / Text', oninput: (e) => upd('name', e.target.value) })),
-              h('div', { class: 'col-span-1 text-right' }, btn('✕', () => { lines.splice(i, 1); renderLines(); renderTotals(); }, 'link')));
+              h('div', { class: 'col-span-1 text-right' }, rowActions(i)));
           }
           return h('div', { class: 'grid grid-cols-12 items-start gap-2 rounded-md p-1 hover:bg-gray-50' },
             h('div', { class: 'col-span-5 space-y-1' },
@@ -413,7 +526,7 @@
               input({ value: centsInput(l.unit_price_cents), oninput: (e) => upd('unit_price_cents', parseMoney(e.target.value)) }),
               input({ value: l.discount_percent || '', placeholder: 'Rabatt %', oninput: (e) => upd('discount_percent', Number(e.target.value.replace(',', '.')) || undefined) })),
             h('div', { class: 'col-span-1' }, select({ onchange: (e) => upd('tax_rate', Number(e.target.value)) }, [[19, '19'], [7, '7'], [0, '0']], l.tax_rate)),
-            h('div', { class: 'col-span-1 text-right' }, btn('✕', () => { lines.splice(i, 1); renderLines(); renderTotals(); }, 'link')));
+            h('div', { class: 'col-span-1 flex flex-col items-end gap-0.5' }, rowActions(i), h('span', { class: 'mt-1 whitespace-nowrap text-xs tabular-nums text-gray-500', title: 'Zeilensumme netto' }, money(lineNet(l)))));
         }),
         h('div', { class: 'flex flex-wrap gap-2 pt-2' },
           btn('+ Position', () => { lines.push({ type: 'item', name: '', quantity: 1, unit: 'HUR', unit_price_cents: 0, tax_rate: 19 }); renderLines(); }),
@@ -430,7 +543,7 @@
     renderTotals();
 
     const collect = () => ({
-      type: doc.type, contact_id: contactSel.value || undefined, title: f.title.value, issue_date: f.issue_date.value || undefined,
+      type: doc.type, contact_id: contactSel.value || undefined, title: f.title.value, reference: f.reference.value, issue_date: f.issue_date.value || undefined,
       service_date: f.service_date.value || undefined, service_date_end: f.service_date_end.value || undefined,
       valid_until: f.valid_until.value || undefined, payment_days: Number(f.payment_days.value) || 0,
       tax_treatment: f.tax_treatment.value || undefined, price_mode: f.price_mode.value, einvoice_format: f.einvoice_format.value,
@@ -446,8 +559,9 @@
     };
     const checks = h('div', {});
     const showCheck = (c) => checks.replaceChildren(
-      ...c.errors.map((m) => h('div', { class: 'rounded-md bg-red-50 px-3 py-2 text-sm text-red-800' }, `✗ ${m}`)),
-      ...c.warnings.map((m) => h('div', { class: 'rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800' }, `! ${m}`)));
+      ...c.errors.map((m) => h('div', { class: 'rounded-md bg-red-50 px-3 py-2 text-sm text-red-800' }, `✗ ${deMsg(m)}`)),
+      ...c.warnings.map((m) => h('div', { class: 'rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800' }, `! ${deMsg(m)}`)),
+      !c.errors.length && !c.warnings.length ? h('div', { class: 'rounded-md bg-green-50 px-3 py-2 text-sm text-green-800' }, '✓ Alles in Ordnung — das Dokument kann abgeschlossen werden.') : null);
 
     append(box, 
       title(`${TYPE[doc.type]} — Entwurf`,
@@ -476,7 +590,7 @@
           doc.recipient && doc.recipient.name ? h('div', { class: 'rounded bg-gray-50 p-2 text-xs text-gray-600' }, [doc.recipient.name, doc.recipient.street, `${doc.recipient.zip || ''} ${doc.recipient.city || ''}`, doc.recipient.country].filter(Boolean).join(' · ')) : null,
           field('Steuerfall', f.tax_treatment), field('E-Rechnungs-Format', f.einvoice_format, 'ZUGFeRD ist für die meisten Kunden ideal; XRechnung für Behörden (Leitweg-ID am Kontakt).'))),
         card(h('div', { class: 'grid grid-cols-2 gap-3' },
-          field('Titel', f.title), field('Preise', f.price_mode),
+          field('Titel', f.title), field('Preise', f.price_mode), h('div', { class: 'col-span-2' }, field('Ihre Referenz / Bestellnr. (erscheint auf Rechnung und in der E-Rechnung)', f.reference)),
           field('Rechnungsdatum', f.issue_date, 'leer = Tag des Abschlusses'), field(doc.type === 'quote' ? 'Gültig bis' : 'Zahlungsziel (Tage)', doc.type === 'quote' ? f.valid_until : f.payment_days),
           field('Leistungsdatum / von', f.service_date), field('Leistung bis', f.service_date_end))),
         card(h('div', { class: 'space-y-3' }, field('Einleitung', f.intro), field('Schlusstext', f.closing), field('Interne Notiz (nicht gedruckt)', f.internal_note)))),
@@ -505,6 +619,9 @@
         download(`/files/${r.pdf_id}`);
         route();
       })));
+    }
+    if (doc.type === 'credit_note' && open > 0) {
+      actions.push(btn('Erstattung erfassen', () => paymentDialog(doc, true)));
     }
     if (doc.type === 'invoice' && doc.status !== 'cancelled') {
       actions.push(btn('Stornieren', () => run(async () => {
@@ -545,8 +662,18 @@
           h('div', { class: 'flex justify-between border-t pt-1 font-semibold' }, h('span', {}, 'Brutto'), h('span', { class: 'tabular-nums' }, money(tot.gross_cents, doc.currency))),
           doc.type !== 'quote' ? h('div', { class: 'flex justify-between text-gray-600' }, h('span', {}, 'Bezahlt'), h('span', { class: 'tabular-nums' }, money(doc.paid_cents, doc.currency))) : null,
           doc.type !== 'quote' ? h('div', { class: `flex justify-between font-medium ${open > 0 ? 'text-red-700' : 'text-green-700'}` }, h('span', {}, 'Offen'), h('span', { class: 'tabular-nums' }, money(open, doc.currency))) : null))),
-      table(['Pos.', 'Bezeichnung', { label: 'Menge', right: true }, 'Einheit', { label: 'Einzelpreis', right: true }],
-        doc.lines.filter((l) => l.type === 'item').map((l, i) => ({ cells: [String(i + 1), h('div', {}, l.name, l.description ? h('div', { class: 'text-xs text-gray-500' }, l.description) : null), String(l.quantity).replace('.', ','), unitName(l.unit), money(l.unit_price_cents, doc.currency)] }))),
+      table(['Pos.', 'Bezeichnung', { label: 'Menge', right: true }, 'Einheit', { label: 'Einzelpreis', right: true }, { label: 'USt', right: true }, { label: 'Netto', right: true }],
+        doc.lines.filter((l) => l.type === 'item').map((l, i) => {
+          const calc = (tot.lines || []).find((x) => x.id === l.id);
+          return { cells: [String(i + 1), h('div', {}, l.name, l.description ? h('div', { class: 'text-xs text-gray-500' }, l.description) : null), String(l.quantity).replace('.', ','), unitName(l.unit), money(l.unit_price_cents, doc.currency),
+            calc ? `${calc.rate} %` : `${l.tax_rate} %`, calc ? money(calc.net_cents, doc.currency) : ''] };
+        })),
+      doc.reference ? h('p', { class: 'text-sm text-gray-600' }, `Ihre Referenz: ${doc.reference}`) : null,
+      doc.dunnings && doc.dunnings.length ? h('div', {}, h('h3', { class: 'mb-2 mt-4 text-sm font-semibold' }, 'Mahnungen'),
+        table(['Stufe', 'Datum', 'Versendet an', { label: 'Gebühr', right: true }, { label: 'Zinsen', right: true }, ''], doc.dunnings.map((d) => ({
+          cells: [String(d.level), date(d.date), d.sent_to || 'nicht versendet (nur PDF)', money(d.fee_cents), money(d.interest_cents),
+            btn('PDF', (e) => { e.stopPropagation(); download(`/files/${d.pdf_id}`); }, 'link')],
+        })))) : null,
       doc.payments && doc.payments.length ? h('div', {}, h('h3', { class: 'mb-2 mt-4 text-sm font-semibold' }, 'Zahlungen'),
         table(['Datum', 'Art', 'Referenz', { label: 'Betrag', right: true }, ''], doc.payments.map((p) => ({
           cells: [date(p.date), p.method, p.reference || p.note || '', money(p.amount_cents, doc.currency),
@@ -557,11 +684,18 @@
     return box;
   }
 
+  function emailWarning() {
+    const em = META && META.email;
+    return em && !em.active ? h('div', { class: 'rounded-md bg-amber-50 p-3 text-sm text-amber-800', role: 'alert' },
+      'E-Mail-Versand ist auf diesem Server nicht eingerichtet — Mails landen nur in der Server-Konsole und der Kunde bekommt nichts. ',
+      h('a', { href: '#/settings', class: 'font-medium underline' }, 'So richtest du ihn ein')) : null;
+  }
+
   function sendDialog(doc) {
     const to = input({ value: doc.recipient.email || '', type: 'email' });
     const subject = input({ placeholder: '(Standard-Betreff aus den Einstellungen)' });
     const message = textarea({ rows: 6, placeholder: '(Standardtext aus den Einstellungen)' });
-    modal(`${TYPE[doc.type]} ${doc.number} senden`, h('div', { class: 'space-y-3' }, field('An', to), field('Betreff', subject), field('Nachricht', message),
+    modal(`${TYPE[doc.type]} ${doc.number} senden`, h('div', { class: 'space-y-3' }, emailWarning(), field('An', to), field('Betreff', subject), field('Nachricht', message),
       h('p', { class: 'text-xs text-gray-500' }, doc.einvoice_format === 'xrechnung' ? 'Anhänge: PDF und XRechnung-XML.' : 'Anhang: PDF (bei ZUGFeRD mit eingebetteter E-Rechnung).')),
     (close) => [btn('Abbrechen', close), btn('Senden', () => run(async () => {
       await api('POST', `/documents/${doc.id}/send`, { to: to.value, subject: subject.value || undefined, message: message.value || undefined });
@@ -570,12 +704,12 @@
     }, 'Gesendet'), 'primary')]);
   }
 
-  function paymentDialog(doc) {
+  function paymentDialog(doc, refund) {
     const amount = input({ value: centsInput(doc.totals.gross_cents - doc.paid_cents) });
     const d = input({ type: 'date', value: today() });
     const method = select({}, [['bank', 'Überweisung'], ['cash', 'Bar'], ['stripe', 'Stripe'], ['paypal', 'PayPal'], ['card', 'Karte'], ['other', 'Sonstige']], 'bank');
     const ref = input({});
-    modal('Zahlung erfassen', h('div', { class: 'grid grid-cols-2 gap-3' }, field('Betrag', amount), field('Datum', d), field('Art', method), field('Referenz', ref)),
+    modal(refund ? 'Erstattung erfassen' : 'Zahlung erfassen', h('div', { class: 'grid grid-cols-2 gap-3' }, field('Betrag', amount), field('Datum', d), field('Art', method), field('Referenz', ref)),
       (close) => [btn('Abbrechen', close), btn('Speichern', () => run(async () => {
         await api('POST', `/documents/${doc.id}/payments`, { amount_cents: parseMoney(amount.value), date: d.value, method: method.value, reference: ref.value });
         close();
@@ -586,22 +720,25 @@
   /* ------------------------------------------------------------------ contacts */
 
   async function contactList() {
-    const all = await api('GET', '/contacts');
+    const all = await api('GET', '/contacts?archived=1');
     const list = h('div', {});
-    const draw = (q) => list.replaceChildren(table(['Nr.', 'Name', 'E-Mail', 'Ort', 'USt-IdNr.', 'Rolle'],
-      all.filter((c) => !q || JSON.stringify(c).toLowerCase().includes(q.toLowerCase())).map((c) => ({
+    const view = { q: '', archived: false };
+    const draw = () => list.replaceChildren(table(['Nr.', 'Name', 'E-Mail', 'Ort', 'USt-IdNr.', 'Rolle'],
+      all.filter((c) => !!c.archived === view.archived).filter((c) => !view.q || JSON.stringify(c).toLowerCase().includes(view.q.toLowerCase())).map((c) => ({
         c, cells: [c.customer_number || c.vendor_number || '', c.company_name || [c.first_name, c.last_name].filter(Boolean).join(' '), c.email || '',
           [c.billing_address.zip, c.billing_address.city, c.billing_address.country !== 'DE' ? c.billing_address.country : ''].filter(Boolean).join(' '), c.vat_id || '',
           [c.roles.customer ? 'Kunde' : '', c.roles.vendor ? 'Lieferant' : ''].filter(Boolean).join(', ')],
       })), (r) => go(`#/contact/${r.c.id}`)));
-    draw('');
+    draw();
+    const archivedToggle = h('input', { type: 'checkbox', onchange: (e) => { view.archived = e.target.checked; draw(); } });
     return h('div', {},
       title('Kontakte', btn('CSV importieren', () => pickFile('.csv,text/csv', (f) => run(async () => {
         const r = await api('POST', '/upload/contacts', await f.text());
         toast(`${r.created} importiert, ${r.skipped} übersprungen${r.errors.length ? `, ${r.errors.length} Fehler` : ''}`);
         route();
       }))), btn('+ Kontakt', () => go('#/contact/new'), 'primary')),
-      h('div', { class: 'mb-3 w-72' }, input({ placeholder: 'Suchen…', oninput: (e) => draw(e.target.value) })), list);
+      h('div', { class: 'mb-3 flex flex-wrap items-center gap-4' }, h('div', { class: 'w-72' }, input({ placeholder: 'Suchen…', 'aria-label': 'Kontakte durchsuchen', oninput: (e) => { view.q = e.target.value; draw(); } })),
+        h('label', { class: 'flex items-center gap-1 text-sm text-gray-600' }, archivedToggle, 'Archivierte anzeigen')), list);
   }
 
   async function contactEditor(id) {
@@ -637,6 +774,11 @@
     return h('div', { class: 'space-y-4' },
       title(id === 'new' ? 'Neuer Kontakt' : (c.company_name || `${c.first_name || ''} ${c.last_name || ''}`),
         id !== 'new' ? btn('+ Rechnung', () => run(async () => { const d = await api('POST', '/documents', { type: 'invoice', contact_id: id, lines: [] }); go(`#/doc/${d.id}`); })) : null,
+        id !== 'new' ? btn(c.archived ? 'Wiederherstellen' : 'Archivieren', () => run(async () => {
+          if (!c.archived && !confirmBox('Kontakt archivieren? Er verschwindet aus der Auswahl; bestehende Belege bleiben unverändert.')) return;
+          await api('PUT', `/contacts/${id}`, { archived: !c.archived });
+          go('#/contacts');
+        }), 'secondary') : null,
         btn('Speichern', save, 'primary')),
       h('div', { class: 'grid gap-4 lg:grid-cols-2' },
         card(h('div', { class: 'grid grid-cols-2 gap-3' },
@@ -683,7 +825,9 @@
   /* ------------------------------------------------------------------ expenses */
 
   async function expenseList() {
-    const list = await api('GET', '/expenses');
+    const all = await api('GET', '/expenses');
+    const params = new URLSearchParams(location.hash.split('?')[1] || '');
+    const view = { status: params.get('status') || '', q: '' };
     const drop = h('div', { class: 'flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-300 bg-white p-6 text-center text-sm text-gray-500 hover:border-blue-400 hover:bg-blue-50' },
       h('div', { class: 'font-medium text-gray-700' }, 'Belege hierher ziehen oder klicken'),
       h('div', {}, 'PDF, Foto oder E-Rechnung (XRechnung / ZUGFeRD wird automatisch ausgelesen)'));
@@ -701,12 +845,25 @@
     drop.addEventListener('dragleave', () => drop.classList.remove('border-blue-400'));
     drop.addEventListener('drop', (e) => { e.preventDefault(); upload([...e.dataTransfer.files]); });
     const cat = (k) => ((META.categories.find((c) => c.key === k) || {}).de || k);
+    const listBox = h('div', {});
+    const chipRow = h('div', { class: 'flex flex-wrap gap-1' });
+    const chips = [['', 'Alle'], ['draft', 'Entwürfe'], ['open', 'Offen'], ['paid', 'Bezahlt'], ['no_receipt', 'Ohne Beleg']];
+    const draw = () => {
+      const q = view.q.toLowerCase();
+      const rows = all.filter((e) => !view.status || (view.status === 'no_receipt' ? e.status !== 'draft' && !e.file_id && !e.xml_file_id : e.status === view.status))
+        .filter((e) => !q || [e.supplier_name, e.invoice_number, e.note].some((v) => (v || '').toLowerCase().includes(q)));
+      listBox.replaceChildren(table(['Datum', 'Lieferant', 'Beleg-Nr.', 'Kategorie', { label: 'Brutto', right: true }, 'Status', ''], rows.map((e) => ({
+        e, cells: [date(e.date), e.supplier_name, e.invoice_number || '', cat(e.lines[0] && e.lines[0].category), money(e.gross_cents, e.currency),
+          h('span', { class: 'inline-block rounded-full px-2 py-0.5 text-xs font-medium ' + (STATUS[e.status] || ['', ''])[1] }, e.status === 'draft' ? 'Entwurf' : e.status === 'paid' ? 'Bezahlt' : 'Offen'),
+          e.file_id || e.xml_file_id ? '📎' : h('span', { class: 'text-xs text-amber-600' }, 'kein Beleg')],
+      })), (r) => go(`#/expense/${r.e.id}`)), h('p', { class: 'mt-2 text-right text-xs text-gray-500' }, `${rows.length} Ausgaben · Summe ${money(rows.reduce((t, e) => t + e.gross_cents, 0))}`));
+      chipRow.replaceChildren(...chips.map(([k, l]) => h('button', { type: 'button', class: `rounded-full px-3 py-1 text-xs font-medium ${view.status === k ? 'bg-gray-900 text-white' : 'bg-white text-gray-600 ring-1 ring-gray-200 hover:bg-gray-50'}`, onclick: () => { view.status = k; draw(); } }, l)));
+    };
+    draw();
     return h('div', { class: 'space-y-4' },
       title('Ausgaben', btn('+ Ausgabe', () => go('#/expense/new'), 'primary')), drop,
-      table(['Datum', 'Lieferant', 'Beleg-Nr.', 'Kategorie', { label: 'Brutto', right: true }, 'Status', ''], list.map((e) => ({
-        e, cells: [date(e.date), e.supplier_name, e.invoice_number || '', cat(e.lines[0] && e.lines[0].category), money(e.gross_cents, e.currency),
-          badge(e.status === 'open' ? 'open' : e.status), e.file_id || e.xml_file_id ? '📎' : h('span', { class: 'text-xs text-amber-600' }, 'kein Beleg')],
-      })), (r) => go(`#/expense/${r.e.id}`)));
+      h('div', { class: 'flex flex-wrap items-center justify-between gap-2' }, chipRow, h('div', { class: 'w-64' }, input({ placeholder: 'Suchen (Lieferant, Beleg-Nr.)…', 'aria-label': 'Ausgaben durchsuchen', oninput: (e) => { view.q = e.target.value; draw(); } }))),
+      listBox);
   }
 
   async function expenseEditor(id) {
@@ -768,6 +925,10 @@
       title(id === 'new' ? 'Neue Ausgabe' : `Ausgabe ${e.supplier_name}`,
         e.file_id ? btn('Beleg ansehen', () => download(`/files/${e.file_id}`)) : null,
         e.xml_file_id ? btn('E-Rechnung XML', () => download(`/files/${e.xml_file_id}`)) : null,
+        id !== 'new' && e.status === 'draft' ? btn('Buchen (offen)', () => run(async () => {
+          f.status.value = 'open';
+          await save();
+        }), 'primary') : null,
         id !== 'new' && e.status === 'draft' ? btn('Löschen', () => run(async () => { await api('DELETE', `/expenses/${id}`); go('#/expenses'); }), 'danger') : null,
         btn('Speichern', save, 'primary')),
       booked ? h('p', { class: 'text-xs text-gray-500' }, 'Gebuchter Beleg: Lieferant, Nummer und Datum sind gesperrt (GoBD). Kategorie, Status und Notiz bleiben änderbar.') : null,
@@ -799,16 +960,36 @@
     }));
     const matchDialog = async (t) => {
       const sugg = await api('GET', `/bank/transactions/${t.id}/suggestions`);
-      const cat = select({}, [['', '— Kategorie ohne Beleg —'], ...META.categories.map((c) => [c.key, c.de])], '');
-      modal(`${money(t.amount_cents)} · ${t.counterparty_name || ''}`, h('div', { class: 'space-y-3 text-sm' },
+      const cat = select({}, [['', '— Kategorie wählen —'], ...META.categories.map((c) => [c.key, c.de])], '');
+      const cat2 = select({}, [['', '— Kategorie wählen —'], ...META.categories.map((c) => [c.key, c.de])], '');
+      const rate = select({}, [[19, '19 %'], [7, '7 %'], [0, '0 %']], 19);
+      const supplier = input({ value: t.counterparty_name || '' });
+      const out = t.amount_cents < 0;
+      modal(`${money(t.amount_cents)} · ${t.counterparty_name || ''}`, (close) => h('div', { class: 'space-y-3 text-sm' },
         h('p', { class: 'text-gray-600' }, t.purpose),
-        sugg.length ? h('div', { class: 'space-y-2' }, sugg.map((s) => h('div', { class: 'flex items-center justify-between rounded-md border p-2' },
-          h('div', {}, h('div', { class: 'font-medium' }, s.label), h('div', { class: 'text-xs text-gray-500' }, `offen ${money(s.open_cents)} · ${s.reasons.join(', ')} · Score ${s.score}`)),
-          btn('Zuordnen', () => run(async () => { await api('POST', `/bank/transactions/${t.id}/match`, { kind: s.kind, id: s.id }); document.querySelector('.fixed.inset-0').remove(); route(); }, 'Zugeordnet'), 'primary'))))
+        sugg.length ? h('div', { class: 'space-y-2' }, sugg.map((x) => h('div', { class: 'flex items-center justify-between rounded-md border p-2' },
+          h('div', {}, h('div', { class: 'font-medium' }, x.label), h('div', { class: 'text-xs text-gray-500' }, `offen ${money(x.open_cents)} · ${x.reasons.join(', ')} · Score ${x.score}`)),
+          btn('Zuordnen', () => run(async () => { await api('POST', `/bank/transactions/${t.id}/match`, { kind: x.kind, id: x.id }); close(); route(); }, 'Zugeordnet'), 'primary'))))
           : h('p', { class: 'text-gray-500' }, 'Keine passende offene Rechnung oder Ausgabe gefunden.'),
-        h('div', { class: 'flex items-end gap-2 border-t pt-3' }, h('div', { class: 'flex-1' }, field('Direkt buchen (z. B. Kontoführung)', cat)),
-          btn('Buchen', () => run(async () => { if (!cat.value) return; await api('POST', `/bank/transactions/${t.id}/categorize`, { category: cat.value }); document.querySelector('.fixed.inset-0').remove(); route(); })),
-          btn('Ignorieren', () => run(async () => { await api('POST', `/bank/transactions/${t.id}/categorize`, { ignore: true }); document.querySelector('.fixed.inset-0').remove(); route(); })))));
+        out ? h('div', { class: 'space-y-2 border-t pt-3' },
+          h('div', { class: 'font-medium' }, 'Als Ausgabe mit Vorsteuer buchen'),
+          h('div', { class: 'grid grid-cols-3 gap-2' }, field('Lieferant', supplier), field('Kategorie', cat), field('USt', rate)),
+          h('div', { class: 'flex items-center justify-between gap-3' },
+            h('span', { class: 'text-xs text-gray-500' }, 'Legt die Ausgabe an und ordnet den Umsatz zu. Den Beleg danach an der Ausgabe nachreichen — ohne Beleg gibt es keinen Vorsteuerabzug.'),
+            btn('Ausgabe anlegen', () => run(async () => {
+              if (!cat.value) throw new Error('Bitte eine Kategorie wählen.');
+              const r = await api('POST', `/bank/transactions/${t.id}/create-expense`, { category: cat.value, tax_rate: Number(rate.value), supplier_name: supplier.value });
+              close();
+              toast('Ausgabe angelegt — jetzt den Beleg nachreichen');
+              go(`#/expense/${r.expense.id}`);
+            }), 'primary'))) : null,
+        h('div', { class: 'flex items-end gap-2 border-t pt-3' }, h('div', { class: 'flex-1' }, field('Direkt buchen ohne Beleg (z. B. Kontoführung) — ohne Vorsteuer', cat2)),
+          btn('Buchen', () => run(async () => {
+            if (!cat2.value) throw new Error('Bitte eine Kategorie wählen.');
+            await api('POST', `/bank/transactions/${t.id}/categorize`, { category: cat2.value });
+            close(); route();
+          })),
+          btn('Ignorieren', () => run(async () => { await api('POST', `/bank/transactions/${t.id}/categorize`, { ignore: true }); close(); route(); })))));
     };
     return h('div', { class: 'space-y-4' },
       title('Bank', btn('+ Konto', addAccount)),
@@ -816,9 +997,13 @@
         h('div', { class: 'font-medium' }, a.name), h('div', { class: 'text-xs text-gray-500' }, a.iban || 'ohne IBAN'),
         h('div', { class: 'mt-3' }, btn('Kontoauszug importieren (CAMT/MT940/CSV)', () => importFor(a), 'primary'))))),
       !accounts.length ? h('p', { class: 'text-sm text-gray-500' }, 'Lege zuerst ein Bankkonto an. Danach Kontoauszüge als camt.053 (XML), MT940 oder CSV aus dem Online-Banking importieren — Zahlungen werden automatisch Rechnungen zugeordnet.') : null,
-      h('div', { class: 'flex gap-1 text-xs' }, [['unmatched', 'Offen'], ['matched', 'Zugeordnet'], ['ignored', 'Ignoriert'], ['', 'Alle']].map(([k, l]) => h('a', {
-        href: `#/bank?status=${k}&year=${year}`, class: `rounded-full px-3 py-1 font-medium ${status === k ? 'bg-gray-900 text-white' : 'bg-white ring-1 ring-gray-200'}`,
-      }, l))),
+      h('div', { class: 'flex flex-wrap items-center justify-between gap-2' },
+        h('div', { class: 'flex gap-1 text-xs' }, [['unmatched', 'Offen'], ['matched', 'Zugeordnet'], ['ignored', 'Ignoriert'], ['', 'Alle']].map(([k, l]) => h('a', {
+          href: `#/bank?status=${k}&year=${year}`, class: `rounded-full px-3 py-1 font-medium ${status === k ? 'bg-gray-900 text-white' : 'bg-white ring-1 ring-gray-200'}`,
+        }, l))),
+        h('label', { class: 'flex items-center gap-2 text-xs text-gray-600' }, 'Jahr',
+          select({ onchange: (e) => go(`#/bank?status=${status}&year=${e.target.value}`), 'aria-label': 'Jahr' },
+            [0, 1, 2, 3].map((i) => { const yy = String(Number(today().slice(0, 4)) - i); return [yy, yy]; }), year))),
       table(['Datum', 'Gegenpartei', 'Verwendungszweck', { label: 'Betrag', right: true }, 'Status', ''], txs.map((t) => ({
         t, cells: [date(t.booking_date), t.counterparty_name || '', h('span', { class: 'line-clamp-2 text-xs' }, t.purpose),
           h('span', { class: t.amount_cents < 0 ? 'text-red-700' : 'text-green-700' }, money(t.amount_cents, t.currency)), badge(t.status),
@@ -837,7 +1022,7 @@
       title('Wiederkehrende Rechnungen',
         btn('Fällige jetzt erstellen', () => run(async () => { const r = await api('POST', '/recurring/run'); toast(`${r.created.length} Rechnung(en) erstellt${r.errors.length ? ` · ${r.errors.join('; ')}` : ''}`); }), 'secondary'),
         btn('+ Vorlage', () => go('#/rec/new'), 'primary')),
-      h('p', { class: 'mb-3 text-xs text-gray-500' }, 'Für Retainer, Wartungsverträge, Hosting und Lizenzen. Fällige Rechnungen werden beim Öffnen dieses Bereichs, per Knopf oder per API/MCP (POST /recurring/run) erstellt.'),
+      h('p', { class: 'mb-3 text-xs text-gray-500' }, 'Für Retainer, Wartungsverträge, Hosting und Lizenzen. Fällige Rechnungen werden automatisch im Hintergrund erstellt (stündlich geprüft, abschaltbar unter Einstellungen) — oder sofort per Knopf bzw. API/MCP (POST /recurring/run). Ohne „automatisch abschließen“ entsteht nur ein Entwurf zur Prüfung.'),
       table(['Name', 'Kunde', 'Intervall', 'Nächste', { label: 'Netto', right: true }, 'Aktiv'], list.map((r) => ({
         r, cells: [r.name, name(r.contact_id), ivl[r.interval], date(r.next_date), money(r.lines.reduce((s, l) => s + (l.type === 'item' ? Math.round(l.quantity * l.unit_price_cents) : 0), 0)), r.active ? '✓' : '—'],
       })), (x) => go(`#/rec/${x.r.id}`)));
@@ -851,16 +1036,22 @@
       name: input({ value: r.name }), contact: select({}, [['', '— Kunde —'], ...contacts.map((c) => [c.id, c.company_name || `${c.first_name || ''} ${c.last_name || ''}`])], r.contact_id),
       interval: select({}, [['monthly', 'monatlich'], ['quarterly', 'quartalsweise'], ['yearly', 'jährlich']], r.interval),
       next_date: input({ type: 'date', value: r.next_date }), end_date: input({ type: 'date', value: r.end_date || '' }),
+      tax_treatment: select({}, [['', 'Automatisch (aus Kunde)'], ...TREATMENTS], r.tax_treatment || ''),
+      payment_days: input({ type: 'number', min: 0, value: r.payment_days ?? '', placeholder: 'Standard' }),
       active: h('input', { type: 'checkbox', checked: r.active }), auto_finalize: h('input', { type: 'checkbox', checked: r.auto_finalize }),
       auto_send: h('input', { type: 'checkbox', checked: r.auto_send }), bill_period: h('input', { type: 'checkbox', checked: r.bill_period }),
     };
     const lines = r.lines.map((l) => ({ ...l }));
     const box = h('div', { class: 'space-y-2' });
-    const draw = () => box.replaceChildren(...lines.map((l, i) => h('div', { class: 'grid grid-cols-12 gap-2' },
-      h('div', { class: 'col-span-6' }, input({ value: l.name, placeholder: 'Leistung', oninput: (e) => { l.name = e.target.value; } })),
+    const draw = () => box.replaceChildren(h('div', { class: 'grid grid-cols-12 gap-2 px-1 text-xs font-medium text-gray-500' },
+        h('div', { class: 'col-span-5' }, 'Leistung'), h('div', { class: 'col-span-1' }, 'Menge'), h('div', { class: 'col-span-2' }, 'Einheit'),
+        h('div', { class: 'col-span-2' }, 'Preis (netto)'), h('div', { class: 'col-span-1' }, 'USt %'), h('div', { class: 'col-span-1' }, '')),
+      ...lines.map((l, i) => h('div', { class: 'grid grid-cols-12 gap-2' },
+      h('div', { class: 'col-span-5' }, input({ value: l.name, placeholder: 'Leistung', oninput: (e) => { l.name = e.target.value; } })),
       h('div', { class: 'col-span-1' }, input({ value: l.quantity, oninput: (e) => { l.quantity = Number(e.target.value.replace(',', '.')) || 0; } })),
       h('div', { class: 'col-span-2' }, select({ onchange: (e) => { l.unit = e.target.value; } }, META.units.map((u) => [u.code, u.de]), l.unit)),
       h('div', { class: 'col-span-2' }, input({ value: centsInput(l.unit_price_cents), oninput: (e) => { l.unit_price_cents = parseMoney(e.target.value); } })),
+      h('div', { class: 'col-span-1' }, select({ onchange: (e) => { l.tax_rate = Number(e.target.value); } }, [[19, '19'], [7, '7'], [0, '0']], l.tax_rate)),
       h('div', { class: 'col-span-1' }, btn('✕', () => { lines.splice(i, 1); draw(); }, 'link')))),
     btn('+ Position', () => { lines.push({ type: 'item', name: '', quantity: 1, unit: 'MON', unit_price_cents: 0, tax_rate: 19 }); draw(); }));
     draw();
@@ -869,11 +1060,12 @@
         id !== 'new' ? btn('Löschen', () => run(async () => { await api('DELETE', `/recurring/${id}`); go('#/recurring'); }), 'danger') : null,
         btn('Speichern', () => run(async () => {
           const body = { name: f.name.value, contact_id: f.contact.value, interval: f.interval.value, next_date: f.next_date.value, end_date: f.end_date.value || undefined,
-            active: f.active.checked, auto_finalize: f.auto_finalize.checked, auto_send: f.auto_send.checked, bill_period: f.bill_period.checked, lines };
+            active: f.active.checked, auto_finalize: f.auto_finalize.checked, auto_send: f.auto_send.checked, bill_period: f.bill_period.checked, lines,
+            tax_treatment: f.tax_treatment.value || undefined, payment_days: f.payment_days.value === '' ? null : Number(f.payment_days.value) };
           if (id === 'new') await api('POST', '/recurring', body); else await api('PUT', `/recurring/${id}`, body);
           go('#/recurring');
         }, 'Gespeichert'), 'primary')),
-      card(h('div', { class: 'grid grid-cols-2 gap-3 lg:grid-cols-4' }, field('Name', f.name), field('Kunde', f.contact), field('Intervall', f.interval), field('Nächste Rechnung', f.next_date), field('Ende (optional)', f.end_date),
+      card(h('div', { class: 'grid grid-cols-2 gap-3 lg:grid-cols-4' }, field('Name', f.name), field('Kunde', f.contact), field('Intervall', f.interval), field('Nächste Rechnung', f.next_date), field('Ende (optional)', f.end_date), field('Steuerfall', f.tax_treatment), field('Zahlungsziel (Tage)', f.payment_days),
         h('div', { class: 'col-span-2 flex flex-wrap items-end gap-4 text-sm lg:col-span-3' },
           h('label', { class: 'flex items-center gap-1' }, f.active, 'aktiv'), h('label', { class: 'flex items-center gap-1' }, f.auto_finalize, 'automatisch abschließen'),
           h('label', { class: 'flex items-center gap-1' }, f.auto_send, 'automatisch per E-Mail senden'), h('label', { class: 'flex items-center gap-1' }, f.bill_period, 'Leistungszeitraum drucken')))),
@@ -887,7 +1079,7 @@
     const y = today().slice(0, 4);
     const from = params.get('from') || `${y}-01-01`;
     const to = params.get('to') || today();
-    const [vat, pnl, items] = await Promise.all([api('GET', `/reports/vat?from=${from}&to=${to}`), api('GET', `/reports/pnl?from=${from}&to=${to}`), api('GET', '/reports/open-items')]);
+    const [vat, pnl, items, zm] = await Promise.all([api('GET', `/reports/vat?from=${from}&to=${to}`), api('GET', `/reports/pnl?from=${from}&to=${to}`), api('GET', '/reports/open-items'), api('GET', `/reports/zm?from=${from}&to=${to}`)]);
     const fromI = input({ type: 'date', value: from }); const toI = input({ type: 'date', value: to });
     const presets = [];
     const m = Number(today().slice(5, 7));
@@ -927,6 +1119,10 @@
             ...Object.entries(pnl.expenses_by_category).sort((a, b) => b[1] - a[1]).map(([k, v]) => h('div', { class: 'flex justify-between text-gray-600' }, h('span', {}, `– ${cat(k)}`), h('span', { class: 'tabular-nums' }, money(v)))),
             h('div', { class: 'flex justify-between border-t pt-1 font-semibold' }, h('span', {}, 'Ergebnis'), h('span', { class: `tabular-nums ${pnl.result_cents < 0 ? 'text-red-700' : ''}` }, money(pnl.result_cents)))),
           h('p', { class: 'mt-2 text-xs text-gray-500' }, 'Vereinfachte Sicht nach Rechnungsdatum; ersetzt nicht den Jahresabschluss.'))),
+      zm.rows.length || zm.notes.length ? card(h('div', { class: 'mb-2 flex items-center justify-between' }, h('h3', { class: 'text-sm font-semibold' }, 'Zusammenfassende Meldung (EU-Lieferungen und -Leistungen)'),
+          btn('CSV', () => download(`/reports/zm?from=${from}&to=${to}&format=csv`))),
+        table(['Land', 'USt-IdNr.', 'Kunde', 'Art', { label: 'Betrag', right: true }], zm.rows.map((z) => ({ cells: [z.country, z.vat_id, z.name, z.kind === 'L' ? 'Lieferung' : 'Sonstige Leistung', money(z.amount_cents)] }))),
+        h('p', { class: 'mt-2 text-xs text-gray-500' }, 'Meldung beim BZSt bis zum 25. nach Quartalsende, in vollen Euro je Zeile.', ...zm.notes.map((n) => h('span', { class: 'block text-amber-700' }, n)))) : null,
       h('div', {}, h('h3', { class: 'mb-2 text-sm font-semibold' }, 'Offene Posten'),
         table(['Art', 'Nr.', 'Partner', 'Datum', 'Fällig', { label: 'Offen', right: true }, { label: 'Tage überfällig', right: true }], items.map((i) => ({
           i, cells: [i.kind === 'receivable' ? 'Forderung' : 'Verbindlichkeit', i.number || '', i.name, date(i.date), date(i.due_date), money(i.open_cents), i.days_overdue ? String(i.days_overdue) : ''],
@@ -953,7 +1149,7 @@
   /* ------------------------------------------------------------------ settings */
 
   async function settingsView() {
-    const [c, s] = await Promise.all([api('GET', '/company'), api('GET', '/settings')]);
+    const [c, s, meta] = await Promise.all([api('GET', '/company'), api('GET', '/settings'), api('GET', '/meta')]);
     const fields = [
       ['name', 'Firmenname'], ['legal_form', 'Rechtsform'], ['tagline', 'Zusatz (z. B. „IT Solutions“)'], ['street', 'Straße'], ['zip', 'PLZ'], ['city', 'Ort'], ['country', 'Land (ISO)'],
       ['managing_directors', 'Geschäftsführer'], ['register_court', 'Registergericht'], ['register_number', 'Registernummer (HRB)'],
@@ -984,6 +1180,18 @@
     for (const t of ['invoice', 'credit_note', 'quote']) {
       series[t] = { pattern: input({ value: s.series[t].pattern }), reset: select({}, [['yearly', 'jährlich'], ['monthly', 'monatlich'], ['never', 'nie']], s.series[t].reset) };
     }
+    const TEXT_LABELS = {
+      invoice_intro: 'Rechnung — Einleitung', invoice_closing: 'Rechnung — Schlusstext', quote_intro: 'Angebot — Einleitung', quote_closing: 'Angebot — Schlusstext',
+      credit_note_intro: 'Gutschrift — Einleitung', email_subject: 'E-Mail — Betreff', email_body: 'E-Mail — Text',
+    };
+    const dun = s.dunning;
+    const dunCtl = {
+      days: dun.level_days.map((v) => input({ type: 'number', min: 0, value: v })),
+      fees: dun.fees_cents.map((v) => input({ type: 'number', min: 0, step: '0.01', value: (v / 100).toFixed(2) })),
+      interest: h('input', { type: 'checkbox', checked: dun.charge_interest }),
+      base: input({ type: 'number', step: '0.01', value: dun.base_rate_percent }),
+    };
+    const autoRec = h('input', { type: 'checkbox', checked: s.auto_run_recurring !== false });
     const texts = {};
     for (const k of Object.keys(s.texts)) texts[k] = textarea({ value: s.texts[k], rows: k.startsWith('email_body') ? 6 : 2 });
     const autoShop = h('input', { type: 'checkbox', checked: s.auto_invoice_shop_orders });
@@ -995,6 +1203,12 @@
       await api('PUT', '/settings', {
         series: Object.fromEntries(Object.entries(series).map(([t, x]) => [t, { pattern: x.pattern.value, reset: x.reset.value }])),
         texts: Object.fromEntries(Object.entries(texts).map(([k, x]) => [k, x.value])),
+        dunning: {
+          level_days: dunCtl.days.map((x) => Number(x.value) || 0),
+          fees_cents: dunCtl.fees.map((x) => Math.round((Number(String(x.value).replace(',', '.')) || 0) * 100)),
+          charge_interest: dunCtl.interest.checked, base_rate_percent: Number(String(dunCtl.base.value).replace(',', '.')) || 0,
+        },
+        auto_run_recurring: autoRec.checked,
         auto_invoice_shop_orders: autoShop.checked, datev_use_personal_accounts: personal.checked, account_overrides: ov,
       });
     }, 'Einstellungen gespeichert');
@@ -1011,6 +1225,8 @@
 
     return h('div', { class: 'space-y-5' },
       title('Einstellungen'),
+      meta.email && !meta.email.active ? h('div', { class: 'rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900' },
+        'E-Mail-Versand ist nicht eingerichtet — Rechnungen und Mahnungen können nicht verschickt werden. Hinterlege einen SMTP-/E-Mail-Dienst in den AstroBaaS-Einstellungen. PDF-Download und Link-Teilen funktionieren weiterhin.') : null,
       card(h('h3', { class: 'mb-3 text-sm font-semibold' }, 'Firma (Pflichtangaben auf Rechnungen, § 14 UStG / § 35a GmbHG)'),
         h('div', { class: 'grid grid-cols-2 gap-3 lg:grid-cols-4' }, fields.map(([k, l]) => field(l, ctl[k])),
           field('Kontenrahmen', ctl.chart), field('Versteuerung', ctl.vat_basis), field('Dokumentsprache', ctl.document_language), field('Beginn Wirtschaftsjahr (Monat)', ctl.fiscal_year_start_month),
@@ -1024,12 +1240,20 @@
         h('div', { class: 'mt-3' }, btn('Firmendaten speichern', saveCompany, 'primary'))),
       card(h('h3', { class: 'mb-3 text-sm font-semibold' }, 'Nummernkreise & Texte'),
         h('div', { class: 'grid gap-3 lg:grid-cols-3' }, Object.entries(series).map(([t, x]) => h('div', { class: 'space-y-2' }, field(`${TYPE[t]} — Muster`, x.pattern, '{YYYY} {YY} {MM} {SEQ:4}'), field('Zähler zurücksetzen', x.reset)))),
-        h('div', { class: 'mt-3 grid gap-3 lg:grid-cols-2' }, Object.entries(texts).map(([k, x]) => field(k, x, k.startsWith('email') ? 'Platzhalter: {type} {number} {company} {amount} {link} {due}' : undefined))),
+        h('div', { class: 'mt-3 grid gap-3 lg:grid-cols-2' }, Object.entries(texts).map(([k, x]) => field(TEXT_LABELS[k] || k, x, k.startsWith('email') ? 'Platzhalter: {type} {number} {company} {amount} {link} {due}' : undefined))),
         h('div', { class: 'mt-3 grid gap-3 lg:grid-cols-2' },
           h('label', { class: 'flex items-center gap-2 text-sm' }, autoShop, 'Shop-Bestellungen bei „abgeschlossen“ automatisch abrechnen'),
+          h('label', { class: 'flex items-center gap-2 text-sm' }, autoRec, 'Wiederkehrende Rechnungen automatisch erzeugen (Entwurf, wird nie automatisch versendet)'),
           h('label', { class: 'flex items-center gap-2 text-sm' }, personal, 'DATEV: Personenkonten (Debitoren/Kreditoren) verwenden'),
           field('Konten-Überschreibungen (für den Steuerberater)', overrides, 'Ein Eintrag je Zeile, z. B. exp:software=4964')),
         h('div', { class: 'mt-3' }, btn('Einstellungen speichern', saveSettings, 'primary'))),
+      card(h('h3', { class: 'mb-2 text-sm font-semibold' }, 'Mahnwesen'),
+        h('div', { class: 'grid gap-3 lg:grid-cols-3' }, [0, 1, 2].map((i) => h('div', { class: 'space-y-2' },
+          field(`${dun.titles[i]} — nach Tagen Verzug`, dunCtl.days[i]), field(`${dun.titles[i]} — Gebühr (€)`, dunCtl.fees[i])))),
+        h('div', { class: 'mt-3 grid gap-3 lg:grid-cols-2' },
+          h('label', { class: 'flex items-center gap-2 text-sm' }, dunCtl.interest, 'Verzugszinsen (§ 288 BGB) ab Stufe 2 berechnen'),
+          field('Basiszinssatz % (§ 247 BGB, ändert sich zum 1.1. und 1.7.)', dunCtl.base)),
+        h('p', { class: 'mt-2 text-xs text-gray-500' }, 'Gespeichert wird mit „Einstellungen speichern“ oben.')),
       card(h('h3', { class: 'mb-2 text-sm font-semibold' }, 'Import aus Lexware Office'),
         h('p', { class: 'mb-3 text-xs text-gray-500' }, 'Übernimmt Kontakte, Artikel sowie Rechnungen und Gutschriften (mit dem Original-PDF aus Lexware). Der Schlüssel wird nur für diesen Import verwendet und nicht gespeichert. Mehrfaches Ausführen ist sicher.'),
         h('div', { class: 'flex flex-wrap items-end gap-2' }, h('div', { class: 'w-80' }, field('API-Schlüssel', lxKey)), field('Belege ab (optional)', lxSince),

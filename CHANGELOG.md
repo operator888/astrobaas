@@ -6,11 +6,12 @@ semver yet because the API surface is pre-alpha.
 
 ## [Unreleased]
 
-### Finance: invoicing and bookkeeping (your own Lexware)
+### ECWS Billing: invoicing and bookkeeping (your own Lexware)
 
-A new bundled plugin, **Finance** (`src/plugins/finance`), under
-**Admin → Finanzen**, limited to admins and managers.
+A new bundled plugin, **ECWS Billing** (E-Commerce Web Services; plugin id
+`finance`, `src/plugins/finance`), under **Admin → Billing**, limited to admins and managers.
 
+- Review pass: GiroCode (EPC QR) on invoice PDFs, Mahnwesen tab and dunning history, Zusammenfassende Meldung (ZM) report + CSV, expense from bank transaction, automatic recurring invoices via the new `SCHEDULER_TICK` hook, customer reference on documents/XRechnung, German error messages, e-mail-not-configured guard, Basiszinssatz 1,52 %.
 - Quotes, invoices and credit notes with GoBD-safe numbering: numbers are
   assigned at finalization under a lock and never reused; finalized documents
   are immutable and corrected by credit note; every change goes into a

@@ -28,7 +28,7 @@ export function emitFinanceEvent(event: string, data: unknown): Promise<void> {
     case 'expense.created': return fireEvent('expense.created', data);
     default:
       // An event the module emits but did not declare is a bug, not a webhook.
-      console.error(`[finance] undeclared event "${event}" was not fired`);
+      console.error(`[ecws-billing] undeclared event "${event}" was not fired`);
       return Promise.resolve();
   }
 }

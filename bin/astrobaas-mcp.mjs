@@ -446,7 +446,7 @@ const TOOLS = [
   },
 
   /* ---------------- finance (src/plugins/finance) ----------------
-   * Invoices, payments, expenses and the VAT figures. Needs the Finance plugin
+   * Invoices, payments, expenses and the VAT figures. Needs the ECWS Billing (finance) plugin
    * active and a key belonging to an admin or manager; scope it to
    * finance:read / finance:write. Money is integer CENTS throughout.
    */
@@ -480,7 +480,7 @@ function financeTools() {
   return [
     {
       name: 'finance_summary',
-      description: 'Finance dashboard: revenue this month/year, open and overdue receivables, payables, VAT payable this quarter, drafts, unmatched bank transactions, dunning due, top customers.',
+      description: 'ECWS Billing dashboard: revenue this month/year, open and overdue receivables, payables, VAT payable this quarter, drafts, unmatched bank transactions, dunning due, top customers.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       run: () => apiRequest('GET', `/api/plugin/finance/summary`),
     },

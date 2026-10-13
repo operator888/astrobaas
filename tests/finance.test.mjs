@@ -688,6 +688,22 @@ function memoryStore() {
   check('plugin: a correctly signed inbound sale creates an invoice draft', signed.status === 201);
 }
 
+// ---- ECWS Billing review pass: legal name, anchored months, EPC/QR, ZM
+{
+  const QR = await loadTs('src/plugins/finance/lib/qr.ts');
+  check('legalName: no doubled legal form', F.legalName({ name: 'Foo UG', legal_form: 'UG (haftungsbeschränkt)' }) === 'Foo UG (haftungsbeschränkt)');
+  check('legalName: appends when absent', F.legalName({ name: 'Foo', legal_form: 'GmbH' }) === 'Foo GmbH');
+  check('addMonthsAnchored: Jan 31 + 1 month = Feb 28', F.addMonthsAnchored('2027-01-31', 1, 31) === '2027-02-28');
+  check('addMonthsAnchored: returns to day 31 in March', F.addMonthsAnchored('2027-02-28', 1, 31) === '2027-03-31');
+  const epc = QR.epcPayload({ name: 'Foo UG', iban: 'DE89370400440532013000', bic: 'COBADEFFXXX', amount_cents: 11900, reference: 'RE-1' });
+  const lines = epc.split('\n');
+  check('epc: 11 lines, BCD header, EUR119.00', lines.length === 11 && lines[0] === 'BCD' && lines[7] === 'EUR119.00');
+  const m = QR.qrEncode(new TextEncoder().encode(epc));
+  check('qr: square matrix with finder pattern', m.length === m[0].length && m.length >= 21 && m[0][0] === true && m[0][6] === true);
+  const zm = R.zusammenfassendeMeldung({ from: '2027-01-01', to: '2027-03-31' }, []);
+  check('zm: empty period yields no rows', Array.isArray(zm.rows) && zm.rows.length === 0);
+}
+
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

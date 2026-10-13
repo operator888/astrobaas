@@ -272,6 +272,10 @@ export function normRecurring(input: unknown, existing?: RecurringTemplate): Omi
     closing: 'closing' in i ? str(i.closing, 4000) : b.closing,
     price_mode: ('price_mode' in i ? (i.price_mode === 'gross' ? 'gross' : 'net') : b.price_mode) ?? 'net',
     bill_period: 'bill_period' in i ? bool(i.bill_period, true) : b.bill_period ?? true,
+    tax_treatment: 'tax_treatment' in i ? treatment(i.tax_treatment) : b.tax_treatment,
+    payment_days: 'payment_days' in i ? (i.payment_days === null || i.payment_days === '' ? undefined : num(i.payment_days, 14, 0, 365)) : b.payment_days,
+    // Re-anchored whenever the operator moves the next date, kept otherwise.
+    anchor_day: Number(next.slice(8, 10)) === b.anchor_day || !('next_date' in i) ? b.anchor_day ?? Number(next.slice(8, 10)) : Number(next.slice(8, 10)),
   };
 }
 

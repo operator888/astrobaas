@@ -18,14 +18,14 @@ import type { PluginRouteContext } from '../../lib/plugin-platform/routes';
 import { COL, Finance, publicDoc, type Deps } from './lib/service';
 import { FinanceError, asObj } from './lib/normalize';
 import { readArchived } from './lib/archive';
-import { vatReturn, profitLoss, openItems, datevBookings, bookedDocuments } from './lib/reports';
+import { vatReturn, profitLoss, openItems, datevBookings, bookedDocuments, zusammenfassendeMeldung } from './lib/reports';
 import { buildBuchungsstapel, encodeCp1252 } from './lib/datev';
 import { buildZip, type ZipEntry } from './lib/zip';
 import { EXPENSE_CATEGORIES } from './lib/accounts';
 import { UNITS } from './lib/strings';
 import { EU_COUNTRIES } from './lib/tax';
 import { startLexwareImport, importContactsCsv } from './lib/importer';
-import { contactDisplayName, addMonths } from './lib/format';
+import { contactDisplayName, addDays, addMonths } from './lib/format';
 import type { BankTransaction, Contact, DocumentType, Expense } from './lib/types';
 
 const P = '/api/plugin/finance';
@@ -99,7 +99,8 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
 
   const routes: PluginRoute[] = [
     /* ------------------------------ meta & dashboard ------------------------------ */
-    r('GET', '/meta', async () => json({
+    r('GET', '/meta', async ({ fin }) => json({
+      email: fin.emailStatus(),
       categories: EXPENSE_CATEGORIES.map((c) => ({ key: c.key, de: c.de, en: c.en, default_rate: c.default_rate, note: c.note })),
       units: Object.entries(UNITS).map(([code, l]) => ({ code, ...l })),
       eu_countries: [...EU_COUNTRIES],
@@ -110,14 +111,15 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
       const year = today.slice(0, 4);
       const month = today.slice(0, 7);
       const [docs, expenses, company, payments] = await Promise.all([fin.listDocuments(), fin.listExpenses(), fin.company(), fin.listPayments()]);
-      const pnlYear = profitLoss({ from: `${year}-01-01`, to: `${year}-12-31` }, docs, expenses);
-      const pnlMonth = profitLoss({ from: `${month}-01`, to: `${month}-31` }, docs, expenses);
+      const bankYear = await fin.listBankTx(year);
+      const pnlYear = profitLoss({ from: `${year}-01-01`, to: `${year}-12-31` }, docs, expenses, bankYear);
+      const pnlMonth = profitLoss({ from: `${month}-01`, to: `${month}-31` }, docs, expenses, bankYear);
       const items = openItems(docs, expenses, today);
       const q = Math.floor((Number(today.slice(5, 7)) - 1) / 3);
       const qFrom = `${year}-${String(q * 3 + 1).padStart(2, '0')}-01`;
       const qTo = addMonths(qFrom, 3);
       const vat = vatReturn({ from: qFrom, to: prevDay(qTo) }, company.vat_basis, docs, payments, expenses, company.small_business);
-      const unmatched = (await fin.listBankTx(year)).filter((t) => t.status === 'unmatched').length;
+      const unmatched = bankYear.filter((t) => t.status === 'unmatched').length;
       const dunning = await fin.dunningSuggestions();
       return json({
         company_ready: !!(company.name && company.street && (company.vat_id || company.tax_number)),
@@ -134,6 +136,13 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
         payables_cents: items.filter((i) => i.kind === 'payable').reduce((s, i) => s + i.open_cents, 0),
         vat_quarter: { from: qFrom, payable_cents: vat.payable_cents },
         drafts: docs.filter((d) => d.status === 'draft').length,
+        expense_drafts: expenses.filter((e) => e.status === 'draft').length,
+        expenses_without_receipt: expenses.filter((e) => e.status !== 'draft' && !e.file_id && !e.xml_file_id && e.date >= `${year}-01-01`).length,
+        quotes_expiring: docs.filter((d) => d.type === 'quote' && d.status === 'open' && d.valid_until && d.valid_until >= today && d.valid_until <= addDays(today, 7)).length,
+        bank_accounts: (await fin.listBankAccounts()).length,
+        email: fin.emailStatus(),
+        has_logo: !!company.logo_data_url,
+        datev_ready: !!(company.datev_consultant_number && company.datev_client_number),
         unmatched_bank: unmatched,
         dunning_due: dunning.length,
         top_customers: pnlYear.top_customers.slice(0, 5),
@@ -194,7 +203,7 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
     }),
     r('GET', '/documents/:id', async ({ fin, params }) => {
       const d = await fin.getDocument(params.id);
-      return json({ ...d, payments: await fin.listPayments(d.id), public_url: d.public_token ? await fin.publicLink(d) : undefined });
+      return json({ ...d, payments: await fin.listPayments(d.id), dunnings: await fin.listDunnings(d.id), public_url: d.public_token ? await fin.publicLink(d) : undefined });
     }),
     r('PUT', '/documents/:id', async ({ fin, params, request, actor }) => json(await fin.updateDocument(params.id, await body(request), actor))),
     r('DELETE', '/documents/:id', async ({ fin, params, actor }) => { await fin.deleteDraft(params.id, actor); return json({ deleted: true }); }),
@@ -283,6 +292,7 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
     r('GET', '/bank/transactions/:id/suggestions', async ({ fin, params }) => json(await fin.suggestionsFor(params.id))),
     r('POST', '/bank/transactions/:id/match', async ({ fin, params, request, actor }) => json(await fin.matchBankTx(params.id, await body(request), actor))),
     r('POST', '/bank/transactions/:id/categorize', async ({ fin, params, request, actor }) => json(await fin.categorizeBankTx(params.id, await body(request), actor))),
+    r('POST', '/bank/transactions/:id/create-expense', async ({ fin, params, request, actor }) => json(await fin.expenseFromBankTx(params.id, await body(request), actor), 201)),
     r('POST', '/bank/transactions/:id/unmatch', async ({ fin, params, actor }) => json(await fin.unmatchBankTx(params.id, actor))),
 
     /* ------------------------------ recurring ------------------------------ */
@@ -298,9 +308,21 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
       const company = await fin.company();
       return json(vatReturn({ from, to }, company.vat_basis, await fin.listDocuments(), await fin.listPayments(), await fin.listExpenses(), company.small_business));
     }),
+    r('GET', '/reports/zm', async ({ fin, url }) => {
+      const { from, to } = period(url, fin.today());
+      const zm = zusammenfassendeMeldung({ from, to }, await fin.listDocuments());
+      if (url.searchParams.get('format') !== 'csv') return json(zm);
+      const eur = (c: number) => (Math.round(c / 100)).toString();
+      const csv = '\uFEFF' + ['Land;USt-IdNr.;Name;Art;Betrag EUR (gerundet);Betrag exakt']
+        .concat(zm.rows.map((r) => [r.country, r.vat_id, `"${r.name.replace(/"/g, '""')}"`, r.kind, eur(r.amount_cents), (r.amount_cents / 100).toFixed(2).replace('.', ',')].join(';'))).join('\r\n') + '\r\n';
+      return file(csv, 'text/csv; charset=utf-8', `ZM_${from}_${to}.csv`);
+    }),
     r('GET', '/reports/pnl', async ({ fin, url }) => {
       const p = period(url, fin.today());
-      return json(profitLoss(p, await fin.listDocuments(), await fin.listExpenses(), await fin.listBankTx(p.from.slice(0, 4))));
+      // A period can span years; bank lines are stored per year.
+      const bank: BankTransaction[] = [];
+      for (let y = Number(p.from.slice(0, 4)); y <= Number(p.to.slice(0, 4)); y++) bank.push(...await fin.listBankTx(String(y)));
+      return json(profitLoss(p, await fin.listDocuments(), await fin.listExpenses(), bank));
     }),
     r('GET', '/reports/open-items', async ({ fin }) => json(openItems(await fin.listDocuments(), await fin.listExpenses(), fin.today()))),
 

@@ -102,7 +102,7 @@ export function headerLine(h: DatevHeader): string {
   const created = stamp(h.createdAt ?? new Date());
   const iso = (s: string) => s.replace(/-/g, '');
   const fields = [
-    q('EXTF'), '700', '21', q('Buchungsstapel'), '13', created, '', q('RE'), q('AstroBaaS Finance'), q(''),
+    q('EXTF'), '700', '21', q('Buchungsstapel'), '13', created, '', q('RE'), q('ECWS Billing'), q(''),
     String(h.consultant), String(h.client), iso(h.fiscalYearStart), String(h.accountLength),
     iso(h.from), iso(h.to), q(h.label.slice(0, 30)), q(''), '1', '0', h.lock ? '1' : '0', q('EUR'),
     '', q(''), '', '', q(h.chart === 'SKR04' ? '04' : '03'), '', '', q(''), q(''),

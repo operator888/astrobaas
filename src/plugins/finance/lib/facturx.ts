@@ -102,7 +102,7 @@ export function makePdfA3(
   doc: PDFDocument,
   opts: { title: string; author: string; created: Date; xml?: string; level?: FacturxLevel },
 ): void {
-  const producer = 'AstroBaaS Finance';
+  const producer = 'ECWS Billing';
   const ctx = doc.context;
 
   // Info dictionary — must agree with the XMP.

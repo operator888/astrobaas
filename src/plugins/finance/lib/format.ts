@@ -106,6 +106,19 @@ export function addMonths(iso: string, months: number): string {
   return target.toISOString().slice(0, 10);
 }
 
+/**
+ * `months` after `iso`, landing on `day` of that month — or its last day when
+ * the month is shorter. Unlike chaining addMonths, a schedule anchored on the
+ * 31st goes Jan 31 → Feb 28 → Mar 31, not Mar 28.
+ */
+export function addMonthsAnchored(iso: string, months: number, day: number): string {
+  const [y, m] = iso.split('-').map(Number);
+  const target = new Date(Date.UTC(y, m - 1 + months, 1, 12));
+  const last = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0, 12)).getUTCDate();
+  target.setUTCDate(Math.min(Math.max(1, day), last));
+  return target.toISOString().slice(0, 10);
+}
+
 export function daysBetween(a: string, b: string): number {
   return Math.round((Date.parse(`${b}T12:00:00Z`) - Date.parse(`${a}T12:00:00Z`)) / 86_400_000);
 }
@@ -128,6 +141,28 @@ export function centsToDecimal(cents: number): string {
   const abs = Math.abs(Math.round(cents));
   const s = `${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
   return neg ? `-${s}` : s;
+}
+
+/**
+ * The seller's name as it must appear on an invoice: the registered name WITH
+ * its legal form (§ 14 Abs. 4 Nr. 1 UStG, § 35a GmbHG). A company is often
+ * typed in two fields — "Dimitriou eCommerceWebServices UG" and "UG
+ * (haftungsbeschränkt)" — and simply joining them printed the form twice.
+ * Where the name already ends in the form's abbreviation, only the rest of the
+ * form ("(haftungsbeschränkt)") is added.
+ */
+export function legalName(co: { name?: string; legal_form?: string }): string {
+  const name = (co.name ?? '').trim();
+  const form = (co.legal_form ?? '').trim();
+  if (!form) return name;
+  const squash = (v: string) => v.toLowerCase().replace(/\s+/g, ' ');
+  if (squash(name).includes(squash(form))) return name;
+  const m = form.match(/^(\S+)(\s+.*)?$/);
+  const abbr = m?.[1] ?? form;
+  const rest = (m?.[2] ?? '').trim();
+  const endsWithAbbr = squash(name).endsWith(` ${squash(abbr)}`) || squash(name) === squash(abbr);
+  if (endsWithAbbr) return rest ? `${name} ${rest}` : name;
+  return `${name} ${form}`;
 }
 
 export function contactDisplayName(c: { kind?: string; company_name?: string; first_name?: string; last_name?: string }): string {

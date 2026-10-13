@@ -19,7 +19,7 @@
  * instead of a schematron rule id.
  */
 import type { FinanceDocument, TaxGroup } from './types';
-import { centsToDecimal, escapeXml as x } from './format';
+import { centsToDecimal, escapeXml as x, legalName } from './format';
 import { validIban } from './tax';
 
 export type CiiProfile = 'xrechnung' | 'en16931';
@@ -189,7 +189,7 @@ export function buildCii(doc: FinanceDocument, profile: CiiProfile): string {
   const deliveryDate = doc.service_date || doc.issue_date!;
 
   const seller = '<ram:SellerTradeParty>'
-    + `<ram:Name>${x(s.name)}</ram:Name>`
+    + `<ram:Name>${x(legalName(s))}</ram:Name>`
     + (reg ? `<ram:Description>${x(reg)}</ram:Description>` : '')
     + (s.register_number ? `<ram:SpecifiedLegalOrganization><ram:ID>${x(s.register_number)}</ram:ID></ram:SpecifiedLegalOrganization>` : '')
     + (s.contact_person || s.phone || s.email
@@ -217,7 +217,7 @@ export function buildCii(doc: FinanceDocument, profile: CiiProfile): string {
   const paymentMeans = hasIban
     ? '<ram:SpecifiedTradeSettlementPaymentMeans><ram:TypeCode>58</ram:TypeCode>'
       + `<ram:PayeePartyCreditorFinancialAccount><ram:IBANID>${x(s.iban!.replace(/\s+/g, ''))}</ram:IBANID>`
-      + `<ram:AccountName>${x(s.account_holder || s.name)}</ram:AccountName></ram:PayeePartyCreditorFinancialAccount>`
+      + `<ram:AccountName>${x(s.account_holder || legalName(s))}</ram:AccountName></ram:PayeePartyCreditorFinancialAccount>`
       + (s.bic ? `<ram:PayeeSpecifiedCreditorFinancialInstitution><ram:BICID>${x(s.bic.replace(/\s+/g, ''))}</ram:BICID></ram:PayeeSpecifiedCreditorFinancialInstitution>` : '')
       + '</ram:SpecifiedTradeSettlementPaymentMeans>'
     : '<ram:SpecifiedTradeSettlementPaymentMeans><ram:TypeCode>1</ram:TypeCode></ram:SpecifiedTradeSettlementPaymentMeans>';
@@ -271,6 +271,7 @@ export function buildCii(doc: FinanceDocument, profile: CiiProfile): string {
     + `<ram:BuyerReference>${x(buyerRef)}</ram:BuyerReference>`
     + seller
     + buyer
+    + (doc.reference ? `<ram:BuyerOrderReferencedDocument><ram:IssuerAssignedID>${x(doc.reference)}</ram:IssuerAssignedID></ram:BuyerOrderReferencedDocument>` : '')
     + '</ram:ApplicableHeaderTradeAgreement>'
     + '<ram:ApplicableHeaderTradeDelivery>'
     // Goods leaving the country: the zero rate rests on where they went, so

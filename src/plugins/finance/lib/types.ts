@@ -257,6 +257,8 @@ export interface FinanceDocument {
   /** Frozen at finalization. */
   seller?: CompanyProfile;
   title?: string;
+  /** The customer's own reference — their order or purchase-order number (EN 16931 BT-13). */
+  reference?: string;
   /** Free text above the lines ("Vielen Dank für Ihren Auftrag…"). */
   intro?: string;
   /** Free text below the totals. */
@@ -452,6 +454,15 @@ export interface RecurringTemplate {
   price_mode: 'net' | 'gross';
   /** Print the billed period on each line. */
   bill_period: boolean;
+  /** Tax case for every invoice; blank = derived from the customer, as for a hand-made invoice. */
+  tax_treatment?: TaxTreatment;
+  /** Payment term in days; blank = the company default. */
+  payment_days?: number;
+  /**
+   * Day of the month the schedule is anchored to. Without it, a template that
+   * starts on the 31st drifts to the 28th after February and stays there.
+   */
+  anchor_day?: number;
   last_document_id?: string;
   created_at: ISODateTime;
   updated_at: ISODateTime;
@@ -523,6 +534,8 @@ export interface FinanceSettings {
   };
   /** Create an invoice automatically when a shop order is completed. */
   auto_invoice_shop_orders: boolean;
+  /** Create due recurring invoices from the scheduler, without anyone opening the page. */
+  auto_run_recurring: boolean;
   /** Override SKR account numbers per category / purpose. */
   account_overrides: Record<string, number>;
   /** Debitor/Kreditor account ranges (DATEV personal accounts). */

@@ -29,9 +29,10 @@ export const DEFAULT_SETTINGS: FinanceSettings = {
     ],
     charge_interest: false,
     // Basiszinssatz §247 BGB — changes every 1 January and 1 July; keep it current.
-    base_rate_percent: 1.27,
+    base_rate_percent: 1.52,
   },
   auto_invoice_shop_orders: false,
+  auto_run_recurring: true,
   account_overrides: {},
   datev_use_personal_accounts: true,
   next_debitor: 10001,
