@@ -704,6 +704,93 @@ function memoryStore() {
   check('zm: empty period yields no rows', Array.isArray(zm.rows) && zm.rows.length === 0);
 }
 
+// ---- Review pass 2: concurrency, validation and compliance fixes
+{
+  function slowStore(delay) {
+    const base = memoryStore();
+    const w = () => new Promise((r) => setTimeout(r, delay));
+    return { data: base.data, list: async (c, o) => { await w(); return base.list(c, o); }, get: async (c, i) => { await w(); return base.get(c, i); },
+      put: async (c, i, d) => { await w(); return base.put(c, i, d); }, delete: async (c, i) => { await w(); return base.delete(c, i); }, clear: base.clear };
+  }
+  const mk = async (delay = 0) => {
+    const store = slowStore(delay);
+    const fin = new S.Finance(store, { fontBytes: async () => font, sendEmail: async () => { await new Promise((r) => setTimeout(r, 30)); }, emailStatus: () => ({ active: true, label: 'smtp' }), siteUrl: async () => 'https://x', now: () => new Date('2026-10-13T09:00:00Z') });
+    await fin.saveCompany(seller, 'a');
+    const cust = await fin.createContact({ company_name: 'K GmbH', email: 'a@k.de', billing_address: { street: 'W 1', zip: '80331', city: 'München', country: 'DE' } }, 'a');
+    const inv = async (cents = 10000) => fin.finalize((await fin.createDocument({ contact_id: cust.id, lines: [{ name: 'A', quantity: 1, unit_price_cents: cents }] }, 'a')).id, 'a');
+    return { fin, store, cust, inv };
+  };
+  {
+    const { fin, store, cust } = await mk(2);
+    const d = await fin.createDocument({ contact_id: cust.id, lines: [{ name: 'A', quantity: 1, unit_price_cents: 100 }] }, 'a');
+    const [f, upd] = await Promise.allSettled([fin.finalize(d.id, 'a'), (async () => { await new Promise((r) => setTimeout(r, 5)); return fin.updateDocument(d.id, { title: 'x' }, 'a'); })()]);
+    const after = await fin.getDocument(d.id);
+    check('race: a draft edit during finalize never reverts it to draft', f.status === 'fulfilled' && after.status === 'open' && after.number === f.value.number && upd.status === 'rejected');
+  }
+  {
+    const { fin, inv } = await mk(1);
+    const i1 = await inv();
+    await Promise.all([fin.sendDocument(i1.id, {}, 'a'), (async () => { await new Promise((r) => setTimeout(r, 10)); return fin.recordPayment(i1.id, {}, 'a'); })()]);
+    const after = await fin.getDocument(i1.id);
+    check('race: sending while a payment lands keeps the payment', after.status === 'paid' && after.paid_cents === 11900 && !!after.sent_at);
+  }
+  {
+    const { fin, inv } = await mk(1);
+    const i1 = await inv(); const i2 = await inv();
+    const acct = await fin.saveBankAccount(null, { name: 'B' }, 'a');
+    await fin.addBankTransactions(acct.id, [{ booking_date: '2026-10-14', amount_cents: 11900, purpose: 'x', counterparty_name: 'Foo' }], 'a');
+    const tx = (await fin.listBankTx('2026'))[0];
+    if (tx.status === 'matched') await fin.unmatchBankTx(tx.id, 'a');
+    const r = await Promise.allSettled([fin.matchBankTx(tx.id, { kind: 'document', id: i1.id }, 'a'), fin.matchBankTx(tx.id, { kind: 'document', id: i2.id }, 'a')]);
+    const paid = [await fin.getDocument(i1.id), await fin.getDocument(i2.id)].filter((d) => d.status === 'paid').length;
+    check('race: one bank transaction cannot pay two invoices', paid === 1 && r.filter((x) => x.status === 'rejected').length === 1);
+    await fin.addBankTransactions(acct.id, [{ booking_date: '2026-10-15', amount_cents: 100, purpose: 'zz', counterparty_name: 'Bar' }], 'a');
+    const small = (await fin.listBankTx('2026')).find((t) => t.amount_cents === 100);
+    const i3 = await inv();
+    await rejects('bank: an explicit amount above the transaction is refused', () => fin.matchBankTx(small.id, { kind: 'document', id: i3.id, amount_cents: 11900 }, 'a'), /still unassigned/);
+  }
+  {
+    const { fin, cust } = await mk();
+    await rejects('dates: 31.02. is refused', () => fin.createDocument({ contact_id: cust.id, issue_date: '31.02.2026', lines: [] }, 'a'), /issue_date/);
+    check('dates: parseDate rejects month 13', F.parseDate('2026-13-45') === null && F.parseDate('29.02.2028') === '2028-02-29' && F.parseDate('29.02.2027') === null);
+    const neg = await fin.createDocument({ contact_id: cust.id, lines: [{ name: 'A', quantity: 1, unit_price_cents: 10000 }, { name: 'Rabatt', quantity: 1, unit_price_cents: -1000 }] }, 'a');
+    check('check: a negative unit price is an error (BR-27)', (await fin.check(neg.id)).errors.some((e) => /negative/.test(e)));
+    const ok = await fin.createDocument({ contact_id: cust.id, lines: [{ name: 'A', quantity: 1, unit_price_cents: 10000 }, { name: 'Rabatt', quantity: -1, unit_price_cents: 1000 }] }, 'a');
+    check('check: a negative quantity is the accepted way to deduct', (await fin.check(ok.id)).errors.length === 0);
+    const negTotal = await fin.createDocument({ contact_id: cust.id, lines: [{ name: 'A', quantity: -1, unit_price_cents: 5000 }] }, 'a');
+    check('check: a negative invoice total must be a credit note', (await fin.check(negTotal.id)).errors.some((e) => /credit note/.test(e)));
+  }
+  {
+    const { fin } = await mk();
+    const c2 = await fin.createContact({ company_name: 'NoCity', billing_address: { country: 'DE' } }, 'a');
+    const rc = await fin.saveRecurring(null, { contact_id: c2.id, next_date: '2026-10-01', auto_finalize: true, lines: [{ name: 'Abo', quantity: 1, unit_price_cents: 1000 }] }, 'a');
+    const r1 = await fin.runRecurring('s');
+    const r2 = await fin.runRecurring('s');
+    const tpl = (await fin.listRecurring())[0];
+    check('recurring: a failed finalize is retried, not skipped', r1.errors.length === 1 && r2.errors.length === 1 && tpl.next_date === '2026-10-01');
+    await fin.updateContact(c2.id, { billing_address: { street: 'S 1', zip: '1', city: 'Köln', country: 'DE' } }, 'a');
+    const r3 = await fin.runRecurring('s');
+    const docs = (await fin.listDocuments()).filter((d) => d.recurring_id === rc.id);
+    check('recurring: the next run resumes the same draft and finalizes it', r3.errors.length === 0 && docs.length === 1 && docs[0].status === 'open');
+  }
+  {
+    const vr = R.vatReturn({ from: '2026-10-01', to: '2026-10-31' }, 'soll', [], [], [{ id: 'e', status: 'open', date: '2026-10-10', supplier_country: 'GR', reverse_charge: false, net_cents: 10000, tax_cents: 2400, gross_cents: 12400, lines: [] }]);
+    check('vat: foreign VAT is not German input tax', vr.kz['66'] === 0 && vr.notes.some((n) => /Foreign VAT/.test(n)));
+    const { fin } = await mk();
+    const both = await fin.createContact({ company_name: 'Both', roles: { customer: true, vendor: true } }, 'a');
+    const ctx = { chart: 'SKR03', settings: { account_overrides: {}, datev_use_personal_accounts: true }, contacts: new Map([[both.id, both]]), bankAccounts: new Map() };
+    const res = R.datevBookings({ from: '2026-10-01', to: '2026-10-31' }, ctx, [], [], [{ id: 'ex_1', status: 'open', contact_id: both.id, supplier_name: 'Both', date: '2026-10-10', net_cents: 1000, tax_cents: 190, gross_cents: 1190, lines: [{ category: 'other', net_cents: 1000, tax_rate: 19, tax_cents: 190 }] }], []);
+    check('datev: a customer-and-supplier contact books purchases to its creditor account', res.bookings[0].contra === Number(both.vendor_number) && res.bookings[0].contra >= 70000);
+  }
+  {
+    const { fin, store } = await mk();
+    check('log: intact chain verifies', (await fin.verifyLog('2026')).ok);
+    const logCol = [...store.data.keys()].find((k) => k.startsWith('log_'));
+    store.data.get(logCol).delete('log_000000001');
+    check('log: deleting the very first entry is detected', !(await fin.verifyLog('2026')).ok);
+  }
+}
+
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

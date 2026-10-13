@@ -79,10 +79,28 @@ export interface Deps {
  * read-modify-write on the store; serialising them is what keeps two
  * concurrent finalizations from drawing the same number.
  * ------------------------------------------------------------------ */
+/**
+ * Bookkeeping records are kept for ten years and must never silently drop
+ * off the end of a list, so every finance list reads the whole collection.
+ */
+const ALL = { uncapped: true } as const;
+
 let chain: Promise<unknown> = Promise.resolve();
 export function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = chain.then(fn, fn);
   chain = run.catch(() => undefined);
+  return run;
+}
+
+/**
+ * A second, independent lock for bank matching. Matching calls
+ * recordPayment, which takes the main lock — so it cannot run under the main
+ * lock itself, but two matches of one transaction must still be serialised.
+ */
+let bankChain: Promise<unknown> = Promise.resolve();
+function withBankLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = bankChain.then(fn, fn);
+  bankChain = run.catch(() => undefined);
   return run;
 }
 
@@ -223,7 +241,7 @@ export class Finance {
   }
 
   async listLog(year: string): Promise<LogEntry[]> {
-    const rows = await this.store.list<LogEntry>(COL.log(year));
+    const rows = await this.store.list<LogEntry>(COL.log(year), ALL);
     return rows.map((r) => r.data).sort((a, b) => a.id.localeCompare(b.id));
   }
 
@@ -231,18 +249,24 @@ export class Finance {
   async verifyLog(year: string): Promise<{ ok: boolean; entries: number; broken_at?: string }> {
     const entries = await this.listLog(year);
     // The chain continues across years: the first entry must point at the
-    // previous year's last one (when that year has entries).
-    const before = await this.listLog(String(Number(year) - 1));
-    let prev: string | null = before.length ? before[before.length - 1].hash : null;
+    // last entry of the nearest earlier year that has any.
+    let before: LogEntry[] = [];
+    for (let y = Number(year) - 1; y >= Number(year) - 30 && !before.length; y--) before = await this.listLog(String(y));
+    const last = before[before.length - 1];
+    let prev: string = last ? last.hash : '0'.repeat(64);
+    let prevSeq: number = last ? last.seq : 0;
     for (const e of entries) {
       const { hash, ...rest } = e;
       if (sha256(canonical(rest)) !== hash) return { ok: false, entries: entries.length, broken_at: e.id };
-      if (prev !== null && e.prev_hash !== prev) return { ok: false, entries: entries.length, broken_at: e.id };
+      // Hash link AND gap-free sequence: a removed first entry (or a removed
+      // earlier year) leaves the hashes intact but the sequence jumps.
+      if (e.prev_hash !== prev || e.seq !== prevSeq + 1) return { ok: false, entries: entries.length, broken_at: e.id };
       prev = hash;
+      prevSeq = e.seq;
     }
     // Deleted newest entries leave the chain intact but behind the head.
     const head = await this.store.get<{ hash: string; seq?: number; at?: string }>(COL.config, 'log_head');
-    if (head && entries.length && head.at?.slice(0, 4) === year && head.hash !== entries[entries.length - 1].hash) {
+    if (head?.at?.slice(0, 4) === year && (!entries.length || head.hash !== entries[entries.length - 1].hash)) {
       return { ok: false, entries: entries.length, broken_at: 'head' };
     }
     return { ok: true, entries: entries.length };
@@ -251,7 +275,7 @@ export class Finance {
   /* ----------------------------- contacts ----------------------------- */
 
   async listContacts(): Promise<Contact[]> {
-    return (await this.store.list<Contact>(COL.contacts)).map((r) => r.data);
+    return (await this.store.list<Contact>(COL.contacts, ALL)).map((r) => r.data);
   }
 
   async getContact(cid: string): Promise<Contact> {
@@ -318,7 +342,7 @@ export class Finance {
   /* ----------------------------- articles ----------------------------- */
 
   async listArticles(): Promise<Article[]> {
-    return (await this.store.list<Article>(COL.articles)).map((r) => r.data);
+    return (await this.store.list<Article>(COL.articles, ALL)).map((r) => r.data);
   }
 
   async saveArticle(aid: string | null, input: unknown, actor: string): Promise<Article> {
@@ -339,7 +363,7 @@ export class Finance {
   /* ----------------------------- documents ----------------------------- */
 
   async listDocuments(filter: { type?: DocumentType; status?: string; contact_id?: string } = {}): Promise<FinanceDocument[]> {
-    const rows = (await this.store.list<FinanceDocument>(COL.documents)).map((r) => r.data);
+    const rows = (await this.store.list<FinanceDocument>(COL.documents, ALL)).map((r) => r.data);
     return rows
       .filter((d) => !filter.type || d.type === filter.type)
       .filter((d) => !filter.status || d.status === filter.status || (filter.status === 'overdue' && this.isOverdue(d)))
@@ -360,6 +384,11 @@ export class Finance {
     }
   }
 
+  /** Mail can really leave: a sender exists and the channel is not the console stub. */
+  private canSendMail(): boolean {
+    return !!this.deps.sendEmail && this.emailStatus().active;
+  }
+
   /** Whether outgoing mail is real (see Deps.emailStatus). Unknown counts as not active. */
   emailStatus(): { active: boolean; label: string | null } {
     return this.deps.emailStatus?.() ?? { active: false, label: null };
@@ -377,6 +406,20 @@ export class Finance {
 
   private async putDocument(d: FinanceDocument): Promise<void> {
     await this.store.put(COL.documents, d.id, d as unknown as Record<string, unknown>);
+  }
+
+  /**
+   * Change a few fields of a stored document under the lock, on a FRESH read.
+   * Slow work (PDF, SMTP) happens before; writing back a copy read before it
+   * would overwrite a payment booked in the meantime.
+   */
+  private patchDocument(did: string, patch: (d: FinanceDocument) => Partial<FinanceDocument>): Promise<FinanceDocument> {
+    return withLock(async () => {
+      const cur = await this.getDocument(did);
+      const next = { ...cur, ...patch(cur), updated_at: this.stamp() } as FinanceDocument;
+      await this.putDocument(next);
+      return next;
+    });
   }
 
   private recipientFromContact(c: Contact): FinanceDocument['recipient'] {
@@ -472,6 +515,12 @@ export class Finance {
   }
 
   async updateDocument(did: string, input: unknown, actor: string): Promise<FinanceDocument> {
+    // Under the lock: a draft edited while it is being finalized must not be
+    // written back as a draft over the finalized document.
+    return withLock(() => this.updateDocumentLocked(did, input, actor));
+  }
+
+  private async updateDocumentLocked(did: string, input: unknown, actor: string): Promise<FinanceDocument> {
     const before = await this.getDocument(did);
     const i = asObj(input);
     if (before.status !== 'draft') {
@@ -495,6 +544,10 @@ export class Finance {
   }
 
   async deleteDraft(did: string, actor: string): Promise<void> {
+    return withLock(() => this.deleteDraftLocked(did, actor));
+  }
+
+  private async deleteDraftLocked(did: string, actor: string): Promise<void> {
     const d = await this.getDocument(did);
     if (d.status !== 'draft') throw new FinanceError('Only drafts can be deleted. Finalized documents are kept (GoBD); cancel an invoice with a credit note instead.', 409);
     await this.store.delete(COL.documents, did);
@@ -504,12 +557,26 @@ export class Finance {
 
   /** Validation the user sees BEFORE finalizing. */
   async check(did: string): Promise<{ errors: string[]; warnings: string[] }> {
-    const d = await this.getDocument(did);
+    const stored = await this.getDocument(did);
     const company = await this.company();
+    // Check what finalize will actually write: the contact's current address
+    // fills whatever the draft left empty (it may have been fixed since).
+    const contact = stored.status === 'draft' && stored.contact_id ? await this.store.get<Contact>(COL.contacts, stored.contact_id) : undefined;
+    const d: FinanceDocument = contact ? { ...stored, recipient: { ...this.recipientFromContact(contact), ...pickDefined(stored.recipient) } } : stored;
     const probe: FinanceDocument = { ...d, seller: company, number: d.number ?? 'PREVIEW', issue_date: d.issue_date ?? this.today() };
     const errors: string[] = [];
     const warnings: string[] = [];
     if (!d.lines.some((l) => l.type === 'item')) errors.push('Add at least one billable line.');
+    // EN 16931 BR-27: an item price is never negative. A discount or a
+    // returned item goes in with a negative QUANTITY instead.
+    d.lines.forEach((l, n) => {
+      if (l.type === 'item' && l.unit_price_cents < 0) errors.push(`Line ${n + 1}: the unit price must not be negative — use a negative quantity for a deduction.`);
+    });
+    if (d.type !== 'quote' && d.totals.gross_cents < 0) {
+      errors.push(d.type === 'invoice'
+        ? 'The invoice total is negative — issue a credit note instead.'
+        : 'The credit note total is negative — enter the amounts as positive values.');
+    }
     if (d.type !== 'quote' && d.einvoice_format !== 'pdf') {
       const pf = preflight(probe, d.einvoice_format === 'xrechnung' ? 'xrechnung' : 'en16931');
       errors.push(...pf.errors.filter((e) => !/finalize it first/.test(e)));
@@ -659,8 +726,7 @@ export class Finance {
   async setQuoteStatus(did: string, status: 'accepted' | 'rejected', actor: string): Promise<FinanceDocument> {
     const d = await this.getDocument(did);
     if (d.type !== 'quote' || d.status === 'draft' || d.status === 'invoiced') throw new FinanceError('Only a sent quote can be accepted or rejected.', 409);
-    const next = { ...d, status: status, updated_at: this.stamp() } as FinanceDocument;
-    await this.putDocument(next);
+    const next = await this.patchDocument(did, () => ({ status }));
     await this.log(actor, `quote.${status}`, 'quote', did, d.number);
     this.deps.fire?.(`quote.${status}`, publicDoc(next));
     return next;
@@ -675,7 +741,7 @@ export class Finance {
       tax_treatment: q.tax_treatment, price_mode: q.price_mode, currency: q.currency, title: undefined,
       einvoice_format: q.einvoice_format,
     }, actor, { from_quote_id: q.id });
-    await this.putDocument({ ...q, status: 'invoiced', invoice_id: inv.id, updated_at: this.stamp() });
+    await this.patchDocument(q.id, () => ({ status: 'invoiced', invoice_id: inv.id }));
     await this.log(actor, 'quote.invoiced', 'quote', q.id, `→ invoice draft ${inv.id}`);
     return inv;
   }
@@ -724,7 +790,7 @@ export class Finance {
   /* ----------------------------- payments ----------------------------- */
 
   async listPayments(documentId?: string): Promise<Payment[]> {
-    const rows = (await this.store.list<Payment>(COL.payments)).map((r) => r.data);
+    const rows = (await this.store.list<Payment>(COL.payments, ALL)).map((r) => r.data);
     return documentId ? rows.filter((p) => p.document_id === documentId) : rows;
   }
 
@@ -815,8 +881,7 @@ export class Finance {
       replyTo: company.email || undefined,
       attachments,
     });
-    const next = { ...d, sent_at: this.stamp(), updated_at: this.stamp() };
-    await this.putDocument(next);
+    const next = await this.patchDocument(did, () => ({ sent_at: this.stamp() }));
     await this.log(actor, 'document.send', d.type, did, `Sent to ${to}`);
     this.deps.fire?.('document.sent', publicDoc(next));
     return next;
@@ -844,7 +909,7 @@ export class Finance {
 
   /** The letters already sent for one invoice, oldest first. */
   async listDunnings(did: string): Promise<{ id: string; document_id: string; level: number; date: string; fee_cents: number; interest_cents: number; pdf_id: string; sent_to?: string }[]> {
-    const all = (await this.store.list<{ id: string; document_id: string; level: number; date: string; fee_cents: number; interest_cents: number; pdf_id: string; sent_to?: string }>(COL.dunnings)).map((r) => r.data);
+    const all = (await this.store.list<{ id: string; document_id: string; level: number; date: string; fee_cents: number; interest_cents: number; pdf_id: string; sent_to?: string }>(COL.dunnings, ALL)).map((r) => r.data);
     return all.filter((r) => r.document_id === did).sort((a, b) => a.level - b.level || a.date.localeCompare(b.date));
   }
 
@@ -865,9 +930,11 @@ export class Finance {
     let interest = 0;
     if (s.dunning.charge_interest && level >= 2 && d.due_date) {
       // §288 BGB: base rate + 9 points between businesses (Abs. 2), + 5 for a
-      // consumer (Abs. 1). A person without a VAT id is treated as a consumer.
+      // consumer (Abs. 1). Only a known company or a VAT id counts as a
+      // business — charging a consumer the business rate is an overcharge.
       const contactForRate = d.contact_id ? await this.store.get<Contact>(COL.contacts, d.contact_id) : undefined;
-      const consumer = contactForRate?.kind === 'person' && !contactForRate.vat_id && !d.recipient.vat_id;
+      const business = contactForRate?.kind === 'company' || !!contactForRate?.vat_id || !!d.recipient.vat_id;
+      const consumer = !business;
       const days = Math.max(0, daysBetween(d.due_date, today));
       interest = Math.round((open * ((s.dunning.base_rate_percent + (consumer ? 5 : 9)) / 100) * days) / 365);
     }
@@ -896,8 +963,7 @@ export class Finance {
       rec.sent_to = d.recipient.email;
     }
     await this.store.put(COL.dunnings, rec.id, rec as unknown as Record<string, unknown>);
-    const next = { ...d, dunning_level: level, last_dunning_at: today, updated_at: this.stamp() };
-    await this.putDocument(next);
+    const next = await this.patchDocument(did, () => ({ dunning_level: level, last_dunning_at: today }));
     await this.log(actor, 'dunning.create', 'invoice', did, `Level ${level} (${s.dunning.titles[idx]})`);
     this.deps.fire?.('invoice.dunned', { ...publicDoc(next), dunning_level: level });
     return { document: next, pdf_id: meta.id, fee_cents: fee, interest_cents: interest };
@@ -906,7 +972,7 @@ export class Finance {
   /* ----------------------------- expenses ----------------------------- */
 
   async listExpenses(): Promise<Expense[]> {
-    return (await this.store.list<Expense>(COL.expenses)).map((r) => r.data).sort((a, b) => b.date.localeCompare(a.date));
+    return (await this.store.list<Expense>(COL.expenses, ALL)).map((r) => r.data).sort((a, b) => b.date.localeCompare(a.date));
   }
 
   async getExpense(eid: string): Promise<Expense> {
@@ -1007,14 +1073,17 @@ export class Finance {
    * attached, for the user (or the AI reader) to fill in.
    */
   async uploadReceipt(bytes: Uint8Array, filename: string, actor: string): Promise<{ expense: Expense; parsed?: ParsedEInvoice; duplicate?: boolean }> {
-    const meta = await archiveFile(bytes, filename);
+    // A file the archive or the XML reader refuses is the uploader's problem
+    // (wrong type, too large, malformed) — answer 422, not a server error.
+    const meta = await archiveFile(bytes, filename).catch((e: Error) => { throw new FinanceError(e.message, 422); });
     const existing = (await this.listExpenses()).find((e) => e.file_id === meta.id || e.xml_file_id === meta.id);
     if (existing) return { expense: existing, duplicate: true };
     let xml: string | null = null;
     if (meta.kind === 'xml') xml = Buffer.from(bytes).toString('utf8');
     else if (meta.kind === 'pdf') xml = await extractEmbeddedXml(bytes).catch(() => null);
     if (xml) {
-      const parsed = parseEInvoice(xml);
+      let parsed: ParsedEInvoice;
+      try { parsed = parseEInvoice(xml); } catch (e) { throw new FinanceError(`The e-invoice could not be read: ${(e as Error).message}`, 422); }
       const company = await this.company();
       if (company.vat_id && parsed.seller.vat_id === company.vat_id) {
         throw new FinanceError('This e-invoice was issued BY your company — it is an outgoing invoice, not an expense.', 422);
@@ -1049,7 +1118,7 @@ export class Finance {
   /* ----------------------------- bank ----------------------------- */
 
   async listBankAccounts(): Promise<BankAccount[]> {
-    return (await this.store.list<BankAccount>(COL.bankAccounts)).map((r) => r.data);
+    return (await this.store.list<BankAccount>(COL.bankAccounts, ALL)).map((r) => r.data);
   }
 
   async saveBankAccount(aid: string | null, input: unknown, actor: string): Promise<BankAccount> {
@@ -1072,7 +1141,7 @@ export class Finance {
   }
 
   async listBankTx(year: string): Promise<BankTransaction[]> {
-    return (await this.store.list<BankTransaction>(COL.bankTx(year))).map((r) => r.data)
+    return (await this.store.list<BankTransaction>(COL.bankTx(year), ALL)).map((r) => r.data)
       .sort((a, b) => b.booking_date.localeCompare(a.booking_date));
   }
 
@@ -1156,7 +1225,11 @@ export class Finance {
     return true;
   }
 
-  async matchBankTx(txId: string, input: unknown, actor: string): Promise<BankTransaction> {
+  matchBankTx(txId: string, input: unknown, actor: string): Promise<BankTransaction> {
+    return withBankLock(() => this.matchBankTxLocked(txId, input, actor));
+  }
+
+  private async matchBankTxLocked(txId: string, input: unknown, actor: string): Promise<BankTransaction> {
     const i = asObj(input);
     const t = await this.findBankTx(txId);
     if (!t) throw new FinanceError('Bank transaction not found.', 404);
@@ -1170,7 +1243,9 @@ export class Finance {
     if (kind === 'document') {
       const d = await this.getDocument(target);
       const open = d.totals.gross_cents - d.paid_cents;
-      amount = 'amount_cents' in i || 'amount' in i ? readCents(i, 'amount') : Math.min(remaining, open > 0 ? open : remaining);
+      amount = 'amount_cents' in i || 'amount' in i ? Math.abs(readCents(i, 'amount')) : Math.min(remaining, open > 0 ? open : remaining);
+      if (amount > remaining) throw new FinanceError(`Only ${formatMoney(remaining, d.currency)} of this transaction is still unassigned.`, 422);
+      if (!amount) throw new FinanceError('The amount to assign is zero.');
       // Positive = settles the document: money in for an invoice, money out
       // for a credit note. The other direction undoes a settlement.
       const settles = (t.amount_cents > 0) === (d.type !== 'credit_note');
@@ -1178,7 +1253,9 @@ export class Finance {
       await this.recordPayment(target, { amount_cents: signed, date: t.booking_date, method: 'bank', reference: t.purpose.slice(0, 200), bank_tx_id: t.id }, actor);
     } else {
       const e = await this.getExpense(target);
-      amount = 'amount_cents' in i || 'amount' in i ? readCents(i, 'amount') : Math.min(remaining, e.gross_cents - e.paid_cents);
+      amount = 'amount_cents' in i || 'amount' in i ? Math.abs(readCents(i, 'amount')) : Math.min(remaining, e.gross_cents - e.paid_cents);
+      if (amount > remaining) throw new FinanceError(`Only ${formatMoney(remaining, 'EUR')} of this transaction is still unassigned.`, 422);
+      if (!amount) throw new FinanceError('The amount to assign is zero.');
       const paid = e.paid_cents + amount;
       await this.store.put(COL.expenses, e.id, {
         ...e, paid_cents: paid, status: paid >= e.gross_cents ? 'paid' : 'open', paid_date: t.booking_date, bank_tx_id: t.id, updated_at: this.stamp(),
@@ -1197,7 +1274,11 @@ export class Finance {
    * receipt can be attached afterwards; until then it shows as "kein Beleg" and
    * is listed as missing in the accountant package.
    */
-  async expenseFromBankTx(txId: string, input: unknown, actor: string): Promise<{ expense: Expense; transaction: BankTransaction }> {
+  expenseFromBankTx(txId: string, input: unknown, actor: string): Promise<{ expense: Expense; transaction: BankTransaction }> {
+    return withBankLock(() => this.expenseFromBankTxLocked(txId, input, actor));
+  }
+
+  private async expenseFromBankTxLocked(txId: string, input: unknown, actor: string): Promise<{ expense: Expense; transaction: BankTransaction }> {
     const i = asObj(input);
     const t = await this.findBankTx(txId);
     if (!t) throw new FinanceError('Bank transaction not found.', 404);
@@ -1215,7 +1296,7 @@ export class Finance {
       description: t.purpose.slice(0, 200),
       note: 'Aus Bankumsatz angelegt — Beleg nachreichen.',
     }, actor, { source: 'bank' });
-    const transaction = await this.matchBankTx(txId, { kind: 'expense', id: expense.id }, actor);
+    const transaction = await this.matchBankTxLocked(txId, { kind: 'expense', id: expense.id }, actor);
     return { expense: await this.getExpense(expense.id), transaction };
   }
 
@@ -1230,12 +1311,18 @@ export class Finance {
     return next;
   }
 
-  async unmatchBankTx(txId: string, actor: string): Promise<BankTransaction> {
+  unmatchBankTx(txId: string, actor: string): Promise<BankTransaction> {
+    return withBankLock(() => this.unmatchBankTxLocked(txId, actor));
+  }
+
+  private async unmatchBankTxLocked(txId: string, actor: string): Promise<BankTransaction> {
     const t = await this.findBankTx(txId);
     if (!t) throw new FinanceError('Bank transaction not found.', 404);
     for (const p of (await this.listPayments()).filter((p) => p.bank_tx_id === t.id)) {
-      await this.store.delete(COL.payments, p.id);
-      await this.recalcPaid(p.document_id);
+      await withLock(async () => {
+        await this.store.delete(COL.payments, p.id);
+        await this.recalcPaid(p.document_id);
+      });
     }
     for (const m of t.matches ?? []) {
       if (m.kind !== 'expense') continue;
@@ -1261,7 +1348,7 @@ export class Finance {
   /* ----------------------------- recurring ----------------------------- */
 
   async listRecurring(): Promise<RecurringTemplate[]> {
-    return (await this.store.list<RecurringTemplate>(COL.recurring)).map((r) => r.data);
+    return (await this.store.list<RecurringTemplate>(COL.recurring, ALL)).map((r) => r.data);
   }
 
   async saveRecurring(rid: string | null, input: unknown, actor: string): Promise<RecurringTemplate> {
@@ -1297,7 +1384,17 @@ export class Finance {
         const months = tpl.interval === 'yearly' ? 12 : tpl.interval === 'quarterly' ? 3 : 1;
         const periodEnd = addDays(addMonthsAnchored(tpl.next_date, months, tpl.anchor_day ?? Number(tpl.next_date.slice(8, 10))), -1);
         try {
-          if (!(await this.store.get(COL.refs, ref))) {
+          // A ref already exists when an earlier run created the draft but
+          // failed to finalize or send it: resume that document instead of
+          // silently moving on (and leaving the period unbilled).
+          const existing = await this.store.get<{ document_id: string }>(COL.refs, ref);
+          const prior = existing ? await this.store.get<FinanceDocument>(COL.documents, existing.document_id) : undefined;
+          if (prior) {
+            let final = prior;
+            if (tpl.auto_finalize && final.status === 'draft') final = await this.finalize(final.id, actor);
+            if (tpl.auto_finalize && tpl.auto_send && final.status !== 'draft' && !final.sent_at && final.recipient.email && this.canSendMail()) await this.sendDocument(final.id, {}, actor);
+            if (final !== prior) created.push(final.id);
+          } else {
             const doc = await this.createDocument({
               type: 'invoice', contact_id: tpl.contact_id, title: tpl.title, intro: tpl.intro, closing: tpl.closing,
               price_mode: tpl.price_mode, issue_date: tpl.next_date,
@@ -1309,7 +1406,7 @@ export class Finance {
             let final = doc;
             if (tpl.auto_finalize) {
               final = await this.finalize(doc.id, actor);
-              if (tpl.auto_send && final.recipient.email && this.deps.sendEmail) await this.sendDocument(final.id, {}, actor);
+              if (tpl.auto_send && final.recipient.email && this.canSendMail()) await this.sendDocument(final.id, {}, actor);
             }
             created.push(final.id);
             tpl = { ...tpl, last_document_id: final.id };

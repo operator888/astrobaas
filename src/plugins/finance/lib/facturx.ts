@@ -18,6 +18,7 @@
  * Python library; full PDF/A conformance is best confirmed with veraPDF.
  */
 import { createHash } from 'node:crypto';
+import { inflateSync } from 'node:zlib';
 import {
   PDFArray, PDFDict, PDFDocument, PDFHexString, PDFName, PDFNumber, PDFRawStream, PDFString,
   decodePDFRawStream,
@@ -195,9 +196,39 @@ export async function extractEmbeddedXml(pdfBytes: Uint8Array): Promise<string |
     const efDict = spec.lookupMaybe(PDFName.of('EF'), PDFDict);
     const stream = efDict?.lookup(PDFName.of('F'));
     if (!(stream instanceof PDFRawStream)) continue;
-    const bytes = decodePDFRawStream(stream).decode();
+    const bytes = inflateBounded(stream);
+    if (!bytes) continue;
     const text = new TextDecoder('utf-8').decode(bytes).replace(/^﻿/, '');
     if (/<(\w+:)?(CrossIndustryInvoice|Invoice|CreditNote)[\s>]/.test(text.slice(0, 4000))) return text;
   }
   return null;
+}
+
+/** Largest embedded XML we inflate — matches the XML reader's own ceiling. */
+const EMBEDDED_XML_MAX = 20 * 1024 * 1024;
+
+/**
+ * Decode an embedded file stream WITHOUT trusting its compression ratio: a
+ * 200 KB Flate stream can expand to gigabytes and take the process down.
+ * Flate (the only filter real producers use for the XML) is inflated with a
+ * hard output cap; other filters go through pdf-lib only when the raw stream
+ * is small enough that their bounded expansion cannot hurt.
+ */
+function inflateBounded(stream: PDFRawStream): Uint8Array | null {
+  const filter = stream.dict.lookup(PDFName.of('Filter'));
+  const names = filter instanceof PDFArray
+    ? Array.from({ length: filter.size() }, (_, i) => String(filter.lookup(i)))
+    : filter ? [String(filter)] : [];
+  try {
+    if (names.length === 0) return stream.contents.length <= EMBEDDED_XML_MAX ? stream.contents : null;
+    if (names.length === 1 && names[0] === '/FlateDecode') {
+      return new Uint8Array(inflateSync(stream.contents, { maxOutputLength: EMBEDDED_XML_MAX }));
+    }
+    if (stream.contents.length > 1024 * 1024) return null;
+    const out = decodePDFRawStream(stream).decode();
+    return out.length <= EMBEDDED_XML_MAX ? out : null;
+  } catch {
+    // Over the cap, or corrupt: not an e-invoice we can read.
+    return null;
+  }
 }

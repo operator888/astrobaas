@@ -54,6 +54,7 @@ export function vatReturn(
     '46': 0, '47': 0, '84': 0, '85': 0, '66': 0, '67': 0,
   };
   const notes: string[] = [];
+  let foreignVat = 0;
   const add = (doc: FinanceDocument, factor: number) => {
     for (const g of doc.totals.groups) {
       const net = Math.round(g.net_cents * factor) * sign(doc);
@@ -96,10 +97,15 @@ export function vatReturn(
       if (isEu(e.supplier_country) && e.supplier_country !== 'DE') { kz['46'] += net; kz['47'] += tax; }
       else { kz['84'] += net; kz['85'] += tax; }
       kz['67'] += tax;
+    } else if (e.supplier_country && e.supplier_country !== 'DE' && e.tax_cents) {
+      // Foreign VAT (a Greek hotel, an Austrian conference) is not German
+      // input tax — it can only be refunded through the EU refund procedure.
+      foreignVat += e.tax_cents;
     } else {
       kz['66'] += e.tax_cents;
     }
   }
+  if (foreignVat) notes.push(`Foreign VAT of ${(foreignVat / 100).toFixed(2)} € on expenses from suppliers outside Germany is not deductible here (Vorsteuer-Vergütungsverfahren via BZSt).`);
   if (smallBusiness) notes.push('Kleinunternehmer: no VAT return is normally due; figures are for information only.');
   if (kz['84'] > 0) notes.push('Reverse-charge purchases from outside the EU (Kz 84/85): check the supplier\'s country on each expense.');
   const payable = kz['81_tax'] + kz['86_tax'] + kz['47'] + kz['85'] - kz['66'] - kz['67'];
@@ -253,15 +259,27 @@ export interface BookingContext {
   bankAccounts: ReadonlyMap<string, number>;
 }
 
+/*
+ * Personal accounts: debtors live in 10000–69999, creditors in 70000–99999.
+ * A contact that is both customer and supplier has one number of each, so
+ * the account is chosen by role — never the customer account for a purchase.
+ */
+const inRange = (n: unknown, lo: number, hi: number): number | undefined => {
+  const v = Number(n);
+  return Number.isInteger(v) && v >= lo && v <= hi ? v : undefined;
+};
+
 function debitor(ctx: BookingContext, contactId?: string): number {
   const c = contactId ? ctx.contacts.get(contactId) : undefined;
-  if (ctx.settings.datev_use_personal_accounts && c?.datev_account) return c.datev_account;
+  const own = c && (inRange(c.customer_number, 10000, 69999) ?? inRange(c.datev_account, 10000, 69999));
+  if (ctx.settings.datev_use_personal_accounts && own) return own;
   return accountFor('ledger', 'debitor_default', ctx.chart, ctx.settings.account_overrides).account;
 }
 
 function kreditor(ctx: BookingContext, contactId?: string): number {
   const c = contactId ? ctx.contacts.get(contactId) : undefined;
-  if (ctx.settings.datev_use_personal_accounts && c?.datev_account) return c.datev_account;
+  const own = c && (inRange(c.vendor_number, 70000, 99999) ?? inRange(c.datev_account, 70000, 99999));
+  if (ctx.settings.datev_use_personal_accounts && own) return own;
   return accountFor('ledger', 'kreditor_default', ctx.chart, ctx.settings.account_overrides).account;
 }
 
@@ -363,7 +381,8 @@ export function datevBookings(
     if (e.reverse_charge) warnings.push(`${docNo} (${e.supplier_name}): reverse-charge purchase exported with BU key ${inputTaxKey(19, true, ov)} — confirm the key with your Steuerberater.`);
     if (e.status === 'paid' && e.paid_date && inPeriod(e.paid_date, period) && !e.bank_tx_id) {
       out.push({
-        amount_cents: e.gross_cents, sh: 'S', account: kred,
+        // A supplier credit note (negative gross) paid back to us flips the side.
+        amount_cents: Math.abs(e.gross_cents), sh: e.gross_cents >= 0 ? 'S' : 'H', account: kred,
         contra: accountFor('ledger', 'bank', ctx.chart, ov).account,
         date: e.paid_date, doc_no: docNo, text: latinize(`Zahlung ${e.supplier_name}`),
       });
@@ -379,7 +398,7 @@ export function datevBookings(
       if (m.kind !== 'expense') continue;
       const e = expenses.find((x) => x.id === m.id);
       out.push({
-        amount_cents: Math.abs(m.amount_cents), sh: 'S', account: kreditor(ctx, e?.contact_id), contra: bank,
+        amount_cents: Math.abs(m.amount_cents), sh: t.amount_cents < 0 ? 'S' : 'H', account: kreditor(ctx, e?.contact_id), contra: bank,
         date: t.booking_date, doc_no: e?.invoice_number || m.id.slice(0, 12), text: latinize(`Zahlung ${e?.supplier_name ?? t.counterparty_name ?? ''}`),
       });
     }

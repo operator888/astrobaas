@@ -314,7 +314,7 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
       if (url.searchParams.get('format') !== 'csv') return json(zm);
       const eur = (c: number) => (Math.round(c / 100)).toString();
       const csv = '\uFEFF' + ['Land;USt-IdNr.;Name;Art;Betrag EUR (gerundet);Betrag exakt']
-        .concat(zm.rows.map((r) => [r.country, r.vat_id, `"${r.name.replace(/"/g, '""')}"`, r.kind, eur(r.amount_cents), (r.amount_cents / 100).toFixed(2).replace('.', ',')].join(';'))).join('\r\n') + '\r\n';
+        .concat(zm.rows.map((r) => [r.country, r.vat_id, `"${csvSafe(r.name).replace(/"/g, '""')}"`, r.kind, eur(r.amount_cents), (r.amount_cents / 100).toFixed(2).replace('.', ',')].join(';'))).join('\r\n') + '\r\n';
       return file(csv, 'text/csv; charset=utf-8', `ZM_${from}_${to}.csv`);
     }),
     r('GET', '/reports/pnl', async ({ fin, url }) => {
@@ -478,8 +478,20 @@ function cents(c: number): string {
   return (c / 100).toFixed(2).replace('.', ',');
 }
 
+/**
+ * A spreadsheet cell that starts with = + - @ (or a tab / CR) is run as a
+ * formula when the file is opened in Excel. Names come from uploaded
+ * e-invoices, so they are untrusted: prefix those with an apostrophe.
+ * Plain numbers ("-12,50") are left alone so amounts stay numeric.
+ */
+export function csvSafe(v: unknown): string {
+  const s = String(v ?? '').replace(/[\r\n]+/g, ' ');
+  if (/^-?\d+(?:[.,]\d+)?$/.test(s)) return s;
+  return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+}
+
 function row(cells: (string | undefined)[]): string {
-  return cells.map((c) => `"${String(c ?? '').replace(/"/g, '""').replace(/[\r\n]+/g, ' ')}"`).join(';');
+  return cells.map((c) => `"${csvSafe(c).replace(/"/g, '""')}"`).join(';');
 }
 
 async function datevExport(fin: Finance, url: URL) {

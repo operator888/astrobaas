@@ -73,6 +73,17 @@ export function decimalToCents(input: string): number | null {
 
 /** Parse a date in ISO, German (13.10.2026 / 13.10.26) or YYYYMMDD form. */
 export function parseDate(input: unknown): string | null {
+  const iso = parseDateLoose(input);
+  if (!iso) return null;
+  // Reject impossible calendar dates (31.02., month 13): they would reach a
+  // finalized invoice, or make date arithmetic throw later on.
+  const [y, mo, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (y < 1900 || y > 2999 || dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return null;
+  return iso;
+}
+
+function parseDateLoose(input: unknown): string | null {
   if (typeof input !== 'string') return null;
   const s = input.trim();
   let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
