@@ -34,6 +34,7 @@
  * why. The headroom is small and deliberate.
  */
 import { IMPORT_BODY_LIMIT, MAX_HTTP_WXR_BYTES } from './import/limits';
+import { FINANCE_UPLOAD_MAX_BYTES } from '../plugins/finance/lib/limits';
 import { MAX_VIDEO_SIZE } from './media/ingest';
 import { MAX_ARCHIVE_BYTES } from './backup/offsite';
 import { MAX_SUBMISSION_FILE_SIZE } from './media/private-files';
@@ -112,6 +113,15 @@ export const BODY_LIMITS: readonly BodyLimitRule[] = [
     bytes: Math.ceil(MAX_SUBMISSION_FILE_SIZE * 1.2),
     derivesFrom: 'MAX_SUBMISSION_FILE_SIZE (src/lib/media/private-files.ts)',
     purpose: 'A file attached to a public form by an anonymous visitor',
+  },
+  {
+    location: '/api/plugin/finance/upload/*',
+    match: (p) => /^\/api\/plugin\/finance\/upload\/[^/]+\/?$/.test(p),
+    // Staff-only: receipts, bank statements and e-invoices for the finance
+    // module. Raw bodies, so the headroom is for nothing but rounding.
+    bytes: Math.ceil(FINANCE_UPLOAD_MAX_BYTES * 1.2),
+    derivesFrom: 'FINANCE_UPLOAD_MAX_BYTES (src/plugins/finance/lib/limits.ts)',
+    purpose: 'A receipt, bank statement or e-invoice uploaded to the finance module',
   },
 ];
 

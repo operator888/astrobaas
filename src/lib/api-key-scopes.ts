@@ -15,6 +15,10 @@
 /** Resources that are scope-gated. Other endpoints are governed by role only. */
 export const SCOPED_RESOURCES = [
   'posts', 'content', 'media', 'products', 'orders', 'customers', 'messages',
+  // The finance module's routes (/api/plugin/finance/…) declare finance:read /
+  // finance:write, so a website or agent can hold a key that touches invoices
+  // and nothing else. Listed here so such a key can be minted.
+  'finance',
 ] as const;
 
 /**

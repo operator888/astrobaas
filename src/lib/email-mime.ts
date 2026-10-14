@@ -189,6 +189,26 @@ export interface MimeInput {
   replyTo?: string;
   /** Extra headers — see `extraHeaderPairs`. */
   headers?: Record<string, string>;
+  /** Files to attach; the message becomes multipart/mixed. */
+  attachments?: { filename: string; contentType: string; content: Uint8Array }[];
+}
+
+/** A filename safe inside a quoted header parameter, plus its RFC 2231 form. */
+function attachmentNameParams(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  const clean = String(name ?? 'attachment').replace(/[\u0000-\u001f\u007f"\\]/g, '').slice(0, 150) || 'attachment';
+  const ascii = clean.replace(/[^\x20-\x7e]/g, '_');
+  if (ascii === clean) return `filename="${clean}"`;
+  return `filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(clean)}`;
+}
+
+/** A MIME type from a caller is a header value: keep it to `type/subtype`. */
+function safeContentType(t: string): string {
+  return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i.test(t) ? t : 'application/octet-stream';
+}
+
+function base64Bytes(bytes: Uint8Array): string {
+  return (Buffer.from(bytes).toString('base64').match(/.{1,76}/g) ?? []).join('\r\n');
 }
 
 /**
@@ -225,30 +245,58 @@ export function buildMimeMessage(input: MimeInput): string {
     headers.push(`${name}: ${safe}`);
   }
 
+  // The readable part: plain text, or text + HTML as alternatives.
+  let partHeaders: string[];
+  let partBody: string;
   if (!input.html) {
-    headers.push(
+    partHeaders = ['Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64'];
+    partBody = base64Lines(input.text);
+  } else {
+    partHeaders = [`Content-Type: multipart/alternative; boundary="${boundary}"`];
+    partBody = [
+      `--${boundary}`,
       'Content-Type: text/plain; charset=utf-8',
       'Content-Transfer-Encoding: base64',
-    );
-    return `${headers.join('\r\n')}\r\n\r\n${base64Lines(input.text)}`;
+      '',
+      base64Lines(input.text),
+      `--${boundary}`,
+      'Content-Type: text/html; charset=utf-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      base64Lines(input.html),
+      `--${boundary}--`,
+    ].join('\r\n');
   }
 
-  headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
-  const body = [
-    `--${boundary}`,
-    'Content-Type: text/plain; charset=utf-8',
-    'Content-Transfer-Encoding: base64',
-    '',
-    base64Lines(input.text),
-    `--${boundary}`,
-    'Content-Type: text/html; charset=utf-8',
-    'Content-Transfer-Encoding: base64',
-    '',
-    base64Lines(input.html),
-    `--${boundary}--`,
-  ].join('\r\n');
+  const attachments = input.attachments ?? [];
+  if (!attachments.length) {
+    headers.push(...partHeaders);
+    return `${headers.join('\r\n')}\r\n\r\n${partBody}`;
+  }
 
-  return `${headers.join('\r\n')}\r\n\r\n${body}`;
+  // With attachments the whole message is multipart/mixed: the readable part
+  // first, then one part per file.
+  const mixed = `${boundary}_m`;
+  headers.push(`Content-Type: multipart/mixed; boundary="${mixed}"`);
+  const parts = [
+    `--${mixed}`,
+    ...partHeaders,
+    '',
+    partBody,
+  ];
+  for (const a of attachments) {
+    const params = attachmentNameParams(a.filename);
+    parts.push(
+      `--${mixed}`,
+      `Content-Type: ${safeContentType(a.contentType)}; ${params.replace(/filename/g, 'name')}`,
+      'Content-Transfer-Encoding: base64',
+      `Content-Disposition: attachment; ${params}`,
+      '',
+      base64Bytes(a.content),
+    );
+  }
+  parts.push(`--${mixed}--`);
+  return `${headers.join('\r\n')}\r\n\r\n${parts.join('\r\n')}`;
 }
 
 /**

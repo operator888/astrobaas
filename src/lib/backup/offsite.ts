@@ -35,7 +35,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { constants as bufferConstants } from 'node:buffer';
-import { getDbPath, getUploadsDir } from '../paths';
+import { getDbPath, getUploadsDir, getPrivateUploadsDir } from '../paths';
 import { s3, type S3Config } from './s3';
 import { localSqlitePath, snapshotLocalSqlite } from '../storage/local-sqlite';
 
@@ -188,6 +188,28 @@ async function collectUploads(): Promise<{ uploads: { path: string; base64: stri
 }
 
 /**
+ * Private archives that belong in a backup: the bookkeeping archive under
+ * `<private uploads>/finance/` — archived invoice PDFs, e-invoice XML and the
+ * receipts behind every expense. GoBD requires them for eight to ten years
+ * and, unlike a thumbnail, a receipt cannot be regenerated. Only that subtree
+ * goes in: the rest of the private directory holds working files (exports in
+ * flight) that a restore should not resurrect.
+ */
+const PRIVATE_BACKUP_SUBDIRS = ['finance'];
+
+async function collectPrivateArchive(): Promise<{ files: { path: string; base64: string }[]; overBudget: boolean }> {
+  const root = getPrivateUploadsDir();
+  const found: { rel: string; full: string }[] = [];
+  for (const sub of PRIVATE_BACKUP_SUBDIRS) await walk(path.join(root, sub), root, found);
+  let total = 0;
+  for (const f of found) total += (await fs.stat(f.full)).size;
+  if (total > MAX_UPLOADS_TOTAL_BYTES) return { files: [], overBudget: true };
+  const files: { path: string; base64: string }[] = [];
+  for (const f of found) files.push({ path: f.rel.split(path.sep).join('/'), base64: (await fs.readFile(f.full)).toString('base64') });
+  return { files, overBudget: false };
+}
+
+/**
  * Build the archive for whichever driver is running.
  *
  * The `kind` field is in the payload rather than only in the filename, so a
@@ -210,6 +232,7 @@ export async function buildPayload(
   }
 
   const { uploads, skipped, overBudget } = await collectUploads();
+  const { files: privateFiles, overBudget: privateOverBudget } = await collectPrivateArchive();
   // When the uploads folder is too large for one in-memory JSON string, the
   // DATABASE still goes (it is the irreplaceable part); the note tells the
   // operator to sync the files separately.
@@ -219,6 +242,12 @@ export async function buildPayload(
       `The uploads directory is larger than ${Math.round(MAX_UPLOADS_TOTAL_BYTES / 1024 / 1024)} MB `
       + 'and was NOT included — the whole archive is one JSON string held in memory, and it would '
       + 'overflow. The database is backed up; sync the uploads folder separately (rsync/rclone).',
+    );
+  }
+  if (privateOverBudget) {
+    notes.push(
+      `The bookkeeping archive (private uploads/finance) is larger than ${Math.round(MAX_UPLOADS_TOTAL_BYTES / 1024 / 1024)} MB `
+      + 'and was NOT included. Sync that folder separately, or download the yearly Steuerberater package.',
     );
   }
 
@@ -260,7 +289,7 @@ export async function buildPayload(
     // and then again on every scheduler tick, because the failure was retried
     // each minute. snapshotLocalSqlite is told how many bytes can fit, measures
     // the live database from its page count, and refuses without copying.
-    const uploadChars = uploads.reduce((n, u) => n + u.base64.length + u.path.length, 0);
+    const uploadChars = [...uploads, ...privateFiles].reduce((n, u) => n + u.base64.length + u.path.length, 0);
     const roomChars = (opts.maxArchiveChars ?? MAX_ARCHIVE_CHARS) - ARCHIVE_OVERHEAD_CHARS - uploadChars;
     const maxBytes = Math.max(0, Math.floor((roomChars * 3) / 4));
     const where = localSqlitePath(databaseUrl) || databaseUrl;
@@ -289,6 +318,7 @@ export async function buildPayload(
       created_at: new Date().toISOString(),
       sqlite_base64: sqlite.toString('base64'),
       uploads,
+      private_files: privateFiles,
       notes,
     }));
     if (!body) return { ok: false, error: 'The database is too large to archive as a single JSON blob. Use the provider\'s own dump tooling.' };
@@ -310,6 +340,7 @@ export async function buildPayload(
     created_at: new Date().toISOString(),
     db,
     uploads,
+    private_files: privateFiles,
     notes,
   }));
   if (!body) return { ok: false, error: 'The site is too large to archive as a single JSON blob. Reduce the uploads folder or use external backup tooling.' };

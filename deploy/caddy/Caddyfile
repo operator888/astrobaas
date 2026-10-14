@@ -143,6 +143,16 @@ cms.example.com {
 		reverse_proxy 127.0.0.1:3002
 	}
 
+	# Receipts, bank statements and e-invoices for the finance module (staff only).
+	@finance_upload path_regexp finance_upload ^/api/plugin/finance/upload/[^/]+/?$
+	handle @finance_upload {
+		# <- FINANCE_UPLOAD_MAX_BYTES * 1.2 (src/plugins/finance/lib/limits.ts)
+		request_body {
+			max_size 18MB
+		}
+		reverse_proxy 127.0.0.1:3002
+	}
+
 	# --- Serving uploads ---------------------------------------------------
 	#
 	# IMAGES ONLY, and by extension, for the same reason as the nginx config:

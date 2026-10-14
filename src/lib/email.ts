@@ -65,7 +65,27 @@ export interface EmailMessage {
    * here — use `replyTo`.
    */
   headers?: Record<string, string>;
+  /**
+   * Files sent with the message — an invoice PDF, an e-invoice XML.
+   *
+   * Every transport carries them: the SMTP path writes a multipart/mixed
+   * message, SMTP2GO sends them in its `attachments` field, the webhook
+   * transport forwards them base64-encoded, and the console transport names
+   * them. A transport that silently dropped an attachment would send an
+   * invoice email with no invoice in it.
+   */
+  attachments?: EmailAttachment[];
 }
+
+export interface EmailAttachment {
+  /** Shown to the recipient. Cleaned of quotes and line breaks when written. */
+  filename: string;
+  contentType: string;
+  content: Uint8Array;
+}
+
+/** Total attachment size a single message may carry. Most providers stop at 10–25 MB. */
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
 /** What a transport can report back about a message it handed off. */
 export interface SendResult {
@@ -244,7 +264,10 @@ export const consoleTransport: EmailTransport = {
     // Reply-To shown only when set, so the line is unchanged for an install
     // that has not configured one.
     const replyTo = msg.replyTo ? ` reply-to=${msg.replyTo}` : '';
-    console.log(`\n[email:console] to=${msg.to}${replyTo} subject=${JSON.stringify(msg.subject)}\n${msg.text}\n`);
+    const files = msg.attachments?.length
+      ? ` attachments=${msg.attachments.map((a) => `${a.filename} (${a.content.length} B)`).join(', ')}`
+      : '';
+    console.log(`\n[email:console] to=${msg.to}${replyTo} subject=${JSON.stringify(msg.subject)}${files}\n${msg.text}\n`);
   },
 };
 
@@ -253,7 +276,10 @@ export function webhookTransport(url: string, secret?: string): EmailTransport {
   return {
     name: 'webhook',
     async send(msg) {
-      const body = JSON.stringify(msg);
+      // Bytes do not survive JSON; attachments travel base64-encoded.
+      const body = JSON.stringify(msg.attachments?.length
+        ? { ...msg, attachments: msg.attachments.map((a) => ({ filename: a.filename, contentType: a.contentType, contentBase64: Buffer.from(a.content).toString('base64') })) }
+        : msg);
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (secret) {
         const sig = crypto.createHmac('sha256', secret).update(body).digest('hex');
@@ -437,6 +463,10 @@ export function prepareEmail(
   _transportName: string,
   env: NodeJS.ProcessEnv = process.env,
 ): EmailMessage {
+  const attached = (msg.attachments ?? []).reduce((n, a) => n + (a.content?.length ?? 0), 0);
+  if (attached > MAX_ATTACHMENT_BYTES) {
+    throw new Error(`Refusing to send: attachments total ${Math.ceil(attached / 1048576)} MB, over the ${MAX_ATTACHMENT_BYTES / 1048576} MB limit.`);
+  }
   if (msg.category === 'bulk' && !campaignsEnabled(env)) {
     throw new Error(
       'Refusing to send bulk mail: this install has EMAIL_CAMPAIGNS=0. '

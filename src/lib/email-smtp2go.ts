@@ -71,6 +71,15 @@ export function smtp2goTransport(opts: Smtp2goOptions): EmailTransport {
           subject: msg.subject,
           text_body: msg.text,
           ...(msg.html ? { html_body: msg.html } : {}),
+          ...(msg.attachments?.length
+            ? {
+              attachments: msg.attachments.map((a) => ({
+                filename: a.filename,
+                fileblob: Buffer.from(a.content).toString('base64'),
+                mimetype: a.contentType,
+              })),
+            }
+            : {}),
           // Absent rather than empty when there is nothing to send, so a
           // message with no headers makes exactly the request it always did.
           ...(customHeaders.length ? { custom_headers: customHeaders } : {}),

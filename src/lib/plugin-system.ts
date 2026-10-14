@@ -196,6 +196,19 @@ export const PLUGIN_HOOKS = {
   /** action(order: Order, previousStatus: string) — after an order status change. */
   AFTER_ORDER_STATUS_CHANGE: 'after_order_status_change',
   /**
+   * action({ now: number }) — once per scheduler sweep, on the process that
+   * holds the scheduler lease (so ONCE per database, not once per replica).
+   *
+   * For a plugin that has to do something when a date arrives rather than when
+   * a request does: issue a recurring invoice, expire a trial, send a digest.
+   * The sweep waits for every handler (errors are isolated and logged), so a
+   * slow handler delays the next sweep rather than overlapping it. Sweeps run
+   * about once a minute, so a handler that does real work should throttle
+   * itself and be idempotent. Fires only for ACTIVE plugins, and only after the
+   * plugin registry has finished bootstrapping.
+   */
+  SCHEDULER_TICK: 'scheduler_tick',
+  /**
    * filter(result: OrderLineExtras, ctx: { line, product, name }) -> OrderLineExtras
    *
    * The one extension point a VERTICAL needs: inspect an order line against the
@@ -406,6 +419,23 @@ export class PluginManager {
         return acc;
       }
     }, value);
+  }
+
+  /**
+   * Like `doAction`, but resolves after every handler — including async ones —
+   * has settled. For callers that must not start the next piece of work until
+   * this one is done (the scheduler sweep). Errors are isolated and logged.
+   */
+  async doActionAwait(hookName: string, ...args: any[]): Promise<void> {
+    const fns = this.actions.get(hookName);
+    if (!fns) return;
+    for (const fn of [...fns]) {
+      try {
+        await fn(...args);
+      } catch (err) {
+        console.error(`Error in action "${hookName}":`, err);
+      }
+    }
   }
 
   /** Fire all active actions for `hookName` (errors are isolated). */

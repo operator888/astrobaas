@@ -108,6 +108,7 @@ The same table, for shops. Everything money-shaped is integer **cents**.
 | `BEFORE_ORDER_SAVE` | filter | `(order, ctx: { isNew }) => order` | Before an order persists (checkout or admin edit). Validation runs **before** this hook; totals are re-checked **after** it. |
 | `AFTER_ORDER_CREATE` | action | `(order: Order) => void` | Checkout completed. The hook the new-sale notifier uses. |
 | `AFTER_ORDER_STATUS_CHANGE` | action | `(order, previousStatus) => void` | After a status change, with the status it left. |
+| `SCHEDULER_TICK` | action | `({ now }) => void \| Promise<void>` | Once per scheduler sweep (about a minute) on the process holding the scheduler lease — once per database, not per replica. For work that is due on a **date** rather than a request: recurring invoices, expiring trials, digests. The sweep **awaits** every handler (errors isolated and logged), so a slow handler delays the next sweep instead of overlapping it; do real work only when it is due and make it idempotent. Active plugins only. |
 | `ORDER_LINE_EXTRAS` | filter | `(result, ctx: { line, product, name }) => result` | **The vertical's extension point.** Return `{ ok: true, patch }` to accept (patch is frozen onto the stored line) or `{ ok: false, message, code?, params? }` to refuse the whole order with a 400. `message` is the English fallback; `code` is a stable machine-readable reason (`optical.prescription_required`) and `params` the values a storefront needs to build its own sentence — both optional, so a plugin built before they existed keeps working, and both are how a refusal gets translated at all (core returns `message` verbatim and the plugin is not in this repository). **If the incoming value is already `ok: false`, return it unchanged** — a refusal must survive later plugins. With no plugin registered the initial value passes through, so an install without your module accepts the order and stores the raw data instead of 500ing. |
 | `COMMERCE_SCHEMA` | filter | `(schema, ctx: { name, variant? }) => schema` | Publish a machine-readable schema for a storefront form (this is how the optical module serves `/api/commerce/prescription-schema`). Initial value is `null`; return it **unchanged** for names you don't recognise. Core answers 404 while it stays null — which is also what an install without the module should look like. |
 | `PAYMENT_PROVIDERS` | filter | `(providers: PaymentProvider[]) => PaymentProvider[]` | Contribute payment gateways. Collected once at bootstrap from **active** plugins only. See "Payment providers from a plugin" below. |
@@ -433,6 +434,10 @@ uses). Records are stored generically, and a type that declared
 - **`ai-assistant`** — a chat bubble on every public page, backed by the
   operator's own provider under **Settings → AI assistant**. The widget never
   holds the API key: it posts to `/api/assistant/chat` on this origin.
+- **`finance`** — invoicing and bookkeeping. The reference for a plugin that
+  is a whole application: ~70 API routes, one admin screen with its own
+  client app, namespaced storage with a hash-chained log, outbound events and
+  MCP tools. See `src/plugins/finance/README.md`.
 - **`popups`** — one opt-in overlay, on the operator's terms. Deactivating it
   does not set a flag; `/popup.js` stops being served at all.
 
@@ -1018,7 +1023,10 @@ namespace. `list()` filters in-process and is **capped at 5,000 records**. Past
 that it returns the first 5,000 and logs a `console.warn` — the caller gets a
 prefix with no error and no flag to check, so a plugin that can grow past the
 cap must page or count some other way rather than trusting the array it got
-back. A plugin regularly hitting it has outgrown this store.
+back. A plugin regularly hitting it has outgrown this store. A plugin whose
+records must never silently drop off the end (bookkeeping kept for ten years)
+can pass `list(collection, { uncapped: true })` and accept the memory cost of
+reading the whole collection.
 
 Collection names may not begin with `_`; those are reserved for the platform.
 

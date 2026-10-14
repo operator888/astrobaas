@@ -250,8 +250,22 @@ async function main() {
       return walk(apiRoot, 0);
     };
 
+    // Plugin-owned routes are not files: they are declared in the plugin's
+    // routes module as r('METHOD', '/path', …) under /api/plugin/<id>/.
+    const pluginRoutes = [];
+    for (const dir of fs.readdirSync(path.join(apiRoot, '..', '..', 'plugins'))) {
+      const file = path.join(apiRoot, '..', '..', 'plugins', dir, 'routes.ts');
+      if (!fs.existsSync(file)) continue;
+      for (const m of fs.readFileSync(file, 'utf8').matchAll(/\br\('(GET|POST|PUT|PATCH|DELETE)',\s*'([^']+)'/g)) {
+        pluginRoutes.push({ method: m[1], re: new RegExp(`^plugin/${dir}${m[2].replace(/:[a-z_]+/g, '[^/]+').replace(/\//g, '\\/')}$`) });
+      }
+    }
+    const pluginRouteExists = (method, p) => pluginRoutes.some((r) => r.method === method && r.re.test(p.replace(/\*/g, 'x')));
     const missing = [];
-    for (const r of refs) if (!routeExists(r.path)) missing.push(`${r.method} /api/${r.path}`);
+    for (const r of refs) {
+      const ok = r.path.startsWith('plugin/') ? pluginRouteExists(r.method, r.path) : routeExists(r.path);
+      if (!ok) missing.push(`${r.method} /api/${r.path}`);
+    }
     check(`every MCP tool targets an existing route${missing.length ? ` (missing: ${missing.join(', ')})` : ''}`,
       missing.length === 0);
     check('the tool surface covers commerce, media and settings', (() => {

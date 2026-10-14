@@ -38,13 +38,14 @@ import smtp2go from './smtp2go';
 import consentBanner from './consent-banner';
 import aiAssistant from './ai-assistant';
 import popups from './popups';
+import finance from './finance';
 import { loadExternalPlugins, parsePluginSpecifiers } from './external';
 import { enabledBuiltinCollections } from '../core/builtin-collections';
 import { settingBool } from '../lib/settings-map';
 import { span } from '../lib/request-profile';
 import { RegistryRecheck, pluginRegistryFingerprint } from '../lib/plugin-platform/registry-recheck';
 
-export const BUNDLED_PLUGINS: Plugin[] = [readingTime, draftWatermark, productCatalog, printStyles, smtp2go, consentBanner, aiAssistant, popups];
+export const BUNDLED_PLUGINS: Plugin[] = [readingTime, draftWatermark, productCatalog, printStyles, smtp2go, consentBanner, aiAssistant, popups, finance];
 
 /**
  * The in-flight (or completed) bootstrap.
