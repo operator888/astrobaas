@@ -28,6 +28,7 @@ import { startLexwareImport, importContactsCsv } from './lib/importer';
 import { contactDisplayName, addDays, addMonths } from './lib/format';
 import type { BankTransaction, Contact, DocumentType, Expense, FinanceDocument } from './lib/types';
 import { portalCsp, renderPortal } from './lib/portal';
+import { fullExport, integrityReport } from './lib/safety';
 
 const P = '/api/plugin/finance';
 
@@ -376,6 +377,14 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
       if (warnings.length) entries.push({ name: 'Hinweise.txt', data: new TextEncoder().encode(warnings.join('\n') + '\n') });
       return file(buildZip(entries), 'application/zip', `Steuerberater_${from}_${to}.zip`);
     }),
+
+    /* ------------------------------ data safety ------------------------------ */
+    r('GET', '/integrity', async ({ fin }) => json(await integrityReport(fin))),
+    r('GET', '/export/full', async ({ fin, actor }) => {
+      const out = await fullExport(fin);
+      await fin.log(actor, 'export.full', 'export', 'full', `${out.manifest.records} records, ${out.manifest.files} files`);
+      return file(out.zip, 'application/zip', out.filename);
+    }, { admin: true }),
 
     /* ------------------------------ imports & log ------------------------------ */
     r('POST', '/import/lexware', async ({ fin, request, actor }) => {

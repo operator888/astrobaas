@@ -757,7 +757,7 @@
       doc.payments && doc.payments.length ? h('div', {}, h('h3', { class: 'mb-2 mt-4 text-sm font-semibold' }, 'Zahlungen'),
         table(['Datum', 'Art', 'Referenz', { label: 'Betrag', right: true }, ''], doc.payments.map((p) => ({
           cells: [date(p.date), p.method === 'discount' ? (p.discount_kind === 'skonto' ? 'Skonto' : 'Differenz ausgebucht') : (PAYMETHOD[p.method] || p.method), p.reference || p.note || '', money(p.amount_cents, doc.currency),
-            p.method === 'offset' ? '' : btn('entfernen', (e) => { e.stopPropagation(); run(async () => { if (!confirmBox('Zahlung entfernen?')) return; await api('DELETE', `/payments/${p.id}`); route(); }); }, 'link')],
+            p.method === 'offset' || (p.method === 'discount' && p.pair_id) || doc.status === 'cancelled' ? '' : btn('entfernen', (e) => { e.stopPropagation(); run(async () => { if (!confirmBox('Zahlung entfernen?')) return; await api('DELETE', `/payments/${p.id}`); route(); }); }, 'link')],
         })))) : null,
       doc.quote_response ? h('div', { class: `rounded-md p-3 text-sm ${doc.quote_response.status === 'accepted' ? 'bg-green-50 text-green-800' : 'bg-gray-50 text-gray-700'}` },
         `${doc.quote_response.status === 'accepted' ? 'Angenommen' : 'Abgelehnt'} am ${date(doc.quote_response.at)}${doc.quote_response.via === 'portal' ? ' online im Kundenportal' : ''}${doc.quote_response.name ? ` von ${doc.quote_response.name}` : ''}`,
@@ -1366,6 +1366,7 @@
       if (j.status === 'running') setTimeout(() => pollJob(id), 2500);
     };
     const verifyOut = h('span', { class: 'text-xs' });
+    const integrityOut = h('div', { class: 'mt-3' });
 
     return h('div', { class: 'space-y-5' },
       title('Einstellungen'),
@@ -1413,6 +1414,22 @@
           h('li', {}, 'Verkäufe aus Websites / Lizenzserver: POST /api/plugin/finance/sales (API-Schlüssel) oder signiert an /api/plugin/finance/inbound/sale (FINANCE_INBOUND_SECRET). Idempotent über source + external_id.'),
           h('li', {}, 'Webhooks (Einstellungen → Webhooks): invoice.finalized, invoice.paid, invoice.cancelled, invoice.dunned, credit_note.finalized, quote.finalized/accepted/rejected, document.sent, expense.created.'),
           h('li', {}, 'MCP für askTheodor/Claude: npx astrobaas-mcp — Werkzeuge finance_* (Übersicht, Rechnungen, Zahlungen, Ausgaben, USt).'))),
+      card(h('h3', { class: 'mb-2 text-sm font-semibold' }, 'Datensicherheit'),
+        h('ul', { class: 'mb-3 list-disc space-y-1 pl-5 text-xs text-gray-600' },
+          h('li', {}, 'Abgeschlossene Rechnungen, Gutschriften, gebuchte Ausgaben, Kontakte und Bankumsätze lassen sich nicht löschen — nur Entwürfe. Korrekturen laufen über Gutschrift bzw. Storno.'),
+          h('li', {}, 'PDFs, E-Rechnungen und Belege liegen unveränderlich im Archiv; jede Datei wird beim Lesen per SHA-256 geprüft.'),
+          h('li', {}, 'Die Server-Sicherung (Admin → Tools → Backup, auch die automatische Offsite-Sicherung) enthält die Datenbank UND das Belegarchiv. Zusätzlich: regelmäßig den Komplettexport auf einem eigenen Datenträger ablegen.')),
+        h('div', { class: 'flex flex-wrap items-center gap-2' },
+          btn('Integrität prüfen', () => run(async () => {
+            const r = await api('GET', '/integrity');
+            fill(integrityOut,
+              h('div', { class: `rounded-md p-3 text-sm ${r.ok ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800'}` },
+                r.ok ? `✓ Alles vollständig und unverändert — ${r.counts.documents} Belege, ${r.counts.payments} Zahlungen, ${r.counts.expenses} Ausgaben, ${r.counts.archived_files} archivierte Dateien, ${r.counts.log_entries} Protokolleinträge geprüft.`
+                  : `✗ ${r.problems.filter((p) => p.severity === 'error').length} Problem(e) gefunden — Details unten.`),
+              r.problems.length ? h('ul', { class: 'mt-2 space-y-1 text-xs' }, r.problems.map((p) => h('li', { class: p.severity === 'error' ? 'text-red-700' : 'text-amber-700' }, `${p.severity === 'error' ? '✗' : '!'} ${p.message}`))) : null);
+          }), 'primary'),
+          btn('Komplettexport herunterladen (ZIP)', () => download('/export/full'))),
+        integrityOut),
       card(h('h3', { class: 'mb-2 text-sm font-semibold' }, 'GoBD-Protokoll'),
         h('p', { class: 'mb-2 text-xs text-gray-500' }, 'Jede Änderung wird in einer Hash-Kette protokolliert. Die Prüfung erkennt nachträglich veränderte oder gelöschte Einträge.'),
         h('div', { class: 'flex items-center gap-3' }, btn(`Protokoll ${today().slice(0, 4)} prüfen`, () => run(async () => {

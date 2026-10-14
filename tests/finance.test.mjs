@@ -902,6 +902,136 @@ check('leitweg: a valid id passes (04011000-1234512345-06)', T.leitwegIdValid('0
 check('leitweg: a mistyped id fails', T.leitwegIdValid('04011000-1234512345-07') === false && T.leitwegIdValid('04-12345-67') === false);
 check('leitweg: an ordinary PO number is not judged', T.leitwegIdValid('PO-778') === null);
 
+// ---- Money audit (Oct 2026): cancellations, payments, bank, reports, data safety
+{
+  const SAFE = await loadTs('src/plugins/finance/lib/safety.ts');
+  const ZIPR = await import('node:zlib');
+  const mk = async (companyExtra = {}) => {
+    const store = memoryStore();
+    let clock = new Date('2026-10-14T09:00:00Z');
+    const fin = new S.Finance(store, { fontBytes: async () => font, sendEmail: async () => {}, emailStatus: () => ({ active: true, label: 'smtp' }), siteUrl: async () => 'https://x', now: () => clock });
+    await fin.saveCompany({ ...seller, ...companyExtra }, 'a');
+    const cust = await fin.createContact({ company_name: 'K GmbH', email: 'k@k.de', billing_address: { street: 'S 1', zip: '1', city: 'Köln', country: 'DE' } }, 'a');
+    const inv = async (x = {}) => fin.finalize((await fin.createDocument({ contact_id: cust.id, lines: [{ name: 'A', quantity: 1, unit_price_cents: 100000 }], ...x }, 'a')).id, 'a');
+    const year = { from: '2026-01-01', to: '2026-12-31' };
+    return { fin, store, cust, inv, year, setClock: (d) => { clock = new Date(d); } };
+  };
+
+  {
+    const { fin, cust } = await mk();
+    const d = await fin.createDocument({ contact_id: cust.id, lines: [{ name: 'A', quantity: 1, unit_price_cents: 100 }] }, 'a');
+    check('skonto: off by default — a fresh company gives new invoices no Skonto', d.skonto === undefined && T.skontoFor({ ...d, issue_date: '2026-10-14' }) === null);
+  }
+  {
+    const { fin, inv, year } = await mk();
+    const p = await inv({ invoice_kind: 'partial' });
+    await fin.recordPayment(p.id, {}, 'a');
+    const f = await inv({ invoice_kind: 'final', deducts: [p.id], lines: [{ name: 'Gesamt', quantity: 1, unit_price_cents: 400000 }] });
+    await fin.recordPayment(f.id, {}, 'a');
+    await rejects('cancel: a down payment deducted by a live final invoice cannot be cancelled', () => fin.cancelInvoice(p.id, 'a'), /cancel the final invoice first/);
+    const r = await fin.cancelInvoice(f.id, 'a');
+    const vr = R.vatReturn(year, 'soll', await fin.listDocuments(), await fin.listPayments(), []);
+    check('cancel final: only the remainder is reversed, the down payment stays declared', vr.kz['81'] === 100000 && vr.kz['81_tax'] === 19000);
+    check('cancel final: the credit note owes back exactly what was paid on the final invoice', T.dueCents(r.credit_note) - r.credit_note.paid_cents === 357000);
+  }
+  {
+    const { fin, inv, year } = await mk();
+    const i = await inv({ skonto: { percent: 2, days: 7 } });
+    await fin.recordPayment(i.id, { amount_cents: 116620, settle: 'skonto' }, 'a');
+    const r = await fin.cancelInvoice(i.id, 'a');
+    const vr = R.vatReturn(year, 'soll', await fin.listDocuments(), await fin.listPayments(), []);
+    check('cancel after Skonto: VAT nets to zero (no double reduction)', vr.kz['81'] === 0 && vr.kz['81_tax'] === 0);
+    check('cancel after Skonto: refund owed = cash received', T.dueCents(r.credit_note) - r.credit_note.paid_cents === 116620);
+    const pnl = R.profitLoss(year, await fin.listDocuments(), [], [], await fin.listPayments());
+    check('cancel after Skonto: P&L revenue back to zero', pnl.revenue_net_cents === 0);
+    await rejects('payments: none on a cancelled invoice', () => fin.recordPayment(i.id, { amount_cents: 100 }, 'a'), /cancelled/);
+    const off = (await fin.listPayments(r.credit_note.id)).find((p) => p.method === 'discount');
+    await rejects('payments: the Storno reversal of a Skonto cannot be deleted alone', () => fin.deletePayment(off.id, 'a'), /cannot be removed/);
+  }
+  {
+    const { fin, inv } = await mk();
+    const i = await inv();
+    await fin.recordPayment(i.id, {}, 'a');
+    await fin.recordPayment(i.id, { amount_cents: 119000 }, 'a');
+    const r = await fin.cancelInvoice(i.id, 'a');
+    check('cancel overpaid: the credit note owes back everything paid (2 × 1.190)', T.dueCents(r.credit_note) - r.credit_note.paid_cents === 238000);
+  }
+  {
+    const { fin, inv } = await mk();
+    const zero = await inv({ lines: [{ name: 'Gratis', quantity: 1, unit_price_cents: 0 }] });
+    check('finalize: a 0 € invoice is settled at once, never dunned', zero.status === 'paid');
+  }
+  {
+    const { fin, inv } = await mk();
+    const i = await inv({ skonto: { percent: 2, days: 7 } });
+    const acct = await fin.saveBankAccount(null, { name: 'Giro' }, 'a');
+    await fin.addBankTransactions(acct.id, [{ booking_date: '2026-10-15', amount_cents: 116620, purpose: `RE ${i.number}`, counterparty_name: 'K GmbH' }], 'a');
+    let tx = (await fin.listBankTx('2026'))[0];
+    if (tx.status !== 'matched') tx = await fin.matchBankTx(tx.id, { kind: 'document', id: i.id }, 'a');
+    const pay = (await fin.listPayments(i.id)).find((p) => p.method === 'bank');
+    const disc = (await fin.listPayments(i.id)).find((p) => p.method === 'discount');
+    await rejects('payments: a Skonto record goes only with its payment', () => fin.deletePayment(disc.id, 'a'), /belongs to a payment/);
+    const after = await fin.deletePayment(pay.id, 'a');
+    const tx2 = (await fin.listBankTx('2026'))[0];
+    check('delete bank payment: Skonto goes with it, invoice open again, bank line free again', after.status === 'open' && after.paid_cents === 0 && (tx2.matches ?? []).length === 0 && tx2.status === 'unmatched' && tx.status === 'matched');
+    const [a, b] = await Promise.all([
+      fin.importStatement(acct.id, 'Buchungstag;Betrag;Verwendungszweck;Name Zahlungsbeteiligter\n16.10.2026;50,00;dup;X', 'a'),
+      fin.importStatement(acct.id, 'Buchungstag;Betrag;Verwendungszweck;Name Zahlungsbeteiligter\n16.10.2026;50,00;dup;X', 'a'),
+    ]);
+    check('bank: the same statement imported twice at once yields one transaction', a.imported + b.imported === 1);
+  }
+  {
+    const { fin, cust, inv } = await mk();
+    const q = await fin.finalize((await fin.createDocument({ type: 'quote', contact_id: cust.id, lines: [{ name: 'A', quantity: 1, unit_price_cents: 100 }] }, 'a')).id, 'a');
+    await Promise.all([fin.quoteToInvoice(q.id, 'a'), fin.quoteToInvoice(q.id, 'a')]);
+    check('quote→invoice: a double click creates one invoice', (await fin.listDocuments({ type: 'invoice' })).filter((d) => d.from_quote_id === q.id).length === 1);
+    const p = await inv({ invoice_kind: 'partial' });
+    await rejects('final: cannot deduct a down payment taxed differently', () => fin.createDocument({ contact_id: cust.id, invoice_kind: 'final', tax_treatment: 'export', deducts: [p.id], lines: [{ name: 'X', quantity: 1, unit_price_cents: 100 }] }, 'a'), /different tax case/);
+  }
+  {
+    const vr = R.vatReturn({ from: '2026-01-01', to: '2026-12-31' }, 'soll', [], [], [{ id: 'e', status: 'open', date: '2026-05-01', supplier_country: 'AT', reverse_charge: true, net_cents: 100000, tax_cents: 0, gross_cents: 100000, lines: [{ category: 'literature', net_cents: 100000, tax_rate: 7, tax_cents: 0 }] }]);
+    check('vat: a 7 % reverse-charge purchase is declared at 7 %', vr.kz['47'] === 7000 && vr.kz['67'] === 7000);
+    const ctx = { chart: 'SKR03', settings: { account_overrides: {}, datev_use_personal_accounts: false }, contacts: new Map(), bankAccounts: new Map() };
+    const ex = (id, country, tax) => ({ id, status: 'open', supplier_name: id, supplier_country: country, date: '2026-05-01', net_cents: 100000, tax_cents: tax, gross_cents: 100000 + tax, lines: [{ category: 'travel', net_cents: 100000, tax_rate: 19, tax_cents: tax }] });
+    const bk = R.datevBookings({ from: '2026-01-01', to: '2026-12-31' }, ctx, [], [], [ex('Hotel', 'CY', 19000), ex('Kiosk', 'DE', 0), ex('Odd', 'DE', 18000)], []).bookings;
+    check('datev: foreign VAT gets no input-tax key', bk.find((b) => /Hotel/.test(b.text)).bu === '');
+    check('datev: a receipt without VAT gets no input-tax key', bk.find((b) => /Kiosk/.test(b.text)).bu === '');
+    check('datev: a receipt whose VAT differs from the rate books net + VAT on 1570', bk.some((b) => /Odd/.test(b.text) && b.amount_cents === 100000 && b.bu === '') && bk.some((b) => b.account === 1570 && b.amount_cents === 18000));
+  }
+  {
+    // Ist basis: three instalments declare exactly the invoice's VAT.
+    const { fin, inv } = await mk();
+    const i = await inv({ lines: [{ name: 'B', quantity: 1, unit_price_cents: 1866, tax_rate: 7 }] });
+    for (const amt of [666, 666, 665]) await fin.recordPayment(i.id, { amount_cents: amt }, 'a');
+    const vr = R.vatReturn({ from: '2026-01-01', to: '2026-12-31' }, 'ist', await fin.listDocuments(), await fin.listPayments(), []);
+    check('vat (Ist): instalments add up to the invoice VAT to the cent', vr.kz['86'] === 1866 && vr.kz['86_tax'] === 131);
+  }
+  {
+    // Integrity check and full export.
+    const { fin, store, inv, cust } = await mk();
+    const i = await inv();
+    await fin.recordPayment(i.id, {}, 'a');
+    const e = await fin.saveExpense(null, { supplier_name: 'Hetzner', lines: [{ category: 'hosting', gross_cents: 11900, tax_rate: 19 }] }, 'a');
+    const ok = await SAFE.integrityReport(fin);
+    check('integrity: a clean set of books reports ok', ok.ok && ok.problems.filter((p) => p.severity === 'error').length === 0 && ok.counts.documents === 1);
+    const docs = [...store.data.get('documents').entries()];
+    const [did, d] = docs.find(([, x]) => x.id === i.id);
+    store.data.get('documents').set(did, { ...d, lines: [{ ...d.lines[0], unit_price_cents: 1 }] });
+    const bad = await SAFE.integrityReport(fin);
+    check('integrity: an invoice altered after issue is detected', !bad.ok && bad.problems.some((p) => /altered after it was issued/.test(p.message)));
+    store.data.get('documents').delete(did);
+    const gone = await SAFE.integrityReport(fin);
+    check('integrity: a deleted invoice is detected through its issued number', gone.problems.some((p) => /no longer exists/.test(p.message)));
+    store.data.get('documents').set(did, d);
+    const out = await SAFE.fullExport(fin);
+    const names = []; // read ZIP central directory names
+    const buf = Buffer.from(out.zip);
+    for (let k = 0; k < buf.length - 4; k++) if (buf.readUInt32LE(k) === 0x02014b50) { const n = buf.readUInt16LE(k + 28); names.push(buf.toString('utf8', k + 46, k + 46 + n)); }
+    check('export: contains every collection and the archived PDF', names.includes('data/documents.json') && names.includes('data/payments.json') && names.includes('data/expenses.json') && names.includes('data/contacts.json') && names.some((n) => /^files\/fa_.*\.pdf$/.test(n)) && names.includes('manifest.json') && names.some((n) => /^data\/log_2026\.json$/.test(n)));
+    void e; void cust; void ZIPR;
+  }
+}
+
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

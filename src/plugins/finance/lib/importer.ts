@@ -121,6 +121,11 @@ export async function runLexwareImport(fin: Finance, opts: LexwareImportOptions,
 }
 
 async function importOneVoucher(fin: Finance, client: LexwareClient, v: LxVoucher, contacts: Map<string, Contact>) {
+  // A number already issued here (by this app, or an earlier import of a
+  // different voucher) is never overwritten: that would make two documents
+  // share one number and lose the link to the first.
+  const taken = await fin.store.get<{ document_id: string }>(COL.numbers, v.voucherNumber);
+  if (taken) throw new Error(`number ${v.voucherNumber} is already used by another document here — not imported`);
   const path = v.voucherType === 'creditnote' ? `/credit-notes/${v.id}` : `/invoices/${v.id}`;
   const inv = await client.json<LxInvoice & { taxConditions?: { taxType?: string } }>(path);
   const treatment = mapTaxType(inv.taxConditions?.taxType);
@@ -132,9 +137,18 @@ async function importOneVoucher(fin: Finance, client: LexwareClient, v: LxVouche
   const contact = v.contactId ? contacts.get(v.contactId) : undefined;
   // Lexware's rounding is authoritative for its own invoices: keep its totals.
   if (lxGross && Math.abs(lxGross - totals.gross_cents) > 0) {
+    const lxTax = Math.round((inv.totalPrice?.totalTaxAmount ?? 0) * 100);
+    const lxNet = Math.round((inv.totalPrice?.totalNetAmount ?? 0) * 100);
+    // The VAT return reads the groups, so they must add up to the totals
+    // too: the rounding difference goes onto the largest group.
+    const big = [...totals.groups].sort((a, b) => Math.abs(b.net_cents) - Math.abs(a.net_cents))[0];
+    if (big) {
+      big.net_cents += lxNet - totals.net_cents;
+      big.tax_cents += lxTax - totals.tax_cents;
+    }
     totals.gross_cents = lxGross;
-    totals.tax_cents = Math.round((inv.totalPrice?.totalTaxAmount ?? 0) * 100);
-    totals.net_cents = Math.round((inv.totalPrice?.totalNetAmount ?? 0) * 100);
+    totals.tax_cents = lxTax;
+    totals.net_cents = lxNet;
   }
   let pdfId: string | undefined;
   const fileRes = await client.request(`${path}/file`, 'application/pdf');

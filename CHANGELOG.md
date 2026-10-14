@@ -11,6 +11,13 @@ semver yet because the API surface is pre-alpha.
 A new bundled plugin, **ECWS Billing** (E-Commerce Web Services; plugin id
 `finance`, `src/plugins/finance`), under **Admin → Billing**, limited to admins and managers.
 
+- Money audit (randomized invariant testing, 30,000+ operations incl. concurrent):
+  - **Cancellations:** a Storno of a final invoice reverses only the remainder; after Skonto it reverses the discount too; an overpaid invoice's excess moves to the credit note; a deducted down payment cannot be cancelled.
+  - **Payments:** none on cancelled invoices; deleting a payment takes its Skonto with it and frees exactly its bank amount; Storno offsets are protected.
+  - **Concurrency:** statement import, categorize, expenses and quote→invoice are locked; down-payment cancellation and final-invoice finalization are serialised.
+  - **Reports:** reverse charge at the line rate, cent-exact Ist instalments, and DATEV consistent with the VAT return (foreign VAT, odd receipt VAT on 1570, final invoices booked full + reversal).
+  - **Invoice dates:** 0 € and fully-deducted documents settle at once; a warning before back-dating; recurring catch-up dated on issue.
+  - **Data safety:** the site backup now includes the bookkeeping archive (restore never overwrites), plus an integrity check and a full data export.
 - Lexware parity pass (see `src/plugins/finance/LEXWARE-COMPARISON.md`): Skonto with
   automatic settlement and § 17 UStG correction, write-off of small differences,
   optional/alternative quote lines, customer portal with online quote acceptance,

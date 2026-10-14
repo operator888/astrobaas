@@ -85,15 +85,49 @@ export function vatReturn(
       add(d, -1, splitByGroups(p.amount_cents, bookingGroups(d)).map((x) => ({ ...x.group, net_cents: x.net_cents, tax_cents: x.tax_cents })));
     }
   } else {
-    // Ist: the share of each document paid inside the period.
+    // Ist: the share of each document paid inside the period. Shares are
+    // taken on the RUNNING total of payments, so a document paid in three
+    // instalments declares exactly its own VAT in the end — no cent lost to
+    // rounding each part separately. A discount is money never received:
+    // under Ist it is simply never taxed.
     const byId = new Map(booked.map((d) => [d.id, d]));
+    const perDoc = new Map<string, Payment[]>();
     for (const p of payments) {
-      // A discount is money never received: under Ist it is simply never taxed.
-      if (!inPeriod(p.date, period) || p.method === 'discount') continue;
-      const d = byId.get(p.document_id);
-      if (!d || dueCents(d) === 0) continue;
-      // Signed: a refund (negative payment) takes the VAT back out again.
-      add(d, p.amount_cents / dueCents(d));
+      if (p.method === 'discount' || !byId.has(p.document_id)) continue;
+      const list = perDoc.get(p.document_id) ?? [];
+      list.push(p);
+      perDoc.set(p.document_id, list);
+    }
+    for (const [did, list] of perDoc) {
+      const d = byId.get(did)!;
+      const due = dueCents(d);
+      if (!due) continue;
+      const groups = bookingGroups(d);
+      // Skonto / write-offs: never received, never taxed. Once the document
+      // is settled the declared total is exactly "groups minus the
+      // discounts" — the same figure the Soll basis reaches, to the cent.
+      const discounts = payments.filter((p) => p.method === 'discount' && p.document_id === did);
+      const discTotal = discounts.reduce((s, p) => s + p.amount_cents, 0);
+      const discNet = groups.map(() => 0);
+      const discTax = groups.map(() => 0);
+      for (const p of discounts) splitByGroups(p.amount_cents, groups).forEach((x, i) => { discNet[i] += x.net_cents; discTax[i] += x.tax_cents; });
+      const target = (cum: number) => groups.map((g, i) => {
+        if (cum + discTotal >= due) return { net: g.net_cents - discNet[i], tax: g.tax_cents - discTax[i] };
+        // An overpayment is not consideration: never more than the document.
+        const share = Math.min(cum, due);
+        return { net: Math.round((g.net_cents * share) / due), tax: Math.round((g.tax_cents * share) / due) };
+      });
+      list.sort((a, b) => a.date.localeCompare(b.date) || a.created_at.localeCompare(b.created_at));
+      let cum = 0;
+      let prev = target(0);
+      for (const p of list) {
+        cum += p.amount_cents;
+        const now = target(cum);
+        const delta = groups.map((g, i) => ({ ...g, net_cents: now[i].net - prev[i].net, tax_cents: now[i].tax - prev[i].tax }));
+        prev = now;
+        // Signed: a refund (negative payment) takes the VAT back out again.
+        if (inPeriod(p.date, period)) add(d, 1, delta);
+      }
     }
   }
   // Input tax always follows the invoice date (§15 UStG needs the invoice and
@@ -101,9 +135,12 @@ export function vatReturn(
   for (const e of expenses) {
     if (e.status === 'draft' || !inPeriod(e.date, period)) continue;
     if (e.reverse_charge) {
-      // §13b: we owe the VAT and deduct it again. 19 % on the net amount.
+      // §13b: we owe the VAT and deduct it again, at each line's own rate
+      // (7 % for books, 19 % for most services).
       const net = e.net_cents;
-      const tax = Math.round((net * 19) / 100);
+      const tax = e.lines.length
+        ? e.lines.reduce((s, l) => s + Math.round((l.net_cents * (l.tax_rate || 0)) / 100), 0)
+        : Math.round((net * 19) / 100);
       if (isEu(e.supplier_country) && e.supplier_country !== 'DE') { kz['46'] += net; kz['47'] += tax; }
       else { kz['84'] += net; kz['85'] += tax; }
       kz['67'] += tax;
@@ -199,7 +236,7 @@ export function profitLoss(period: Period, docs: readonly FinanceDocument[], exp
     if (p.method !== 'discount' || !inPeriod(p.date, period)) continue;
     const d = docById.get(p.document_id);
     if (!d) continue;
-    const net = splitByGroups(p.amount_cents, bookingGroups(d)).reduce((t, x) => t + x.net_cents, 0);
+    const net = splitByGroups(p.amount_cents, bookingGroups(d)).reduce((t, x) => t + x.net_cents, 0) * sign(d);
     revenue -= net;
     const m = p.date.slice(0, 7);
     byMonth[m] = (byMonth[m] ?? 0) - net;
@@ -250,9 +287,11 @@ export interface OpenItemRow {
 export function openItems(docs: readonly FinanceDocument[], expenses: readonly Expense[], today: string): OpenItemRow[] {
   const rows: OpenItemRow[] = [];
   for (const d of bookedDocuments(docs)) {
-    if (d.type !== 'invoice' || d.status === 'cancelled' || d.status === 'paid') continue;
+    if (d.type !== 'invoice' || d.status === 'cancelled') continue;
     const open = dueCents(d) - d.paid_cents;
-    if (open <= 0) continue;
+    // Paid exactly: nothing to list. Overpaid (open < 0): listed as a
+    // negative amount — money that has to go back to the customer.
+    if (open === 0) continue;
     rows.push({
       kind: 'receivable', id: d.id, number: d.number, name: d.recipient.name || '—', date: d.issue_date!,
       due_date: d.due_date, open_cents: open,
@@ -329,7 +368,13 @@ export function datevBookings(
     if (!inPeriod(d.issue_date, period)) continue;
     const deb = debitor(ctx, d.contact_id);
     if (d.invoice_kind === 'partial') warnings.push(`${d.number}: down-payment invoice booked as revenue — your Steuerberater may move it to "erhaltene Anzahlungen".`);
-    for (const g of bookingGroups(d)) {
+    // A final invoice: the full work, then each deducted down payment
+    // reversed with its own groups. Each booking's VAT is then exactly what
+    // its document printed, so DATEV's Automatikkonten derive the same tax
+    // as the VAT return (a single "remainder" booking can be a cent off).
+    const parts: { groups: readonly TaxGroup[]; reverse: boolean; ref?: string }[] = [{ groups: d.totals.groups, reverse: false }];
+    for (const p of d.deducts ?? []) parts.push({ groups: p.groups, reverse: true, ref: p.number });
+    for (const part of parts) for (const g of part.groups) {
       let rev: number;
       let automatic: boolean;
       try {
@@ -346,12 +391,12 @@ export function datevBookings(
       if (!automatic && g.tax_cents) warnings.push(`${d.number}: revenue account ${rev} is not an Automatikkonto; VAT may be missing in DATEV.`);
       out.push({
         amount_cents: Math.abs(gross),
-        sh: (d.type === 'credit_note') !== (gross < 0) ? 'H' : 'S',
+        sh: ((d.type === 'credit_note') !== (gross < 0)) !== part.reverse ? 'H' : 'S',
         account: deb,
         contra: rev,
         date: d.issue_date!,
         doc_no: d.number!,
-        text: latinize(`${d.type === 'credit_note' ? 'GS' : 'RE'} ${d.recipient.name ?? ''}`),
+        text: latinize(`${d.type === 'credit_note' ? 'GS' : 'RE'} ${part.reverse ? `abzgl. ${part.ref} ` : ''}${d.recipient.name ?? ''}`),
         service_date: d.service_date,
         due_date: d.due_date,
         eu_vat_id: d.tax_treatment === 'reverse_charge_eu' || d.tax_treatment === 'intra_community_supply' ? d.recipient.vat_id : undefined,
@@ -370,7 +415,7 @@ export function datevBookings(
       const key = d.tax_treatment === 'domestic' && (part.group.rate === 19 || part.group.rate === 7) ? `discount:${part.group.rate}` : 'discount:0';
       const { account } = accountFor('rev', key, ctx.chart, ov);
       out.push({
-        amount_cents: Math.abs(part.gross_cents), sh: part.gross_cents >= 0 ? 'S' : 'H', account, contra: debitor(ctx, d.contact_id),
+        amount_cents: Math.abs(part.gross_cents), sh: (part.gross_cents >= 0) !== (d.type === 'credit_note') ? 'S' : 'H', account, contra: debitor(ctx, d.contact_id),
         date: p.date, doc_no: d.number ?? '', text: latinize(`${p.discount_kind === 'skonto' ? 'Skonto' : 'Differenz'} ${d.recipient.name ?? ''}`),
       });
     }
@@ -402,16 +447,37 @@ export function datevBookings(
     if (e.status === 'draft' || !inPeriod(e.date, period)) continue;
     const kred = kreditor(ctx, e.contact_id);
     const docNo = e.invoice_number || e.id.slice(0, 12);
+    const foreign = !e.reverse_charge && !!e.supplier_country && e.supplier_country !== 'DE';
     for (const l of e.lines) {
       const { account, automatic } = accountFor('exp', l.category, ctx.chart, ov);
       const gross = e.reverse_charge ? l.net_cents : l.net_cents + l.tax_cents;
       if (!gross) continue;
+      // DATEV derives input tax from the key and the gross. That equals what
+      // the VAT return claims only when the receipt's VAT is the German rate
+      // applied to the net. Foreign VAT is a cost (no key); a receipt whose
+      // VAT differs is booked net + the VAT on the input-tax account, so both
+      // agree to the cent.
+      const keyed = !automatic && !e.reverse_charge && !foreign && (l.tax_rate === 19 || l.tax_rate === 7)
+        && Math.abs(Math.round((l.net_cents * l.tax_rate) / 100) - l.tax_cents) <= 0
+        && gross - Math.round((gross * 100) / (100 + l.tax_rate)) === l.tax_cents;
+      if (!e.reverse_charge && !foreign && l.tax_cents && !keyed) {
+        out.push({
+          amount_cents: Math.abs(l.net_cents), sh: l.net_cents >= 0 ? 'S' : 'H', account, contra: kred, bu: '',
+          date: e.date, doc_no: e.invoice_number || e.id.slice(0, 12),
+          text: latinize(`${e.supplier_name} ${l.description ?? categoryByKey(l.category).de}`), service_date: e.service_date, due_date: e.due_date,
+        });
+        out.push({
+          amount_cents: Math.abs(l.tax_cents), sh: l.tax_cents >= 0 ? 'S' : 'H', account: accountFor('ledger', 'input_vat', ctx.chart, ov).account, contra: kred, bu: '',
+          date: e.date, doc_no: e.invoice_number || e.id.slice(0, 12), text: latinize(`VSt ${e.supplier_name}`),
+        });
+        continue;
+      }
       out.push({
         amount_cents: Math.abs(gross),
         sh: gross >= 0 ? 'S' : 'H',
         account,
         contra: kred,
-        bu: automatic ? '' : inputTaxKey(l.tax_rate, !!e.reverse_charge, ov),
+        bu: automatic ? '' : e.reverse_charge ? inputTaxKey(l.tax_rate, true, ov) : keyed ? inputTaxKey(l.tax_rate, false, ov) : '',
         date: e.date,
         doc_no: docNo,
         text: latinize(`${e.supplier_name} ${l.description ?? categoryByKey(l.category).de}`),

@@ -72,6 +72,8 @@ export const LEDGER: Record<string, AccountDef> = {
   cash: { SKR03: 1000, SKR04: 1600 },
   transit: { SKR03: 1360, SKR04: 1460 },
   receivables: { SKR03: 1400, SKR04: 1200 },
+  /** Abziehbare Vorsteuer — for receipts whose VAT is booked on its own. */
+  input_vat: { SKR03: 1570, SKR04: 1400 },
   payables: { SKR03: 1600, SKR04: 3300 },
   /** Fallback personal accounts when personal accounts are off. */
   debitor_default: { SKR03: 10000, SKR04: 10000 },

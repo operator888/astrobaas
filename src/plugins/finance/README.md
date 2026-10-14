@@ -90,12 +90,22 @@ first.
 
 ## Data and retention
 
-Records live in the plugin's namespaced store; files (archived PDFs, XMLs,
-receipts) under `<private uploads>/finance/`, content-addressed and write-once,
-with a SHA-256 check on every read. Invoices and receipts must be kept 8 years
-(§ 147 AO as amended 2025). The offsite backup does not include private
-uploads — sync that directory separately, or download the yearly
-Steuerberater package as an archive copy.
+**Nothing booked can be deleted.**
+- Finalized invoices, credit notes and quotes, booked expenses, contacts (archive only) and bank transactions have no delete — only drafts do.
+- A finalized document cannot be edited. It is corrected by credit note or Storno, and a Storno reverses exactly what was declared, including down-payment deductions and Skonto.
+- A mistaken payment can be removed, and that removal is logged. The Skonto belonging to a payment goes with it. Storno offsets and their reversals cannot be removed.
+- Every change goes into a hash-chained log.
+
+**Files** (archived PDFs, XMLs, receipts) live under `<private uploads>/finance/`. They are content-addressed and write-once, with a SHA-256 check on every read. Invoices and receipts must be kept 8 years (§ 147 AO as amended 2025).
+
+**Backups:**
+- The site backup (Admin → Tools → Backup, and the automatic off-site backup) carries the database *and* `finance/`.
+- A restore brings back missing archive files and never overwrites an existing one.
+- Settings → Datensicherheit offers:
+  - **Integrität prüfen:** every issued number has its document, archived files exist and match their checksums, finalized content is unchanged, payments add up, bank assignments are backed by payments, and the log chain is intact.
+  - **Komplettexport:** every record as JSON plus every archived file, with checksums. Keep a copy on a disk you own.
+
+The integrity check is also available as `GET /api/plugin/finance/integrity` and the MCP tool `finance_integrity_check`.
 
 ## Verified against
 

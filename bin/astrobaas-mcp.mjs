@@ -690,6 +690,12 @@ function financeTools() {
       run: () => apiRequest('POST', `/api/plugin/finance/recurring/run`),
     },
     {
+      name: 'finance_integrity_check',
+      description: 'Check the books for missing, altered or inconsistent data: every issued number has its document, archived PDFs/receipts exist and match their checksums, payments add up, bank assignments are backed by payments, the change log chain is intact. Read-only.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: () => apiRequest('GET', `/api/plugin/finance/integrity`),
+    },
+    {
       name: 'finance_order_confirmation',
       description: 'Issue an Auftragsbestätigung (PDF) for an ACCEPTED quote; send:true emails it to the customer — confirm first.',
       inputSchema: { type: 'object', properties: { id, send: { type: 'boolean' } }, required: ['id'], additionalProperties: false },

@@ -368,6 +368,8 @@ export interface Payment {
    */
   method: 'bank' | 'cash' | 'stripe' | 'paypal' | 'card' | 'offset' | 'discount' | 'other';
   discount_kind?: 'skonto' | 'difference';
+  /** A discount record belongs to the cash payment it completed; they are deleted together. */
+  pair_id?: string;
   reference?: string;
   bank_tx_id?: string;
   note?: string;

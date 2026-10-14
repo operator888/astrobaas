@@ -106,6 +106,29 @@ function withBankLock<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
+ * Expense records: edits and bank payments write the same record. Lock
+ * order is always bank → expense (never the reverse).
+ */
+let expenseChain: Promise<unknown> = Promise.resolve();
+function withExpenseLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = expenseChain.then(fn, fn);
+  expenseChain = run.catch(() => undefined);
+  return run;
+}
+
+/**
+ * Down payments: cancelling an Abschlagsrechnung and finalizing a
+ * Schlussrechnung that deducts it must not interleave, or the down payment
+ * ends up both cancelled and deducted.
+ */
+let deductionChain: Promise<unknown> = Promise.resolve();
+function withDeductionLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = deductionChain.then(fn, fn);
+  deductionChain = run.catch(() => undefined);
+  return run;
+}
+
+/**
  * One run per key at a time, in this process. A second caller with the same
  * key waits for the first and gets its result — a retried webhook or a double
  * click must never issue a second invoice or a second credit note.
@@ -433,7 +456,7 @@ export class Finance {
    * Each must be a finalized, uncancelled Abschlagsrechnung of the same
    * customer, and not already settled by another final invoice.
    */
-  private async deductionsFor(ids: unknown, contactId: string | undefined, selfId?: string): Promise<FinanceDocument['deducts']> {
+  private async deductionsFor(ids: unknown, contactId: string | undefined, selfId?: string, treatment?: TaxTreatment): Promise<FinanceDocument['deducts']> {
     if (!Array.isArray(ids) || !ids.length) return undefined;
     const all = await this.listDocuments({ type: 'invoice' });
     const out: NonNullable<FinanceDocument['deducts']> = [];
@@ -443,6 +466,7 @@ export class Finance {
         throw new FinanceError('A final invoice can only deduct finalized down-payment invoices (Abschlagsrechnungen).', 422);
       }
       if (contactId && p.contact_id !== contactId) throw new FinanceError(`Down-payment invoice ${p.number} belongs to another customer.`, 422);
+      if (treatment && p.tax_treatment !== treatment) throw new FinanceError(`Down-payment invoice ${p.number} has a different tax case — a final invoice can only deduct down payments taxed the same way.`, 422);
       const taken = all.find((d) => d.id !== selfId && d.invoice_kind === 'final' && d.status !== 'cancelled' && d.deducts?.some((x) => x.id === p.id));
       if (taken) throw new FinanceError(`Down-payment invoice ${p.number} is already settled by ${taken.number ?? 'another final invoice draft'}.`, 409);
       out.push({ id: p.id, number: p.number!, net_cents: p.totals.net_cents, tax_cents: p.totals.tax_cents, gross_cents: p.totals.gross_cents, groups: p.totals.groups });
@@ -492,7 +516,7 @@ export class Finance {
     const invoiceKind: FinanceDocument['invoice_kind'] = type !== 'invoice' ? undefined
       : 'invoice_kind' in i ? (i.invoice_kind === 'partial' || i.invoice_kind === 'final' ? i.invoice_kind : 'standard') : base.invoice_kind;
     const deducts = invoiceKind === 'final'
-      ? ('deducts' in i ? await this.deductionsFor(i.deducts, contactId, base.id) : base.deducts)
+      ? ('deducts' in i ? await this.deductionsFor(i.deducts, contactId, base.id, tt) : base.deducts)
       : undefined;
     const skonto = type !== 'invoice' ? undefined
       : 'skonto' in i ? normSkonto(i.skonto) : base.id ? base.skonto : (contact?.skonto ?? company.default_skonto);
@@ -616,7 +640,7 @@ export class Finance {
     if (d.invoice_kind === 'final') {
       if (!d.deducts?.length) warnings.push('This final invoice deducts no down payments — pick the Abschlagsrechnungen it settles.');
       else {
-        try { await this.deductionsFor(d.deducts.map((x) => x.id), d.contact_id, d.id); } catch (e) { errors.push((e as Error).message); }
+        try { await this.deductionsFor(d.deducts.map((x) => x.id), d.contact_id, d.id, d.tax_treatment); } catch (e) { errors.push((e as Error).message); }
         if (dueCents(d) < 0) errors.push('The down payments exceed the final invoice total — correct the amounts or issue a credit note.');
       }
     }
@@ -656,6 +680,14 @@ export class Finance {
       }
     }
     if (d.type === 'invoice' && d.issue_date && daysBetween(d.issue_date, this.today()) > 30) warnings.push('The issue date is more than 30 days in the past.');
+    if (d.type !== 'quote') {
+      // Numbers are given in order; an issue date before the latest issued
+      // document of the same type gives a later number an earlier date —
+      // legal, but the first thing a tax audit asks about.
+      const issue = d.issue_date ?? this.today();
+      const later = (await this.listDocuments({ type: d.type })).find((x) => x.status !== 'draft' && !x.imported && x.issue_date && x.issue_date > issue);
+      if (later) warnings.push(`${later.number} is already dated ${later.issue_date}; this document will get a higher number with an earlier date (${issue}).`);
+    }
     // A zero-priced line is legal (a free item, an included service) but far
     // more often an amount that was never typed — and a finalized invoice
     // cannot be corrected, only cancelled. Say so before the point of no return.
@@ -670,6 +702,12 @@ export class Finance {
    * XML exactly as they will be sent. Irreversible by design.
    */
   async finalize(did: string, actor: string): Promise<FinanceDocument> {
+    const peek = await this.getDocument(did);
+    if (peek.invoice_kind === 'final' && peek.status === 'draft') return withDeductionLock(() => this.finalizeNow(did, actor));
+    return this.finalizeNow(did, actor);
+  }
+
+  private async finalizeNow(did: string, actor: string): Promise<FinanceDocument> {
     const result = await withLock(async () => {
       const d = await this.getDocument(did);
       if (d.status !== 'draft') throw new FinanceError('Already finalized.', 409);
@@ -694,7 +732,8 @@ export class Finance {
       const recipient = contact ? { ...this.recipientFromContact(contact), ...pickDefined(d.recipient) } : d.recipient;
       // Down payments are re-read: one cancelled since the draft was saved
       // must not be deducted.
-      const deducts = d.invoice_kind === 'final' ? await this.deductionsFor((d.deducts ?? []).map((x) => x.id), d.contact_id, d.id) : undefined;
+      const deducts = d.invoice_kind === 'final' ? await this.deductionsFor((d.deducts ?? []).map((x) => x.id), d.contact_id, d.id, d.tax_treatment)
+        : d.type === 'credit_note' && d.refers_to_id ? d.deducts : undefined;
       const totals = this.totalsOf({ ...d, deducts }, company.document_language);
       const finalized: FinanceDocument = {
         ...d,
@@ -723,6 +762,9 @@ export class Finance {
       await this.store.put(COL.counters, counterKey, nextCounter as unknown as Record<string, unknown>);
       await this.putDocument(finalized);
       await this.log(actor, 'document.finalize', d.type, d.id, `${number} finalized, ${formatMoney(totals.gross_cents, d.currency)}`);
+      // Nothing to pay (a 0 € invoice, a final invoice covered by its down
+      // payments): settled at once, so it is never dunned.
+      if ((d.type === 'invoice' || d.type === 'credit_note') && dueCents(finalized) <= 0) return this.recalcPaid(d.id);
       return finalized;
     });
     this.deps.fire?.(`${result.type === 'quote' ? 'quote' : result.type === 'credit_note' ? 'credit_note' : 'invoice'}.finalized`, publicDoc(result));
@@ -843,7 +885,12 @@ export class Finance {
     return { document, pdf_id: meta.id };
   }
 
-  async quoteToInvoice(did: string, actor: string): Promise<FinanceDocument> {
+  /** A double click must not create two invoices from one quote. */
+  quoteToInvoice(did: string, actor: string): Promise<FinanceDocument> {
+    return singleFlight(`to-invoice:${did}`, () => this.quoteToInvoiceOnce(did, actor));
+  }
+
+  private async quoteToInvoiceOnce(did: string, actor: string): Promise<FinanceDocument> {
     const q = await this.getDocument(did);
     if (q.type !== 'quote' || q.status === 'draft') throw new FinanceError('Finalize the quote first.', 409);
     if (q.invoice_id) throw new FinanceError('This quote was already turned into an invoice.', 409);
@@ -867,13 +914,24 @@ export class Finance {
    * at once, offset against whatever is still open.
    */
   cancelInvoice(did: string, actor: string, reason?: string): Promise<{ invoice: FinanceDocument; credit_note: FinanceDocument }> {
-    return singleFlight(`cancel:${did}`, () => this.cancelInvoiceOnce(did, actor, reason));
+    return singleFlight(`cancel:${did}`, async () => {
+      const inv = await this.getDocument(did);
+      return inv.invoice_kind === 'partial'
+        ? withDeductionLock(() => this.cancelInvoiceOnce(did, actor, reason))
+        : this.cancelInvoiceOnce(did, actor, reason);
+    });
   }
 
   private async cancelInvoiceOnce(did: string, actor: string, reason?: string): Promise<{ invoice: FinanceDocument; credit_note: FinanceDocument }> {
     const inv = await this.getDocument(did);
     if (inv.type !== 'invoice' || inv.status === 'draft') throw new FinanceError('Only a finalized invoice can be cancelled. Delete a draft instead.', 409);
     if (inv.status === 'cancelled') throw new FinanceError('Already cancelled.', 409);
+    if (inv.invoice_kind === 'partial') {
+      // Its amount is part of a final invoice's deduction; cancelling it
+      // alone would leave that part of the job untaxed.
+      const finalDoc = (await this.listDocuments({ type: 'invoice' })).find((d) => d.invoice_kind === 'final' && d.status !== 'cancelled' && d.status !== 'draft' && d.deducts?.some((x) => x.id === inv.id));
+      if (finalDoc) throw new FinanceError(`Down-payment invoice ${inv.number} is deducted by final invoice ${finalDoc.number} — cancel the final invoice first.`, 409);
+    }
     const settings = await this.settings();
     const cn = await this.createDocument({
       type: 'credit_note', contact_id: inv.contact_id, recipient: inv.recipient,
@@ -883,14 +941,31 @@ export class Finance {
       intro: `${settings.texts.credit_note_intro}${reason ? `\n${reason}` : ''}`,
       title: `${DOC_STRINGS[(inv.seller?.document_language) || 'de'].credit_note} zu ${inv.number}`,
     }, actor, { refers_to_id: inv.id, refers_to_number: inv.number });
+    if (inv.deducts?.length) {
+      // A final invoice declared only the remainder after its down payments;
+      // its Storno reverses exactly that — same deductions, mirrored.
+      const company = await this.company();
+      const withDeducts = { ...cn, deducts: inv.deducts };
+      await this.putDocument({ ...withDeducts, totals: this.totalsOf(withDeducts, company.document_language) });
+    }
     const finalCn = await this.finalize(cn.id, actor);
     return withLock(async () => {
       const fresh = await this.getDocument(did);
       const open = dueCents(fresh) - fresh.paid_cents;
-      if (open > 0) {
-        // Offset the open part of the invoice against the credit note.
+      if (open !== 0) {
+        // Offset the open part of the invoice against the credit note. An
+        // OVERPAID invoice (open < 0, the customer paid twice) moves the
+        // excess too, so the credit note shows everything owed back.
         await this.addPaymentRecord({ document_id: fresh.id, amount_cents: open, method: 'offset', reference: finalCn.number, date: finalCn.issue_date! });
         await this.addPaymentRecord({ document_id: finalCn.id, amount_cents: open, method: 'offset', reference: fresh.number, date: finalCn.issue_date! });
+      }
+      // Skonto / written-off differences already lowered revenue and VAT.
+      // The credit note reverses the full amount, so the discount is
+      // reversed with it (in the credit note's period) — otherwise the
+      // reduction would count twice. What stays open on the credit note is
+      // exactly the cash the customer paid.
+      for (const p of (await this.listPayments(did)).filter((x) => x.method === 'discount')) {
+        await this.addPaymentRecord({ document_id: finalCn.id, amount_cents: p.amount_cents, method: 'discount', discount_kind: p.discount_kind, pair_id: `storno:${fresh.id}`, reference: fresh.number, date: finalCn.issue_date!, note: 'Storno des Skontos / der Differenz' });
       }
       const invNext = { ...(await this.recalcPaid(did)), status: 'cancelled' as const, cancelled_by_id: finalCn.id, updated_at: this.stamp() };
       await this.putDocument(invNext);
@@ -931,6 +1006,9 @@ export class Finance {
     const out = await withLock(async () => {
       const d = await this.getDocument(did);
       if (d.status === 'draft' || d.type === 'quote') throw new FinanceError('Payments can only be recorded on finalized invoices and credit notes.', 409);
+      // Money for a cancelled invoice belongs to its credit note (as a
+      // refund owed) — booked here it would vanish from open items.
+      if (d.status === 'cancelled') throw new FinanceError(`Invoice ${d.number} is cancelled — record the money on its credit note instead.`, 409);
       const open = dueCents(d) - d.paid_cents;
       const amount = 'amount' in i || 'amount_cents' in i ? readCents(i, 'amount') : open;
       if (!amount) throw new FinanceError('The payment amount is zero.');
@@ -952,7 +1030,7 @@ export class Finance {
       });
       if (settle) {
         await this.addPaymentRecord({
-          document_id: did, amount_cents: rest, date, method: 'discount', discount_kind: settle,
+          document_id: did, amount_cents: rest, date, method: 'discount', discount_kind: settle, pair_id: payment.id,
           note: settle === 'skonto' ? 'Skonto' : 'Differenz ausgebucht', bank_tx_id: str(i.bank_tx_id, 60),
         });
       }
@@ -964,16 +1042,33 @@ export class Finance {
     return out;
   }
 
-  async deletePayment(pid: string, actor: string): Promise<FinanceDocument> {
-    return withLock(async () => {
-      const p = await this.store.get<Payment>(COL.payments, pid);
-      if (!p) throw new FinanceError('Payment not found.', 404);
-      await this.store.delete(COL.payments, pid);
-      if (p.bank_tx_id) await this.unlinkBankTx(p.bank_tx_id, 'document', p.document_id);
-      const d = await this.recalcPaid(p.document_id);
-      await this.log(actor, 'payment.delete', d.type, d.id, `Payment ${pid} removed (${formatMoney(p.amount_cents, d.currency)})`);
-      return d;
-    });
+  /**
+   * Remove a mistaken payment. Always bank lock first, then the main lock —
+   * the same order bank matching uses, so the two can never deadlock or
+   * write over each other.
+   */
+  deletePayment(pid: string, actor: string): Promise<FinanceDocument> {
+    return withBankLock(() => withLock(() => this.deletePaymentLocked(pid, actor)));
+  }
+
+  private async deletePaymentLocked(pid: string, actor: string): Promise<FinanceDocument> {
+    const p = await this.store.get<Payment>(COL.payments, pid);
+    if (!p) throw new FinanceError('Payment not found.', 404);
+    if (p.method === 'offset' || p.pair_id?.startsWith('storno:')) {
+      throw new FinanceError('This entry offsets an invoice against its credit note (Storno) and cannot be removed on its own.', 409);
+    }
+    const all = await this.listPayments(p.document_id);
+    if (p.method === 'discount' && p.pair_id && all.some((x) => x.id === p.pair_id)) {
+      throw new FinanceError('This Skonto / difference belongs to a payment — remove that payment and it goes with it.', 409);
+    }
+    const doc = await this.getDocument(p.document_id);
+    if (doc.status === 'cancelled') throw new FinanceError('The invoice is cancelled; its payments are part of the Storno and stay.', 409);
+    const siblings = all.filter((x) => x.method === 'discount' && x.pair_id === p.id);
+    for (const x of [p, ...siblings]) await this.store.delete(COL.payments, x.id);
+    if (p.bank_tx_id) await this.unlinkBankTx(p.bank_tx_id, 'document', p.document_id, Math.abs(p.amount_cents));
+    const d = await this.recalcPaid(p.document_id);
+    await this.log(actor, 'payment.delete', d.type, d.id, `Payment ${pid} removed (${formatMoney(p.amount_cents, d.currency)})${siblings.length ? ` with ${formatMoney(siblings.reduce((s, x) => s + x.amount_cents, 0), d.currency)} Skonto/difference` : ''}`);
+    return d;
   }
 
   /* ----------------------------- sending ----------------------------- */
@@ -1143,7 +1238,11 @@ export class Finance {
     return e;
   }
 
-  async saveExpense(eid: string | null, input: unknown, actor: string, extra: Partial<Expense> = {}): Promise<Expense> {
+  saveExpense(eid: string | null, input: unknown, actor: string, extra: Partial<Expense> = {}): Promise<Expense> {
+    return withExpenseLock(() => this.saveExpenseLocked(eid, input, actor, extra));
+  }
+
+  private async saveExpenseLocked(eid: string | null, input: unknown, actor: string, extra: Partial<Expense> = {}): Promise<Expense> {
     const i = asObj(input);
     const before = eid ? await this.getExpense(eid) : undefined;
     if (before && before.status !== 'draft') {
@@ -1222,7 +1321,11 @@ export class Finance {
     return exp;
   }
 
-  async deleteExpense(eid: string, actor: string): Promise<void> {
+  deleteExpense(eid: string, actor: string): Promise<void> {
+    return withExpenseLock(() => this.deleteExpenseLocked(eid, actor));
+  }
+
+  private async deleteExpenseLocked(eid: string, actor: string): Promise<void> {
     const e = await this.getExpense(eid);
     if (e.status !== 'draft') throw new FinanceError('Booked expenses are kept (GoBD). Only drafts can be deleted.', 409);
     await this.store.delete(COL.expenses, eid);
@@ -1317,7 +1420,15 @@ export class Finance {
     await this.store.put(COL.bankTx(t.booking_date.slice(0, 4)), t.id, t as unknown as Record<string, unknown>);
   }
 
-  async importStatement(accountId: string, content: string, actor: string): Promise<{ imported: number; duplicates: number; auto_matched: number; warnings: string[]; format: string }> {
+  /**
+   * Under the bank lock: two imports of the same file at once (a double
+   * click, a retried upload) must not both see the rows as new.
+   */
+  importStatement(accountId: string, content: string, actor: string): Promise<{ imported: number; duplicates: number; auto_matched: number; warnings: string[]; format: string }> {
+    return withBankLock(() => this.importStatementLocked(accountId, content, actor));
+  }
+
+  private async importStatementLocked(accountId: string, content: string, actor: string): Promise<{ imported: number; duplicates: number; auto_matched: number; warnings: string[]; format: string }> {
     const acct = await this.store.get<BankAccount>(COL.bankAccounts, accountId);
     if (!acct) throw new FinanceError('Bank account not found.', 404);
     const parsed = parseStatement(content);
@@ -1383,7 +1494,13 @@ export class Finance {
   private async tryAutoMatch(t: BankTransaction, actor: string): Promise<boolean> {
     const best = autoMatch(suggestMatches(t, await this.openItemsForMatching()));
     if (!best) return false;
-    await this.matchBankTx(t.id, { kind: best.kind, id: best.id }, actor);
+    // Called from the locked import: use the locked variant (no re-entry).
+    try {
+      await this.matchBankTxLocked(t.id, { kind: best.kind, id: best.id }, actor);
+    } catch (e) {
+      if (e instanceof FinanceError) return false;
+      throw e;
+    }
     return true;
   }
 
@@ -1423,13 +1540,19 @@ export class Finance {
       }, actor);
     } else {
       const e = await this.getExpense(target);
-      amount = 'amount_cents' in i || 'amount' in i ? Math.abs(readCents(i, 'amount')) : Math.min(remaining, e.gross_cents - e.paid_cents);
+      if (e.status === 'draft') throw new FinanceError('Book the expense first (it is still a draft).', 409);
+      const openExp = e.gross_cents - e.paid_cents;
+      amount = 'amount_cents' in i || 'amount' in i ? Math.abs(readCents(i, 'amount')) : Math.min(remaining, openExp);
+      if (amount > Math.abs(openExp)) throw new FinanceError(`Only ${formatMoney(Math.abs(openExp), 'EUR')} of this expense is still open.`, 422);
       if (amount > remaining) throw new FinanceError(`Only ${formatMoney(remaining, 'EUR')} of this transaction is still unassigned.`, 422);
       if (!amount) throw new FinanceError('The amount to assign is zero.');
-      const paid = e.paid_cents + amount;
-      await this.store.put(COL.expenses, e.id, {
-        ...e, paid_cents: paid, status: paid >= e.gross_cents ? 'paid' : 'open', paid_date: t.booking_date, bank_tx_id: t.id, updated_at: this.stamp(),
-      } as unknown as Record<string, unknown>);
+      await withExpenseLock(async () => {
+        const fresh = await this.getExpense(target);
+        const paid = fresh.paid_cents + amount;
+        await this.store.put(COL.expenses, fresh.id, {
+          ...fresh, paid_cents: paid, status: paid >= fresh.gross_cents ? 'paid' : 'open', paid_date: t.booking_date, bank_tx_id: t.id, updated_at: this.stamp(),
+        } as unknown as Record<string, unknown>);
+      });
     }
     const matches = [...(t.matches ?? []), { kind, id: target, amount_cents: amount } as const];
     const next: BankTransaction = { ...t, matches, status: matches.reduce((s, m) => s + Math.abs(m.amount_cents), 0) >= Math.abs(t.amount_cents) ? 'matched' : 'unmatched' };
@@ -1470,10 +1593,15 @@ export class Finance {
     return { expense: await this.getExpense(expense.id), transaction };
   }
 
-  async categorizeBankTx(txId: string, input: unknown, actor: string): Promise<BankTransaction> {
+  categorizeBankTx(txId: string, input: unknown, actor: string): Promise<BankTransaction> {
+    return withBankLock(() => this.categorizeBankTxLocked(txId, input, actor));
+  }
+
+  private async categorizeBankTxLocked(txId: string, input: unknown, actor: string): Promise<BankTransaction> {
     const i = asObj(input);
     const t = await this.findBankTx(txId);
     if (!t) throw new FinanceError('Bank transaction not found.', 404);
+    if (t.matches?.length) throw new FinanceError('This transaction is assigned to invoices or expenses — undo the assignment first.', 409);
     const status = i.ignore ? 'ignored' : i.category ? 'matched' : 'unmatched';
     const next: BankTransaction = { ...t, category: str(i.category, 40), status };
     await this.putBankTx(next);
@@ -1488,7 +1616,12 @@ export class Finance {
   private async unmatchBankTxLocked(txId: string, actor: string): Promise<BankTransaction> {
     const t = await this.findBankTx(txId);
     if (!t) throw new FinanceError('Bank transaction not found.', 404);
-    for (const p of (await this.listPayments()).filter((p) => p.bank_tx_id === t.id)) {
+    const linked = (await this.listPayments()).filter((p) => p.bank_tx_id === t.id);
+    for (const p of linked) {
+      const d = await this.store.get<FinanceDocument>(COL.documents, p.document_id);
+      if (d?.status === 'cancelled') throw new FinanceError(`This transaction paid ${d.number}, which has since been cancelled — the payment is part of the Storno and stays.`, 409);
+    }
+    for (const p of linked) {
       await withLock(async () => {
         await this.store.delete(COL.payments, p.id);
         await this.recalcPaid(p.document_id);
@@ -1496,11 +1629,13 @@ export class Finance {
     }
     for (const m of t.matches ?? []) {
       if (m.kind !== 'expense') continue;
-      const e = await this.store.get<Expense>(COL.expenses, m.id);
-      if (e) {
-        const paid = Math.max(0, e.paid_cents - m.amount_cents);
-        await this.store.put(COL.expenses, e.id, { ...e, paid_cents: paid, status: paid >= e.gross_cents ? 'paid' : 'open', bank_tx_id: undefined, paid_date: paid ? e.paid_date : undefined } as unknown as Record<string, unknown>);
-      }
+      await withExpenseLock(async () => {
+        const e = await this.store.get<Expense>(COL.expenses, m.id);
+        if (e) {
+          const paid = Math.max(0, e.paid_cents - m.amount_cents);
+          await this.store.put(COL.expenses, e.id, { ...e, paid_cents: paid, status: paid >= e.gross_cents ? 'paid' : 'open', bank_tx_id: undefined, paid_date: paid ? e.paid_date : undefined } as unknown as Record<string, unknown>);
+        }
+      });
     }
     const next: BankTransaction = { ...t, matches: [], category: undefined, status: 'unmatched' };
     await this.putBankTx(next);
@@ -1508,11 +1643,24 @@ export class Finance {
     return next;
   }
 
-  private async unlinkBankTx(txId: string, kind: 'document' | 'expense', targetId: string) {
+  /** Remove ONE match of `amount` (or all for that target when no amount is given). Caller holds the bank lock. */
+  private async unlinkBankTx(txId: string, kind: 'document' | 'expense', targetId: string, amount?: number) {
     const t = await this.findBankTx(txId);
     if (!t) return;
-    const matches = (t.matches ?? []).filter((m) => !(m.kind === kind && m.id === targetId));
-    await this.putBankTx({ ...t, matches, status: matches.length ? t.status : 'unmatched' });
+    const matches = [...(t.matches ?? [])];
+    if (amount === undefined) {
+      for (let i = matches.length - 1; i >= 0; i--) if (matches[i].kind === kind && matches[i].id === targetId) matches.splice(i, 1);
+    } else {
+      const idx = matches.findIndex((m) => m.kind === kind && m.id === targetId && Math.abs(m.amount_cents) === amount);
+      const at = idx >= 0 ? idx : matches.findIndex((m) => m.kind === kind && m.id === targetId);
+      if (at >= 0) {
+        const left = Math.abs(matches[at].amount_cents) - amount;
+        if (left > 0) matches[at] = { ...matches[at], amount_cents: left }; else matches.splice(at, 1);
+      }
+    }
+    const assigned = matches.reduce((s, m) => s + Math.abs(m.amount_cents), 0);
+    const status = t.status === 'ignored' ? 'ignored' : assigned >= Math.abs(t.amount_cents) && assigned > 0 ? 'matched' : t.category && !matches.length ? 'matched' : 'unmatched';
+    await this.putBankTx({ ...t, matches, status });
   }
 
   /* ----------------------------- recurring ----------------------------- */
@@ -1651,7 +1799,11 @@ export class Finance {
           } else {
             const doc = await this.createDocument({
               type: 'invoice', contact_id: tpl.contact_id, title: tpl.title, intro: tpl.intro, closing: tpl.closing,
-              price_mode: tpl.price_mode, issue_date: tpl.next_date,
+              // Issued today even when catching up a missed period: an invoice
+              // dated in the past would get a higher number than invoices
+              // already issued after that date. The billed period stays the
+              // period it belongs to.
+              price_mode: tpl.price_mode, issue_date: today,
               ...(tpl.tax_treatment ? { tax_treatment: tpl.tax_treatment } : {}),
               ...(tpl.payment_days !== undefined ? { payment_days: tpl.payment_days } : {}),
               service_date: tpl.next_date, service_date_end: periodEnd,
