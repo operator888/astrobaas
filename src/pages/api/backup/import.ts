@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ApiResponseBuilder } from '../../../lib/api-response';
-import { getDbPath, getUploadsDir } from '../../../lib/paths';
+import { getDbPath, getUploadsDir, getPrivateUploadsDir } from '../../../lib/paths';
 import { MAX_ARCHIVE_BYTES } from '../../../lib/backup/offsite';
 import { localSqlitePath, openSqlite, sqliteFileUrl, swapLocalSqliteFile } from '../../../lib/storage/local-sqlite';
 import type { Client } from '@libsql/client';
@@ -97,6 +97,7 @@ export const POST: APIRoute = async ({ request, locals }) => {
       if (restoreErr) return ApiResponseBuilder.badRequest(restoreErr);
       invalidateMediaBase();
       const media = await restoreUploads(body, uploadsRoot);
+      const archive = await restorePrivateFiles(body);
       // The archive's own notes travel back to the operator. offsite.ts writes
       // things there that change what a restore MEANS — "the uploads were NOT
       // included", "the database was copied live, so this is best-effort" — and
@@ -105,6 +106,8 @@ export const POST: APIRoute = async ({ request, locals }) => {
       return ApiResponseBuilder.success(
         {
           ...media,
+          private_restored: archive.restored,
+          private_kept: archive.kept,
           database: 'sqlite',
           // Structured, not only in the message: the UI can render this, and a
           // restart instruction buried in a toast is one nobody follows.
@@ -147,12 +150,13 @@ export const POST: APIRoute = async ({ request, locals }) => {
     }
 
     const { restored, skipped } = await restoreUploads(body, uploadsRoot);
+    const archive = await restorePrivateFiles(body);
     // The archive's notes travel back on EVERY branch, not just the libSQL one.
     // lowdb is the driver the note about missing uploads is most likely to
     // appear on, and it was the branch that dropped them.
     const notes = archiveNotes(body);
     return ApiResponseBuilder.success(
-      { restored, skipped, restartRequired: false, notes },
+      { restored, skipped, private_restored: archive.restored, private_kept: archive.kept, restartRequired: false, notes },
       'Backup restored. Reload the page to see the new data.'
       + (notes.length ? ` Notes from the archive: ${notes.join(' ')}` : ''),
     );
@@ -229,6 +233,41 @@ async function restoreUploads(
     restored += 1;
   }
   return { restored, skipped };
+}
+
+/**
+ * Bring back the private bookkeeping archive (`private_files`, under
+ * `<private uploads>/finance/`).
+ *
+ * The archive is write-once and content-addressed, so a file that already
+ * exists is KEPT, never overwritten — restoring an older backup can add the
+ * receipts that went missing but can never replace one that is there. Only
+ * the `finance/` subtree is accepted; anything else in the list is skipped,
+ * as is any path that would leave it. Files are written owner-read-only.
+ */
+async function restorePrivateFiles(body: unknown): Promise<{ restored: number; kept: number; skipped: number }> {
+  const files = Array.isArray((body as any)?.private_files) ? (body as any).private_files : [];
+  let restored = 0;
+  let kept = 0;
+  let skipped = 0;
+  if (!files.length) return { restored, kept, skipped };
+  const root = path.resolve(getPrivateUploadsDir());
+  for (const f of files) {
+    if (!f || typeof f.path !== 'string' || typeof f.base64 !== 'string') { skipped += 1; continue; }
+    const rel = f.path.replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!rel.startsWith('finance/') || rel.split('/').some((seg: string) => seg === '..' || seg === '')) { skipped += 1; continue; }
+    const target = path.resolve(root, rel);
+    if (!target.startsWith(path.join(root, 'finance') + path.sep)) { skipped += 1; continue; }
+    try {
+      await fs.access(target);
+      kept += 1;
+      continue;
+    } catch { /* missing: restore it */ }
+    await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+    await fs.writeFile(target, Buffer.from(f.base64, 'base64'), { mode: 0o600, flag: 'wx' });
+    restored += 1;
+  }
+  return { restored, kept, skipped };
 }
 
 /**

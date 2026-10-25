@@ -155,8 +155,8 @@ export { fireEvent, webhookMatches, webhookBody, WEBHOOK_EVENTS } from '../lib/w
 export { signWebhook, newWebhookSecret } from '../lib/auth';
 
 // ---- Email (pluggable transport; send notifications, provide a transport) ----
-export { sendEmail, getEmailTransport, setEmailTransport, consoleTransport, webhookTransport } from '../lib/email';
-export type { EmailMessage, EmailTransport } from '../lib/email';
+export { sendEmail, getEmailTransport, setEmailTransport, consoleTransport, webhookTransport, emailChannelActive, emailChannelLabel } from '../lib/email';
+export type { EmailMessage, EmailTransport, EmailAttachment } from '../lib/email';
 
 // ---- Security audit log (record sensitive actions from plugins/custom routes) ----
 export { recordAudit, AUDIT } from '../lib/audit';
@@ -172,7 +172,7 @@ export { createPluginStore } from '../lib/plugin-platform/store';
 // A plugin's own settings — the record the admin edits. Scoped to an id, so
 // a plugin cannot read its neighbour's by reaching for LocalDB.getPlugins().
 export { getPluginSettings, getPluginSetting } from '../lib/plugin-platform/settings';
-export type { PluginStore } from '../lib/plugin-platform/store';
+export type { PluginStore, PluginListOptions } from '../lib/plugin-platform/store';
 export { LocalDB } from '../lib/localdb';
 
 // Payment gateways from plugins. A gateway author needs the provider contract

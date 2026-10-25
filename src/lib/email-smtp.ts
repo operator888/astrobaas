@@ -729,6 +729,7 @@ export async function smtpSend(
       // List-Unsubscribe and friends (C-111). Sanitised inside buildMimeMessage,
       // so every transport that grows headers gets the same CRLF protection.
       headers: msg.headers,
+      attachments: msg.attachments,
     });
     if (observe) {
       // The headers are what an operator debugging delivery needs (From,

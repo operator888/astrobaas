@@ -176,6 +176,28 @@ export async function publishDuePosts(now: number = Date.now()): Promise<number>
   return count;
 }
 
+/**
+ * Hand the tick to plugins (PLUGIN_HOOKS.SCHEDULER_TICK).
+ *
+ * Imported lazily because the plugin registry imports half the application and
+ * the scheduler is loaded very early; the registry is awaited first so a tick
+ * never reaches a half-bootstrapped plugin set. Never throws: a plugin's job
+ * failing must not stop publishing, backups or campaigns, which share the sweep.
+ */
+async function runPluginTick(): Promise<void> {
+  if (stopping) return;
+  try {
+    const [{ pluginManager, PLUGIN_HOOKS }, { ensurePluginsBootstrapped }] = await Promise.all([
+      import('./plugin-system'),
+      import('../plugins'),
+    ]);
+    await ensurePluginsBootstrapped();
+    await pluginManager.doActionAwait(PLUGIN_HOOKS.SCHEDULER_TICK, { now: Date.now() });
+  } catch (err) {
+    console.error('Plugin scheduler tick failed:', err instanceof Error ? err.message : err);
+  }
+}
+
 /** Start the interval sweep once (idempotent; respects SCHEDULER_DISABLED). */
 export function startScheduler(env: NodeJS.ProcessEnv = process.env): void {
   if (started || !schedulerEnabled(env)) return;
@@ -218,6 +240,7 @@ export function startScheduler(env: NodeJS.ProcessEnv = process.env): void {
         await maybeBackUp();
         await maybeCheckLinks();
         await maybeSendCampaign();
+        await runPluginTick();
         status = {
           ...status,
           lastRunAt: new Date().toISOString(),

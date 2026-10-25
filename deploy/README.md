@@ -326,6 +326,7 @@ accepted, at the layer least able to say why.
 | `/api/backup/import` | 282m | `MAX_ARCHIVE_BYTES` × 1.1 — `src/lib/backup/offsite.ts` | — |
 | `/api/import/wordpress` | 26m | `MAX_HTTP_WXR_BYTES` + 2 MB — `src/lib/import/limits.ts` | — |
 | `/api/forms/*/upload` | 6m | `MAX_SUBMISSION_FILE_SIZE` × 1.2 — `src/lib/media/private-files.ts` | — |
+| `/api/plugin/finance/upload/*` | 18m | `FINANCE_UPLOAD_MAX_BYTES` × 1.2 — `src/plugins/finance/lib/limits.ts` | — |
 | everything else | 2m | `BODY_LIMIT_DEFAULT` — `src/lib/body-limits.ts` | — |
 
 The headroom above each file cap is multipart framing: boundary markers and the

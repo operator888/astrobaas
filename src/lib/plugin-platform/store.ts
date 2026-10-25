@@ -70,6 +70,15 @@ export function namespaceFor(pluginId: string, collection: string): string {
 /** How many records one `list()` will return. */
 export const PLUGIN_LIST_CAP = 5000;
 
+export interface PluginListOptions {
+  /**
+   * Return every record, past PLUGIN_LIST_CAP. For a plugin whose records
+   * must never silently go missing — bookkeeping that is kept for ten years —
+   * and that accepts the memory cost of reading the whole collection.
+   */
+  uncapped?: boolean;
+}
+
 export interface PluginStore {
   /**
    * Every record in a collection, oldest first.
@@ -78,7 +87,7 @@ export interface PluginStore {
    * this store, and silently returning a prefix would be the kind of filter
    * that looks like an answer.
    */
-  list<T = Record<string, unknown>>(collection: string): Promise<{ id: string; data: T }[]>;
+  list<T = Record<string, unknown>>(collection: string, opts?: PluginListOptions): Promise<{ id: string; data: T }[]>;
   get<T = Record<string, unknown>>(collection: string, id: string): Promise<T | undefined>;
   /** Insert or replace. Returns the stored value. */
   put<T extends Record<string, unknown>>(collection: string, id: string, data: T): Promise<T>;
@@ -90,8 +99,9 @@ export interface PluginStore {
 export function createPluginStore(pluginId: string, backend: PluginDataBackend): PluginStore {
   const ns = (collection: string) => namespaceFor(pluginId, collection);
   return {
-    async list<T>(collection: string) {
+    async list<T>(collection: string, opts?: PluginListOptions) {
       const rows = await backend.getPluginData(ns(collection));
+      if (opts?.uncapped) return rows.map((r) => ({ id: r.id, data: r.data as T }));
       if (rows.length > PLUGIN_LIST_CAP) {
         console.warn(
           `[astrobaas] plugin "${pluginId}" collection "${collection}" holds ${rows.length} records; `

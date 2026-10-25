@@ -156,6 +156,25 @@ produces a file of roughly 11–13 KB.
 
 ---
 
+## Bundled, but not npm packages: the finance module's reference data
+
+Two pieces of third-party data are compiled into `src/plugins/finance`:
+
+- **The DATEV Buchungsstapel column list** in `lib/datev.ts` (Formatversion 13,
+  125 column names) follows the list published in
+  [`@seamless-engineering/datev-extf`](https://github.com/seamless-engineering/datev-extf),
+  MIT licence, © its authors. The names themselves are DATEV's format
+  specification; the package is credited as the source we checked them
+  against, and its validator was used (out of band, not as a dependency) to
+  confirm our files produce no findings.
+- **`sRGB2014.icc`**, embedded in `lib/srgb-icc.ts` as the PDF/A-3 OutputIntent
+  of ZUGFeRD invoices. © International Color Consortium, 2015. Its terms: it
+  "may be copied, distributed, embedded, made, used, and sold without
+  restriction. Altered versions of this profile shall have the original
+  identification and copyright information removed and shall not be
+  misrepresented as the original profile." It is bundled unaltered
+  (<https://www.color.org/srgbprofiles.xalter>).
+
 ## What is deliberately NOT audited
 
 - **Development dependencies.** They are not redistributed.

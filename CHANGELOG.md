@@ -6,6 +6,54 @@ semver yet because the API surface is pre-alpha.
 
 ## [Unreleased]
 
+### ECWS Billing: invoicing and bookkeeping (your own Lexware)
+
+A new bundled plugin, **ECWS Billing** (E-Commerce Web Services; plugin id
+`finance`, `src/plugins/finance`), under **Admin → Billing**, limited to admins and managers.
+
+- Money audit (randomized invariant testing, 30,000+ operations incl. concurrent):
+  - **Cancellations:** a Storno of a final invoice reverses only the remainder; after Skonto it reverses the discount too; an overpaid invoice's excess moves to the credit note; a deducted down payment cannot be cancelled.
+  - **Payments:** none on cancelled invoices; deleting a payment takes its Skonto with it and frees exactly its bank amount; Storno offsets are protected.
+  - **Concurrency:** statement import, categorize, expenses and quote→invoice are locked; down-payment cancellation and final-invoice finalization are serialised.
+  - **Reports:** reverse charge at the line rate, cent-exact Ist instalments, and DATEV consistent with the VAT return (foreign VAT, odd receipt VAT on 1570, final invoices booked full + reversal).
+  - **Invoice dates:** 0 € and fully-deducted documents settle at once; a warning before back-dating; recurring catch-up dated on issue.
+  - **Data safety:** the site backup now includes the bookkeeping archive (restore never overwrites), plus an integrity check and a full data export.
+- Lexware parity pass (see `src/plugins/finance/LEXWARE-COMPARISON.md`): Skonto with
+  automatic settlement and § 17 UStG correction, write-off of small differences,
+  optional/alternative quote lines, customer portal with online quote acceptance,
+  GiroCode and PayPal.Me, Abschlags-/Schlussrechnung, standing expenses
+  (Dauerbelege), order confirmations, Leitweg-ID check digits.
+- Second review: concurrency fixes (payments never overwritten, one bank
+  transaction pays one invoice, draft edits locked against finalize), bounded
+  ZUGFeRD decompression, impossible dates and negative prices refused, foreign VAT
+  out of Kz 66, DATEV creditor accounts for dual-role contacts, recurring retries,
+  gap-free log verification, CSV formula neutralisation. `PluginStore.list` gains
+  an opt-in `{ uncapped: true }`.
+- Review pass: GiroCode (EPC QR) on invoice PDFs, Mahnwesen tab and dunning history, Zusammenfassende Meldung (ZM) report + CSV, expense from bank transaction, automatic recurring invoices via the new `SCHEDULER_TICK` hook, customer reference on documents/XRechnung, German error messages, e-mail-not-configured guard, Basiszinssatz 1,52 %.
+- Quotes, invoices and credit notes with GoBD-safe numbering: numbers are
+  assigned at finalization under a lock and never reused; finalized documents
+  are immutable and corrected by credit note; every change goes into a
+  hash-chained log with a verify check.
+- German VAT treatments (19/7/0 %, Kleinunternehmer, EU reverse charge,
+  intra-Community supply, third country, export) with EN 16931 rounding.
+- E-invoices out (XRechnung 3.0 CII; ZUGFeRD/Factur-X EN 16931 as PDF/A-3b)
+  and in (XRechnung, ZUGFeRD, UBL → expense). Verified with two independent
+  EN 16931 / XRechnung validators.
+- Expenses with archived receipts; bank statements (camt.053, MT940, CSV) with
+  automatic payment matching; dunning; recurring invoices.
+- UStVA figures, profit & loss, open items; DATEV EXTF export and a
+  Steuerberater ZIP package.
+- Lexware Office importer; contacts CSV import.
+- REST API (`/api/plugin/finance/…`, scope `finance:read|write`), idempotent
+  sales endpoint for websites and the licence centre (API key or HMAC), new
+  webhook events (`invoice.paid` and nine more), shop orders → invoices, and
+  `finance_*` MCP tools.
+
+Core changes it needed: email attachments on every transport (SMTP, SMTP2GO,
+webhook, console); the `finance` API-key scope; an 18 MB body limit for
+`/api/plugin/finance/upload/*` in the app, nginx and Caddy configs; the MCP
+route-existence test now understands plugin routes.
+
 ### "Requires a prescription" shows on one tab only
 
 In the product editor, the prescription fields ("Requires a prescription" and

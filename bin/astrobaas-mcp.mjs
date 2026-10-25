@@ -444,7 +444,271 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     run: () => apiRequest('GET', '/api/themes/get'),
   },
+
+  /* ---------------- finance (src/plugins/finance) ----------------
+   * Invoices, payments, expenses and the VAT figures. Needs the ECWS Billing (finance) plugin
+   * active and a key belonging to an admin or manager; scope it to
+   * finance:read / finance:write. Money is integer CENTS throughout.
+   */
+  ...financeTools(),
 ];
+
+function financeTools() {
+  const q = (a, keys) => {
+    const qs = new URLSearchParams();
+    for (const k of keys) if (a[k] !== undefined && a[k] !== '') qs.set(k, String(a[k]));
+    const s = qs.toString();
+    return s ? `?${s}` : '';
+  };
+  const id = { type: 'string', description: 'Document id (doc_…), not the invoice number.' };
+  const date = { type: 'string', description: 'YYYY-MM-DD' };
+  const line = {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+      description: { type: 'string' },
+      quantity: { type: 'number' },
+      unit: { type: 'string', description: 'UN/ECE code: HUR hour, DAY, MON month, ANN year, C62 piece, LS lump sum.' },
+      unit_price_cents: { type: 'integer', description: 'Net unit price in cents (gross when price_mode is gross).' },
+      tax_rate: { type: 'number', description: '19, 7 or 0 for German VAT.' },
+      discount_percent: { type: 'number' },
+      optional: { type: 'boolean', description: 'Quotes only: optional item, priced but not in the total.' },
+      alternative: { type: 'boolean', description: 'Quotes only: alternative to another item, not in the total.' },
+      period_start: date,
+      period_end: date,
+    },
+    required: ['name', 'quantity', 'unit_price_cents'],
+  };
+  return [
+    {
+      name: 'finance_summary',
+      description: 'ECWS Billing dashboard: revenue this month/year, open and overdue receivables, payables, VAT payable this quarter, drafts, unmatched bank transactions, dunning due, top customers.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: () => apiRequest('GET', `/api/plugin/finance/summary`),
+    },
+    {
+      name: 'finance_list_documents',
+      description: 'List invoices, quotes or credit notes. status "overdue" lists unpaid invoices past their due date.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['invoice', 'quote', 'credit_note'] },
+          status: { type: 'string', enum: ['draft', 'open', 'partially_paid', 'paid', 'cancelled', 'overdue', 'accepted', 'rejected', 'invoiced'] },
+          q: { type: 'string', description: 'Search number / customer.' },
+          contact_id: { type: 'string' }, from: date, to: date,
+        },
+        additionalProperties: false,
+      },
+      run: (a = {}) => apiRequest('GET', `/api/plugin/finance/documents${q(a, ['type', 'status', 'q', 'contact_id', 'from', 'to'])}`),
+    },
+    {
+      name: 'finance_get_document',
+      description: 'One invoice/quote/credit note with lines, totals, payments and the customer link.',
+      inputSchema: { type: 'object', properties: { id }, required: ['id'], additionalProperties: false },
+      run: (a) => apiRequest('GET', `/api/plugin/finance/documents/${encodeURIComponent(a.id)}`),
+    },
+    {
+      name: 'finance_create_document',
+      description: 'Create an invoice, quote or credit note as a DRAFT (no number yet). Pass finalize:true to finalize at once — that assigns the number and makes it immutable (GoBD). VAT treatment is derived from the customer unless given.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['invoice', 'quote'] },
+          contact_id: { type: 'string' },
+          lines: { type: 'array', items: line },
+          title: { type: 'string' }, intro: { type: 'string' }, closing: { type: 'string' },
+          issue_date: date, service_date: date, service_date_end: date, payment_days: { type: 'integer' },
+          price_mode: { type: 'string', enum: ['net', 'gross'] },
+          tax_treatment: { type: 'string', enum: ['domestic', 'small_business', 'reverse_charge_eu', 'intra_community_supply', 'third_country_service', 'export'] },
+          einvoice_format: { type: 'string', enum: ['zugferd', 'xrechnung', 'pdf'] },
+          reference: { type: 'string', description: "The customer's order / PO number (BT-13)." },
+          invoice_kind: { type: 'string', enum: ['standard', 'partial', 'final'], description: 'partial = Abschlagsrechnung, final = Schlussrechnung (pass deducts).' },
+          deducts: { type: 'array', items: { type: 'string' }, description: 'Final invoice: ids of the down-payment invoices it settles.' },
+          skonto: { type: 'object', properties: { percent: { type: 'number' }, days: { type: 'integer' } }, description: 'Early-payment discount, e.g. {percent:2, days:7}. null for none.' },
+          finalize: { type: 'boolean' },
+        },
+        required: ['contact_id', 'lines'],
+        additionalProperties: false,
+      },
+      run: (a) => apiRequest('POST', `/api/plugin/finance/documents`, a),
+    },
+    {
+      name: 'finance_update_draft',
+      description: 'Change a DRAFT document (lines, dates, texts). Finalized documents cannot be changed — cancel with a credit note instead.',
+      inputSchema: { type: 'object', properties: { id, changes: { type: 'object' } }, required: ['id', 'changes'], additionalProperties: false },
+      run: (a) => apiRequest('PUT', `/api/plugin/finance/documents/${encodeURIComponent(a.id)}`, a.changes),
+    },
+    {
+      name: 'finance_check_document',
+      description: 'Validate a draft before finalizing: errors (blocking) and warnings, including e-invoice (XRechnung/ZUGFeRD) requirements.',
+      inputSchema: { type: 'object', properties: { id }, required: ['id'], additionalProperties: false },
+      run: (a) => apiRequest('GET', `/api/plugin/finance/documents/${encodeURIComponent(a.id)}/check`),
+    },
+    {
+      name: 'finance_finalize_document',
+      description: 'Finalize a draft: assigns the next number, freezes it and archives the PDF/XML. IRREVERSIBLE — confirm with the user first.',
+      inputSchema: { type: 'object', properties: { id }, required: ['id'], additionalProperties: false },
+      run: (a) => apiRequest('POST', `/api/plugin/finance/documents/${encodeURIComponent(a.id)}/finalize`),
+    },
+    {
+      name: 'finance_send_document',
+      description: 'Email a finalized document to the customer with the PDF (and XRechnung XML) attached. Sends a real email — confirm first.',
+      inputSchema: { type: 'object', properties: { id, to: { type: 'string' }, subject: { type: 'string' }, message: { type: 'string' } }, required: ['id'], additionalProperties: false },
+      run: (a) => { const { id: did, ...rest } = a; return apiRequest('POST', `/api/plugin/finance/documents/${encodeURIComponent(did)}/send`, rest); },
+    },
+    {
+      name: 'finance_record_payment',
+      description: 'Record money received for an invoice. Omit amount_cents to pay the full open amount. settle:"skonto" books the rest as the agreed early-payment discount; settle:"difference" writes a small rest off (both reduce revenue and VAT).',
+      inputSchema: {
+        type: 'object',
+        properties: { id, amount_cents: { type: 'integer' }, date, method: { type: 'string', enum: ['bank', 'cash', 'stripe', 'paypal', 'card', 'other'] }, reference: { type: 'string' }, settle: { type: 'string', enum: ['skonto', 'difference'] } },
+        required: ['id'],
+        additionalProperties: false,
+      },
+      run: (a) => { const { id: did, ...rest } = a; return apiRequest('POST', `/api/plugin/finance/documents/${encodeURIComponent(did)}/payments`, rest); },
+    },
+    {
+      name: 'finance_cancel_invoice',
+      description: 'Cancel a finalized invoice with a full credit note (Storno). IRREVERSIBLE — confirm first.',
+      inputSchema: { type: 'object', properties: { id, reason: { type: 'string' } }, required: ['id'], additionalProperties: false },
+      run: (a) => apiRequest('POST', `/api/plugin/finance/documents/${encodeURIComponent(a.id)}/cancel`, { reason: a.reason }),
+    },
+    {
+      name: 'finance_quote_to_invoice',
+      description: 'Turn a finalized (or accepted) quote into an invoice draft.',
+      inputSchema: { type: 'object', properties: { id }, required: ['id'], additionalProperties: false },
+      run: (a) => apiRequest('POST', `/api/plugin/finance/documents/${encodeURIComponent(a.id)}/to-invoice`),
+    },
+    {
+      name: 'finance_list_contacts',
+      description: 'Customers and suppliers. Use to find a contact_id.',
+      inputSchema: { type: 'object', properties: { q: { type: 'string' }, role: { type: 'string', enum: ['customer', 'vendor'] } }, additionalProperties: false },
+      run: (a = {}) => apiRequest('GET', `/api/plugin/finance/contacts${q(a, ['q', 'role'])}`),
+    },
+    {
+      name: 'finance_create_contact',
+      description: 'Create a customer or supplier. Needs company_name or a person\'s name; billing_address.country is a 2-letter code. A VAT id enables reverse charge for EU businesses.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          company_name: { type: 'string' }, first_name: { type: 'string' }, last_name: { type: 'string' },
+          email: { type: 'string' }, phone: { type: 'string' }, vat_id: { type: 'string' },
+          buyer_reference: { type: 'string', description: 'Leitweg-ID for public-sector customers.' },
+          billing_address: { type: 'object', properties: { street: { type: 'string' }, zip: { type: 'string' }, city: { type: 'string' }, country: { type: 'string' } } },
+          roles: { type: 'object', properties: { customer: { type: 'boolean' }, vendor: { type: 'boolean' } } },
+        },
+        additionalProperties: false,
+      },
+      run: (a) => apiRequest('POST', `/api/plugin/finance/contacts`, a),
+    },
+    {
+      name: 'finance_record_sale',
+      description: 'One sale from another system (website, licence server) → customer upsert + invoice, finalized and optionally marked paid. Idempotent on source + external_id.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          source: { type: 'string' }, external_id: { type: 'string' },
+          customer: { type: 'object' }, lines: { type: 'array', items: line },
+          price_mode: { type: 'string', enum: ['net', 'gross'] },
+          paid: { type: 'object', properties: { amount_cents: { type: 'integer' }, date, method: { type: 'string' }, reference: { type: 'string' } } },
+          send_email: { type: 'boolean' },
+        },
+        required: ['source', 'external_id', 'customer', 'lines'],
+        additionalProperties: false,
+      },
+      run: (a) => apiRequest('POST', `/api/plugin/finance/sales`, a),
+    },
+    {
+      name: 'finance_list_expenses',
+      description: 'Incoming invoices / receipts.',
+      inputSchema: { type: 'object', properties: { status: { type: 'string', enum: ['draft', 'open', 'paid'] }, q: { type: 'string' } }, additionalProperties: false },
+      run: (a = {}) => apiRequest('GET', `/api/plugin/finance/expenses${q(a, ['status', 'q'])}`),
+    },
+    {
+      name: 'finance_create_expense',
+      description: 'Book an expense from a receipt you have read. lines[].category is one of: software, hosting, subcontractors, phone, internet, office, literature, advertising, entertainment, travel, vehicle, consulting, bookkeeping, bank_fees, other. Give gross_cents + tax_rate, or net_cents + tax_cents. Set reverse_charge for invoices without VAT from abroad (§13b).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          supplier_name: { type: 'string' }, supplier_vat_id: { type: 'string' }, supplier_country: { type: 'string' },
+          invoice_number: { type: 'string' }, date, due_date: date,
+          status: { type: 'string', enum: ['draft', 'open', 'paid'] }, reverse_charge: { type: 'boolean' },
+          lines: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, description: { type: 'string' }, gross_cents: { type: 'integer' }, net_cents: { type: 'integer' }, tax_cents: { type: 'integer' }, tax_rate: { type: 'number' } } } },
+          note: { type: 'string' },
+        },
+        required: ['supplier_name', 'lines'],
+        additionalProperties: false,
+      },
+      run: (a) => apiRequest('POST', `/api/plugin/finance/expenses`, a),
+    },
+    {
+      name: 'finance_open_items',
+      description: 'Open receivables and payables with days overdue.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: () => apiRequest('GET', `/api/plugin/finance/reports/open-items`),
+    },
+    {
+      name: 'finance_vat_report',
+      description: 'German VAT return (UStVA) figures by Kennzahl for a period, plus the amount payable (Kz 83).',
+      inputSchema: { type: 'object', properties: { from: date, to: date }, required: ['from', 'to'], additionalProperties: false },
+      run: (a) => apiRequest('GET', `/api/plugin/finance/reports/vat${q(a, ['from', 'to'])}`),
+    },
+    {
+      name: 'finance_profit_loss',
+      description: 'Revenue, expenses by category and result for a period (net, by invoice date).',
+      inputSchema: { type: 'object', properties: { from: date, to: date }, required: ['from', 'to'], additionalProperties: false },
+      run: (a) => apiRequest('GET', `/api/plugin/finance/reports/pnl${q(a, ['from', 'to'])}`),
+    },
+    {
+      name: 'finance_unmatched_bank_transactions',
+      description: 'Bank transactions not yet matched to an invoice or expense.',
+      inputSchema: { type: 'object', properties: { year: { type: 'string' } }, additionalProperties: false },
+      run: (a = {}) => apiRequest('GET', `/api/plugin/finance/bank/transactions?status=unmatched${a.year ? `&year=${encodeURIComponent(a.year)}` : ''}`),
+    },
+    {
+      name: 'finance_match_bank_transaction',
+      description: 'Match a bank transaction to an invoice (kind "document") or expense (kind "expense"). Use finance_bank_suggestions first.',
+      inputSchema: { type: 'object', properties: { transaction_id: { type: 'string' }, kind: { type: 'string', enum: ['document', 'expense'] }, id: { type: 'string' } }, required: ['transaction_id', 'kind', 'id'], additionalProperties: false },
+      run: (a) => apiRequest('POST', `/api/plugin/finance/bank/transactions/${encodeURIComponent(a.transaction_id)}/match`, { kind: a.kind, id: a.id }),
+    },
+    {
+      name: 'finance_bank_suggestions',
+      description: 'Ranked match suggestions for one bank transaction.',
+      inputSchema: { type: 'object', properties: { transaction_id: { type: 'string' } }, required: ['transaction_id'], additionalProperties: false },
+      run: (a) => apiRequest('GET', `/api/plugin/finance/bank/transactions/${encodeURIComponent(a.transaction_id)}/suggestions`),
+    },
+    {
+      name: 'finance_dunning_suggestions',
+      description: 'Overdue invoices due for a reminder, with the next dunning level.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: () => apiRequest('GET', `/api/plugin/finance/dunning`),
+    },
+    {
+      name: 'finance_run_recurring',
+      description: 'Create every recurring invoice and standing expense (rent, servers) that is due. Idempotent per period.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: () => apiRequest('POST', `/api/plugin/finance/recurring/run`),
+    },
+    {
+      name: 'finance_integrity_check',
+      description: 'Check the books for missing, altered or inconsistent data: every issued number has its document, archived PDFs/receipts exist and match their checksums, payments add up, bank assignments are backed by payments, the change log chain is intact. Read-only.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: () => apiRequest('GET', `/api/plugin/finance/integrity`),
+    },
+    {
+      name: 'finance_order_confirmation',
+      description: 'Issue an Auftragsbestätigung (PDF) for an ACCEPTED quote; send:true emails it to the customer — confirm first.',
+      inputSchema: { type: 'object', properties: { id, send: { type: 'boolean' } }, required: ['id'], additionalProperties: false },
+      run: (a) => apiRequest('POST', `/api/plugin/finance/documents/${encodeURIComponent(a.id)}/order-confirmation`, { send: !!a.send }),
+    },
+    {
+      name: 'finance_zm_report',
+      description: 'Zusammenfassende Meldung (§ 18a UStG) figures: EU supplies and § 13b services per customer VAT id for a period.',
+      inputSchema: { type: 'object', properties: { from: date, to: date }, additionalProperties: false },
+      run: (a) => apiRequest('GET', `/api/plugin/finance/reports/zm?${new URLSearchParams(Object.entries(a).filter(([, v]) => v))}`),
+    },
+  ];
+}
 
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
