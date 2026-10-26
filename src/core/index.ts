@@ -47,6 +47,20 @@ export type {
   OrderItem,
   OrderStatus,
   Customer,
+  StockStatus,
+  StockStatusInfo,
+  // Invoice / credit-memo records, which an issuer plugin receives.
+  InvoiceDocument,
+  InvoiceRecord,
+  CreditMemoRecord,
+  InvoiceRecordLine,
+  InvoiceVatRow,
+  InvoiceParty,
+  InvoiceIssuerState,
+  InvoiceLineTaxTreatment,
+  ProductDownload,
+  DownloadEntitlement,
+  DownloadLogEntry,
 } from './models';
 
 // ---- Storage contract ----
@@ -55,6 +69,10 @@ export type { Storage } from './storage';
 // ---- Plugin system ----
 export type { Plugin, FilterFn, ActionFn, PluginSettings, OrderLineExtras } from '../lib/plugin-system';
 export { PluginManager, pluginManager, PLUGIN_HOOKS } from '../lib/plugin-system';
+/** The value PLUGIN_HOOKS.TAX_ID_VERDICT filters, and its statuses. */
+export type { TaxIdVerdict, TaxIdVerdictStatus, TaxRate } from '../lib/commerce/tax';
+// What an INVOICE_ISSUERS plugin implements (see PLUGIN_DEVELOPMENT.md).
+export type { InvoiceIssuer, InvoiceIssueResult, InvoiceIssueContext, InvoiceIssuersFilterContext, LateIssueOutcome } from '../lib/commerce/invoice-records';
 
 // ---- Author helpers (define* identity functions for type inference) ----
 export { definePlugin, defineTheme } from './define';
@@ -172,6 +190,12 @@ export { createPluginStore } from '../lib/plugin-platform/store';
 // A plugin's own settings — the record the admin edits. Scoped to an id, so
 // a plugin cannot read its neighbour's by reaching for LocalDB.getPlugins().
 export { getPluginSettings, getPluginSetting } from '../lib/plugin-platform/settings';
+// The shapes `host.catalog` hands a compiled plugin (src/plugins/external.ts).
+// Types only: a compiled plugin reaches the catalogue through the host it is
+// handed, never through an import.
+export type {
+  PluginCatalog, CatalogProduct, CatalogBrand, CatalogIterateOptions,
+} from '../lib/plugin-platform/catalog';
 export type { PluginStore, PluginListOptions } from '../lib/plugin-platform/store';
 export { LocalDB } from '../lib/localdb';
 

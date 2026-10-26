@@ -1,11 +1,11 @@
 import type { APIRoute } from 'astro';
 import { LocalDB } from '../../../lib/localdb';
 import { ApiResponseBuilder } from '../../../lib/api-response';
-import { validate } from '../../../lib/validate';
+import { validate, parsePaging } from '../../../lib/validate';
 import { matchesSearch } from '../../../lib/text-search';
 import { canReadCommerce, canWriteCommerce } from '../../../lib/auth';
 
-/** GET /api/customers — staff only (PII). */
+/** GET /api/customers — staff only (PII). `?search=`, `?limit=` (default 50, max 200), `?offset=`. */
 export const GET: APIRoute = async ({ url, locals }) => {
   try {
     await LocalDB.init();
@@ -21,7 +21,19 @@ export const GET: APIRoute = async ({ url, locals }) => {
       customers = customers.filter(c => matchesSearch([c.email, c.name, c.phone], q));
     }
     customers.sort((a, b) => b.created_at.localeCompare(a.created_at));
-    return ApiResponseBuilder.success(customers);
+    // Paged exactly like GET /api/orders — same parser, defaults, ceiling and
+    // meta. Before this the route ignored the limit/offset the typed client's
+    // customers.list()/page() send and answered every customer, with no meta,
+    // so page() reported one page holding the whole list. Callers that need
+    // every customer in-process (admin screen, GDPR, importer) read
+    // LocalDB.getCustomers() directly, never this route.
+    const limit = parsePaging(url.searchParams.get('limit'), { fallback: 50, min: 1, max: 200 });
+    const offset = parsePaging(url.searchParams.get('offset'), { fallback: 0, min: 0, max: 1_000_000 });
+    const page = customers.slice(offset, offset + limit);
+    return ApiResponseBuilder.success(page, undefined, {
+      total: customers.length, count: page.length, limit, offset,
+      page: Math.floor(offset / limit) + 1, hasMore: offset + page.length < customers.length,
+    });
   } catch (err) {
     console.error('Customers list error:', err);
     return ApiResponseBuilder.serverError('Failed to list customers');

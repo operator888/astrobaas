@@ -65,6 +65,9 @@ export function requiredScopeFor(method: string, pathname: string): string | nul
   // The contact form. A headless storefront should be able to POST it with a
   // scoped key instead of performing the CSRF-cookie handshake.
   if (pathname === '/api/contact' || pathname.startsWith('/api/contact/')) return `messages:${action}`;
+  // An invoice record is part of an order (its PDF names the buyer), so it is
+  // governed by the `orders` scope — a `posts:read` key must not open one.
+  if (pathname.startsWith('/api/invoice-records/')) return `orders:${action}`;
   for (const res of SCOPED_RESOURCES) {
     if (pathname === `/api/${res}` || pathname.startsWith(`/api/${res}/`)) {
       return `${res}:${action}`;

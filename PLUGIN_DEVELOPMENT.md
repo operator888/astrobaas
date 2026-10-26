@@ -104,7 +104,7 @@ The same table, for shops. Everything money-shaped is integer **cents**.
 | `BEFORE_PRODUCT_SAVE` | filter | `(product, ctx: { isNew }) => product` | Just before persist. Description HTML is sanitized **after** this filter. |
 | `AFTER_PRODUCT_SAVE` | action | `(product: Product) => void` | After create **or** update. |
 | `AFTER_PRODUCT_DELETE` | action | `(product: Product) => void` | After delete. |
-| `PRODUCT_PRICE` | filter | `(priceCents, product, ctx: { qty, variant }) => number` | Final unit price at checkout — sales rules, volume discounts, member pricing. `ctx.variant` is the `ResolvedPurchasable` this line is buying (`price_cents`, `sku`, `stock`, and `variant_id` / `options` on a variable product), so a rule can price one size differently from another. `priceCents` is already `ctx.variant.price_cents`. Must return **integer cents**; anything else fails the checkout with a 500 rather than charging a guess. |
+| `PRODUCT_PRICE` | filter | `(priceCents, product, ctx: { qty, variant }) => number` | The unit price — sales rules, volume discounts, member pricing. Applied in `priceBasket`, so the quote, the order's totals and its stored lines all use it (before 2026-10 only the stored lines did, and they disagreed with the order total). `ctx.variant` is the `ResolvedPurchasable` this line is buying (`price_cents`, `sku`, `stock`, and `variant_id` / `options` on a variable product), so a rule can price one size differently from another. `priceCents` is already `ctx.variant.price_cents`. Must return **integer cents**; anything else fails the checkout with a 500 rather than charging a guess. |
 | `BEFORE_ORDER_SAVE` | filter | `(order, ctx: { isNew }) => order` | Before an order persists (checkout or admin edit). Validation runs **before** this hook; totals are re-checked **after** it. |
 | `AFTER_ORDER_CREATE` | action | `(order: Order) => void` | Checkout completed. The hook the new-sale notifier uses. |
 | `AFTER_ORDER_STATUS_CHANGE` | action | `(order, previousStatus) => void` | After a status change, with the status it left. |
@@ -113,8 +113,381 @@ The same table, for shops. Everything money-shaped is integer **cents**.
 | `COMMERCE_SCHEMA` | filter | `(schema, ctx: { name, variant? }) => schema` | Publish a machine-readable schema for a storefront form (this is how the optical module serves `/api/commerce/prescription-schema`). Initial value is `null`; return it **unchanged** for names you don't recognise. Core answers 404 while it stays null — which is also what an install without the module should look like. |
 | `PAYMENT_PROVIDERS` | filter | `(providers: PaymentProvider[]) => PaymentProvider[]` | Contribute payment gateways. Collected once at bootstrap from **active** plugins only. See "Payment providers from a plugin" below. |
 | `MANUAL_METHODS` | filter | `(methods: ManualMethodDef[]) => ManualMethodDef[]` | Contribute manual (offline) payment methods. A manual id that shadows a gateway id is **refused** — otherwise a shop could accept as unpaid what it believes was charged. |
-
 | `PRODUCT_FIELD_DEFS` | filter | `(defs: unknown[]) => unknown[]` | Declare product fields, exactly like a merchant's under Settings → Product fields. Initial value `[]`; **append** to what you are handed. See "Product fields from a plugin" below. |
+| `REVIEW_MEDIA` | filter | `(media: ReviewMedia[], ctx: { review: PublicReview; productId: string }) => ReviewMedia[]` | **The seam for photo and video reviews** — the paid part of product reviews. Core stores text only. Called once per APPROVED review in `GET /api/products/{ref}/reviews`, initial value `[]`; the result is attached as `media` only when non-empty. See "Product reviews: the media seam" below. |
+| `AFTER_REVIEW_DELETE` | action | `(review: { id, product_id }, ctx: { reason: 'deleted' \| 'erased' }) => void` | A review was deleted by a moderator or deleted/anonymised by a GDPR erasure. A media module **must** drop what it stored for that id here. |
+
+### Product reviews: the media seam
+
+Product reviews (C-35) are a built-in collection, `review`, switched on with the
+`reviews_enabled` setting. Core owns the text review: the public submit and read
+routes (`/api/products/{ref}/reviews`), the server-computed `verified_buyer`
+stamp, moderation (`/admin/reviews`, `/api/reviews`, `/api/reviews/moderate`) and
+the GDPR export and erasure. **Photos and video are not in core** — no upload, no
+storage, no transcoding, no media moderation. Two hooks are reserved for a paid
+module that adds them:
+
+- `REVIEW_MEDIA` (filter). Return the media for the review you are handed:
+  `{ kind: 'image' | 'video', url, alt?, thumbnail_url? }[]`. Core passes your
+  result through `sanitiseReviewMedia` (`src/lib/reviews.ts`): only `image` and
+  `video`, only `http(s)` or root-relative URLs, at most 12 items, everything
+  else dropped. Return what you were handed for a review that has no media.
+- `AFTER_REVIEW_DELETE` (action). Delete your files for that review id. It fires
+  for a moderator's delete AND for a data-subject erasure (`reason: 'erased'`),
+  which anonymises a published review rather than deleting it — the photos of a
+  person who asked to be forgotten must go either way.
+
+Rules for the module:
+
+- **Keep your own storage, keyed by review id.** Never write into the review
+  record. The key `media` on a review is reserved; it is not a declared field,
+  so nothing a submitter posts to the core route can land there.
+- **Take uploads on your own route** (`/api/plugin/<id>/…`), behind the same
+  public gate (`publicSubmissionGate`) and proof of work the core route uses,
+  and keep anything not yet approved out of `REVIEW_MEDIA`'s answer — core only
+  asks about approved reviews, but a module that publishes an unmoderated upload
+  by another path bypasses the queue.
+- **Every feature switchable on its own** in your settings, like every paid
+  module.
+
+### A field nobody outside staff may read: `private`
+
+A field may declare `private: true` (in `registerContentType()`, a manifest's
+`contentTypes[].fields[]`, or the admin builder's JSON). Its value is stored,
+validated, exported in a subject-access request and erased like any other, but
+it is **left out of every read by anyone who is not content staff** (admin or
+editor), even when the collection is `visibility: 'public'`. The built-in
+comment and review collections use it for the author's email address — before
+it existed, the public list returned every commenter's address.
+`projectEntityForReader()` in `src/core/content-types.ts` is the one projection
+both content routes apply; use it in any route of yours that serves custom
+entities.
+| `TAX_ID_VERDICT` | filter | `(verdict: TaxIdVerdict, ctx: { taxId, country?, destination?, settings }) => TaxIdVerdict` | **Synchronous.** Say what you know about a buyer's VAT id so EU reverse charge can use it. Initial value `{ status: 'unchecked' }`. See "Tax-id verdicts" below. |
+| `TAX_RATES` | filter | `(rates: TaxRate[], ctx: { settings }) => TaxRate[]` | **Synchronous.** Supply VAT rate rows (a maintained EU table, a regional pack). Handed a copy of the operator's rows; return them plus yours. The operator's rows always win. See "Tax rates from a plugin" below. |
+| `ORDER_LINE_ADDONS` | filter | `(result: LineAddonsResult, ctx: { line, product, variant, qty, name, settings }) => LineAddonsResult` | **Synchronous.** Price add-ons on an order line (a lens coating, an engraving). Initial value `{ ok: true, addons: [] }`; append `{ id, label, unit_price_cents, source?, kind?, namespace? }`, or return `{ ok: false, message, code?, params? }` to refuse. Added to the unit price before coupons and tax, and frozen as `OrderItem.addons`. Fails closed. See "Priced add-ons on an order line" below. |
+
+### Tax-id verdicts
+
+`TAX_ID_VERDICT` is how a verifier — VIES, a national registry — tells the
+core whether a buyer's VAT number is registered. The core never validates a tax
+id itself (it is **captured, not validated**; see `Address.tax_id`), and no
+verdict is itself a refusal. The only refusal reachable is the one any consumer
+gets: `invalid` to a destination with no VAT rate on file (409).
+
+A verdict can make a quote and the order after it differ: a cold cache answers
+`unverified` (VAT quoted), and the order a few seconds later may find
+`verified` (0 VAT). A storefront should re-quote after the buyer enters a VAT
+number, and show the order's own totals as final.
+
+**When it is called.** From `priceBasket`, so by `POST /api/orders/quote` and
+by the order alike, once per pricing — and **only** where the answer could
+change the tax: the shop has switched reverse charge on
+(`tax_reverse_charge_enabled`), the destination is an EU country other than
+the shop's (`shop_country`), and the buyer gave a non-empty tax id
+(`billing_address.tax_id`, or the delivery address's as a fallback).
+
+**What you are handed.** `ctx.taxId` is the number as the buyer entered it
+(trimmed); `ctx.country` the ISO country it was entered next to (the billing
+country), when there is one; `ctx.destination` the destination country;
+`ctx.settings` every shop setting as a map, read by the call site because a
+filter cannot await.
+
+**What you return.**
+
+```ts
+type TaxIdVerdict = {
+  status: 'unchecked' | 'verified' | 'invalid' | 'unverified';
+  country?: string;            // ISO — 'GR', not 'EL'. Preferred over the typed prefix.
+  vat_id?: string; reason?: string; source?: string;
+  checked_at?: string; consultation_number?: string | null;
+};
+```
+
+| Status | What the core does |
+| --- | --- |
+| `unchecked` | Nobody has an opinion: the core's shape check decides, exactly as with no plugin installed. |
+| `verified` | Reverse charge, when `verdict.country` (or the typed prefix) is an EU state other than the shop's. |
+| `invalid` | No reverse charge. The sale is taxed like a consumer's, and refused only if a consumer's would be (no rate on file for the destination). |
+| `unverified` | No reverse charge where the destination's rate is on file. **Never a refusal:** where no rate is on file, the shape-only reverse charge applies instead of the 409 a consumer would get, because a lookup that did not answer is not a reason to lose a sale. |
+
+Anything that is not one of those four (a Promise, a string, an unknown
+status) is treated as `unchecked`. The verdict is recorded on the priced
+treatment as `tax_id_status`; it is not written to the order — keep your own
+evidence in your store (see `host.createStore`).
+
+Rules:
+
+- **It must be a cache read.** `applyFilters` is synchronous, and a checkout
+  must not wait on a government web service even if it could. Start a lookup in
+  the background on a miss and answer `unverified`; the order a few seconds
+  later finds the result.
+- **If the incoming value is already `invalid`, return it unchanged** — a
+  refusal from one verifier must survive the next.
+- Greek numbers are written `EL…`; the core compares on ISO `GR` everywhere
+  (`EL` in the EU list or on a number is read as `GR`).
+
+### Tax rates from a plugin
+
+`TAX_RATES` is how a rate pack supplies the numbers the core's tax engine
+looks up. The core decides WHOSE rate applies (domestic, destination, reverse
+charge, export); the rows say what that rate is. Core ships no foreign rates.
+
+**When it is called.** From `resolveTaxSettingsWithPlugins`
+(`src/lib/commerce/tax-plugins.ts`), which every pricing path uses: the quote,
+the order (both through `priceBasket`) and
+`POST /api/orders/{id}/tax-override`. So the three cannot disagree about the
+same sale. It is **not** called while tax is off or `shop_country` is unset:
+without an origin every sale is domestic, and the domestic ladder is the
+operator's.
+
+**What you are handed.** A copy of the operator's normalised rows
+(`TaxRate[]`: `class`, `label`, `rate_bp`, optional `country` and
+`postcodes`), and `ctx.settings`, every shop setting as a map. Settings are
+read by the call site because a filter cannot await.
+
+**What you return.** The rows you were handed plus your own:
+
+```ts
+filters: {
+  [PLUGIN_HOOKS.TAX_RATES]: (rates, ctx) =>
+    enabled(ctx.settings) ? [...rates, { class: 'standard', label: 'DE', rate_bp: 1900, country: 'DE' }] : rates,
+}
+```
+
+What the core does with it:
+
+- **The operator's rows win.** They are kept, first and unchanged, even if
+  you leave them out or edit your copy. A row of yours with the same country,
+  class and postcodes as one of theirs is dropped.
+- **Your rows go through the same normaliser** as the operator's: an invalid
+  country (`Germany`), a rate outside 0 to 20000 bp, or a territory row none of
+  whose postcodes is a recognised pattern is dropped. The operator's 50-row
+  cap does not apply to plugin rows; their bound is 2000.
+- **Every row of yours the core does not use is logged**, once per process,
+  as `[astrobaas] TAX_RATES: a plugin-supplied rate row was not used (…)`.
+- **Fail closed.** If any `TAX_RATES` filter throws, or the result is not an
+  array (an `async` filter returns a Promise), the operator's rows are used
+  alone and the error is logged. A destination with no row is then refused
+  (409 `checkout.tax_not_configured`), never charged a guessed rate.
+- **A foreign row is never a domestic rate.** Domestic lookups, including the
+  fallback to the default class and the override's class check, read only the
+  shop's own country's rows. A row for the shop's own country, **or a row with
+  no `country` at all**, counts as domestic, so always set `country` and leave
+  the shop's own country to the operator unless that is the point of your pack.
+- Rows are matched on (country, class, postcodes). A special territory is a
+  second row for the same country and class with `postcodes`, in the shipping
+  zones' grammar (`35*`, `9000-9499`); a matching postcode row wins over the
+  country-wide one.
+
+Return the array you were handed, unchanged, when your pack is switched off.
+
+### Priced add-ons on an order line
+
+`ORDER_LINE_ADDONS` lets a plugin charge for options chosen on a line — the
+optical module's coatings and lens index are the first user. The core does
+not know what an option is; it checks the request's shape, asks you for a
+price, and freezes what you answered.
+
+**What the storefront sends.** A per-line `addons` object, keyed by a
+namespace you own, on both `POST /api/orders/quote` and `POST /api/orders`:
+
+```json
+{ "product_id": "p1", "qty": 1, "addons": { "lens": ["ar", "index-160"] } }
+```
+
+Keys match `^[a-z][a-z0-9_-]{0,31}$`, at most 8 per line; each value is your
+own format, JSON only, at most 4 levels deep, the whole object at most 2048
+bytes. Anything else is refused with a 400 (`checkout.addons_invalid`) naming
+the problem. `null`, `[]`, `{}` and `""` mean "nothing chosen".
+
+**When it is called.** Once per line, inside `priceBasket`
+(`src/lib/commerce/pricing-service.ts`), which both the quote and the order
+use — so they price the same add-ons. `ctx.line` is a copy of the request line
+as posted (its `prescription` in display units, never the stored-units copy
+`ORDER_LINE_EXTRAS` returns); `ctx.product` and `ctx.variant` are what the
+line resolved to; `ctx.settings` is every shop setting, read by the call site
+because a filter cannot await. It is called for every line, with or without a
+selection: return the incoming value unchanged when there is nothing for you.
+
+**What you return.**
+
+```ts
+filters: {
+  [PLUGIN_HOOKS.ORDER_LINE_ADDONS]: (current, ctx) => {
+    if (!current.ok) return current;                 // a refusal must survive
+    const ids = ctx.line?.addons?.engraving;
+    if (!ids) return current;
+    return { ok: true, addons: [...current.addons,
+      { id: 'engrave', label: 'Engraving', unit_price_cents: 900, source: 'my-plugin', namespace: 'engraving' }] };
+  },
+}
+```
+
+What the core does with it:
+
+- The sum of `unit_price_cents` is added to the line's unit price (after
+  `PRODUCT_PRICE`) **before** coupons, the free-shipping threshold and tax, so
+  every total sees it. Whether coupons may discount add-ons is one constant,
+  `COUPONS_DISCOUNT_ADDONS` in `src/lib/commerce/line-addons.ts` (currently
+  yes: an add-on is part of the line's price).
+- The order freezes the line total **and** the add-ons from that same priced
+  line: `OrderItem.addons` holds `{ id, label, unit_price_cents, source?,
+  kind?, namespace? }` per add-on, in the order's currency, already inside
+  `total_cents`. The receipt, its PDF, the confirmation email and the admin
+  order list print them. The quote returns them on `lines[].addons`.
+- `{ ok: false, message, code?, params? }` refuses the quote and the order
+  with a 400 carrying your `code` and `params`.
+- **Fail closed** — never charged without the add-on, never the add-on
+  without the charge:
+  - a selection sent while no plugin registers the hook: 400
+    `checkout.addons_unsupported`;
+  - a selection that came back with no add-on: 400 `checkout.addons_unpriced`
+    (a filter that ignored it, or a selection of blank ids). Set `namespace`
+    on your add-ons and the core checks
+    each key of a multi-key selection separately; untagged add-ons answer the
+    selection as a whole;
+  - a filter that throws (which plain `applyFilters` would swallow, keeping
+    the value from before it), returns a Promise, or returns a malformed result or
+    add-on (an id or label missing, a price that is not a non-negative
+    integer): 500 `checkout.addons_failed`, logged as
+    `[astrobaas] ORDER_LINE_ADDONS: …`. Nothing is placed or reserved.
+- `label` is printed on receipts and kept with the order through a GDPR
+  erasure (order lines are accounting records). Never put personal data in
+  it — not engraving text, not a name; keep that in your own store.
+- An add-on priced at 0 is still an add-on: return it with `unit_price_cents:
+  0`, so the selection is recorded rather than refused as unpriced.
+| `INVOICE_ISSUERS` | filter | `(issuers: InvoiceIssuer[], ctx: { settings }) => InvoiceIssuer[]` | Register an invoice **issuer** (a myDATA provider, a Peppol access point, a ΦΗΜ bridge). Initial value `[]`; **append** to what you are handed. See "Invoice issuers from a plugin" below. |
+
+### Invoice issuers from a plugin
+
+Core keeps a frozen, **non-fiscal** invoice record per order and a credit-memo
+record per refund (`src/lib/commerce/invoice-records.ts`): the lines, the VAT per
+rate as charged, the seller and the buyer with `tax_id`, the currency. It never
+issues a legal document — AstroBaaS is not a fiscal device. An issuer does:
+
+```ts
+import { PLUGIN_HOOKS, type Plugin, type InvoiceDocument, type InvoiceIssueContext } from 'astrobaas/core';
+
+const myIssuer = {
+  id: 'my-provider',            // lower-case letters, digits, '-'; stored on every record
+  label: 'My Provider',
+  // Called ONCE per final record (invoice or credit memo). MUST be idempotent on
+  // ctx.key: a retry (a person, or the background sweep) sends the same key,
+  // and only you can know whether the first call reached the authority.
+  async issue(doc: InvoiceDocument, ctx: InvoiceIssueContext) {
+    if (!servesThis(doc, ctx.settings)) return { ok: false, declined: true, reason: 'retail is switched off' };
+    const res = await send(doc, { idempotencyKey: ctx.key });   // your API, your credentials
+    if (res.unavailable) return { ok: false, error: res.message, retryable: true };
+    if (!res.ok) return { ok: false, error: res.message };       // shown on the record
+    return { ok: true, number: res.documentNumber, identifiers: { mark: res.mark, qr: res.qrUrl } };
+  },
+};
+
+export default {
+  id: 'my-provider-pack', name: 'My Provider', version: '1.0.0', description: '', author: '',
+  filters: {
+    // ctx.settings: every setting, read by core. Leave yourself off the list
+    // while your own switch is off — no cache, no timer.
+    [PLUGIN_HOOKS.INVOICE_ISSUERS]: (list, ctx) => (ctx?.settings?.my_provider_enabled === true ? [...list, myIssuer] : list),
+  },
+} satisfies Plugin;
+```
+
+**What `issue()` is handed** — `ctx: InvoiceIssueContext`:
+
+| Field | What it is |
+|---|---|
+| `order` | A copy of the order. |
+| `invoice` | For a credit memo: the invoice record it credits. |
+| `settings` | Every setting, read by core (a copy). |
+| `key` | `astrobaas:<record id>` — the same on every attempt at this record. Send it to your provider as its idempotency key. |
+| `attempt` | 1 on the first call to you for this record, 2 on the first retry … |
+| `reportLateSuccess({ number?, identifiers? })` | Tell core about a success that arrived after it stopped waiting. See below. |
+
+**What it answers** — exactly one of:
+
+| Answer | Meaning | What the record shows |
+|---|---|---|
+| `{ ok: true, number?, identifiers? }` | Issued. | `issued`, your number as the document number. |
+| `{ ok: false, error, retryable?: true }` | You tried and failed. `retryable` says a later call under the same key may succeed. | `issue failed` with `error`; with `retryable`, the next automatic attempt. |
+| `{ ok: false, declined: true, reason }` | **"Not mine."** You do not issue this record, and sent nothing anywhere. | Not a failure: see below. |
+
+- Core **claims** the record (`issuer.status: 'issuing'`) with a compare-and-set
+  before calling you, so two finalisations at once — or two sweeps — call you
+  once; it stores your answer only over its own claim.
+- `number` is printed on the PDF as the document number; it is the only invoice
+  number a record ever shows. String `identifiers` (at most 20) are kept and
+  printed beneath it.
+- Issuing never runs inside a checkout, refund or webhook request: the
+  automatic path runs after the response, and retries run on the scheduler.
+- A record marked `issued_externally` (staff, or an order carrying
+  `external_receipt_no`) is never sent to you.
+- Report a bad buyer `tax_id` as `{ ok: false, error }`. Never block anything:
+  the sale has already happened.
+
+**Declining, and the order issuers are asked in.** A record is still issued by
+ONE issuer; the first that does not decline owns it.
+
+1. No issuer active: none; the shop's internal reference applies.
+2. One active, none chosen: that one.
+3. More than one active, none chosen under **Settings → Invoices**
+   (`invoice_issuer`): nobody is called, and the record says the shop must
+   choose. Plugin load order never decides who reports a sale.
+4. One chosen: it is asked FIRST, then every other active issuer in hook order
+   (filter priority, then registration) — each only when the one before it
+   **declined**. A failure, a throw or a timeout is never passed on: it may
+   have reached the authority, so the record stays with that issuer. Every
+   later attempt — the sweep, or **Issue again** — goes to it alone, even if
+   the shop's choice changed; if it is no longer active, **Issue again** says
+   so, and a person marks the record issued elsewhere.
+5. Every issuer declined: the record is treated exactly as with no issuer — its
+   state stays `final` (not `issue failed`), the reasons are kept in
+   `issuer.declined`, and the internal reference is attached when the shop
+   switched one on. **Issue again** asks again (your switch may be on now).
+
+A **credit memo** does not walk this order: it goes to the issuer that issued
+its sale, and to no other. Against a sale every issuer declined, the credit is
+declined too; against a sale nobody issued, it is not sent, and says why. If the issuer of
+the sale DECLINES its credit, the memo shows as a failure — the authority would
+otherwise hold the sale without its credit.
+
+**Retries.** A failure you mark `retryable: true` — and core's own 30 s
+timeout, or a throw, whose outcome is unknown — is retried by the scheduler's background
+sweep (`sweepInvoiceIssueRetries`): with the same key, by you alone (never by
+another issuer, even if the shop's choice changed), after 2, 4, 8 … minutes up
+to 6 hours, 10 calls at most; then the record waits for a person. A claim left
+`issuing` by a crash (older than 10 minutes) is retried the same way, under
+the same cap, and may be marked issued elsewhere. A plain failure (no
+`retryable`) is never retried automatically. Only records whose issuer is
+active are picked, oldest order first, at most 10 per tick, from orders made in
+the last 60 days (at most the newest 20,000). The
+record carries `issuer.attempts`, `issuer.retryable` and
+`issuer.next_attempt_at`.
+
+**A late success.** When your provider answers after core gave up waiting, call
+`ctx.reportLateSuccess({ number, identifiers })`. Core accepts it only while the
+record is still unissued (`failed`, or `issuing` on a retry) AND still yours
+under the same key — a compare-and-set on every storage driver, so it never
+overwrites a record issued elsewhere, declined or issued meanwhile. It answers
+`{ ok: true, accepted }` (`accepted: false` when you already reported it) or
+`{ ok: false, code: 'conflict' }`, and never throws. It works for as long as the
+process runs; after a restart, the sweep's retry under the same key is how you
+hand the document over.
+
+**Tax treatment on every line.** Each record line carries `tax_treatment`,
+frozen from the priced order when the record was finalised (a credit memo
+copies its invoice line's):
+
+| Value | Meaning |
+|---|---|
+| `standard` | VAT charged under the normal rules, at `tax_rate_bp` (> 0). |
+| `reverse-charge` | EU B2B: the buyer accounts for the VAT. |
+| `export` | Outside the EU VAT territory: no EU VAT due. |
+| `exempt` | Staff recorded an exemption on the order (a tax override, with its reason). |
+| absent | Core cannot tell — e.g. a 0 % line the engine stamped nothing on (tax switched off, an untaxed product, a zero-rated class). Decide it yourself or refuse; never assume `standard`. |
+
+`tax_jurisdiction` (ISO country) is there when another country's table priced
+the line. Neither is ever re-derived from today's settings.
 
 ### Product fields from a plugin
 
@@ -523,7 +896,7 @@ own helpers, which is the same thing with none of the risk. Use `astrobaas` as a
 **devDependency** for types while developing; `npm run build` (esbuild, bundled,
 no externals) produces a file with zero imports.
 
-`host` carries four things, and the set is additive — a module that destructures
+`host` carries these, and the set is additive — a module that destructures
 only the first two keeps working:
 
 | Key | What it is |
@@ -532,10 +905,68 @@ only the first two keeps working:
 | `PLUGIN_HOOKS` | This host's hook-name constants. Never hard-code the strings. |
 | `text` | `{ fold, transliterate }` — the core's own text utilities, exposed so a module cannot fold search terms differently from the core that ranks them. |
 | `getSettings` | `() => Promise<Record<string, unknown>>` — every setting as a **map**, not the row array. **Async, so it is usable from an admin page's `render` but not from a synchronous filter** — a filter that needs its own configuration must be handed it by its call site, the way `SEARCH_EXPAND` passes `ctx.settings`. |
+| `getPluginSettings` | `(pluginId) => Promise<Record<string, unknown>>` — your plugin's own settings record. See "Your own settings". |
+| `createStore` | `(pluginId) => PluginStore` — your namespaced store, usable **outside** a route handler: from a filter, an action, a timer. The same records `ctx.store` and your migrations see. Synchronous (storage is opened on first use); an invalid id — a package name like `@acme/x` is not a plugin id — throws at the call. See "Storage". |
+| `catalog` | Read-only product and brand reads: `listProducts()`, `iterateProducts({ batchSize })`, `listBrands()`. See "Reading the catalogue" below. |
+| `money` | `{ currencyExponent(currency) }` — decimal places for an ISO 4217 code (`EUR` 2, `JPY` 0, `KWD` 3), from the same table the core formats prices with. |
 
 ```ts
-export default function create({ definePlugin, PLUGIN_HOOKS, text, getSettings }) {
+export default function create({ definePlugin, PLUGIN_HOOKS, text, getSettings, createStore }) {
   return definePlugin({ /* … */ });
+}
+```
+
+### Reading the catalogue
+
+`host.catalog` is how a feed, a marketplace sync or a price monitor reads
+products without importing the host. Types: `PluginCatalog`, `CatalogProduct`,
+`CatalogBrand` from `astrobaas/core` (types only — the values come from `host`).
+
+| Member | Returns |
+| --- | --- |
+| `listProducts()` | `Promise<CatalogProduct[]>` — every product, in storage order. |
+| `iterateProducts({ batchSize? })` | `AsyncIterable<CatalogProduct[]>` — the same products in the same order, in batches (default 500, max 5,000). |
+| `listBrands()` | `Promise<{ slug, name, key, spellings }[]>` — every maker, exactly as `GET /api/brands` lists them (makers with active products plus every curated brand record). |
+
+What every product read guarantees, on all three storage drivers:
+
+- **Every status.** Drafts, archived products and `catalog_visibility: hidden`
+  ones are all included, so a feed can report why it left one out. **Filter
+  them yourself** before you publish anything.
+- **Copies.** Each call returns fresh objects. Changing one changes nothing in
+  the shop and nothing in the next read. (On the lowdb driver the storage
+  layer hands out its cached rows; the host clones them before you see them.)
+- **The derived read fields** that `GET /api/products` serves: `stock_status`
+  on the product and on each variant, `reference_price_cents`, and each
+  image's `kind` / `mime_type` with `photos` and `videos` split out.
+- **Public custom fields only.** `custom` holds the fields the merchant marked
+  **public** under Settings → Product fields — the same bag an anonymous
+  `GET /api/products` returns. Staff-only fields (a cost price, a supplier
+  code) and undeclared keys are removed. A plugin's output is usually public,
+  so this is the safe default; if you need a field, the merchant marks it
+  public.
+- **Brands are free text.** `product.brand` is whatever was typed or
+  imported ("Ray-Ban", "RAYBAN"), not a slug. To name a product's maker, find
+  the `listBrands()` entry whose `spellings` contains `product.brand` exactly;
+  its `name` is the one the shop shows.
+- Not applied: embed facades and the `?locale=` projection. The `i18n`
+  sidecar is left on the product, so you can read translations yourself.
+
+**Size.** The storage layer has no paged product read, so each call reads the
+whole product table once. `listProducts()` then holds a projected copy of all
+of it at once — fine for a few thousand products. Past that, use
+`iterateProducts()`: it still reads once (a snapshot taken when iteration
+starts), but copies and projects one batch at a time, so a consumer that
+writes as it goes keeps only one batch of copies alive. Iteration fixes which
+products and their order when it starts; each batch is copied when it is
+reached, so an edit saved mid-iteration may show in a later batch.
+
+```ts
+for await (const batch of host.catalog.iterateProducts({ batchSize: 1000 })) {
+  for (const p of batch) {
+    if (p.status !== 'active' || p.catalog_visibility === 'hidden') continue;
+    write(item(p, host.money.currencyExponent(currency)));
+  }
 }
 ```
 
@@ -563,9 +994,22 @@ deploy script can assert that what was requested actually loaded.
 ## Storage, from a route
 
 Route handlers receive `ctx.store`, already namespaced to your plugin — you
-import nothing (see "Storage" below). Outside handlers, the factory pattern
-still applies: do the work inside hooks and routes, which is where the host
-hands you what you need.
+import nothing (see "Storage" below). Outside handlers — a filter, an action, a
+timer — call `host.createStore('<your-id>')` once in the factory and keep it:
+
+```ts
+export default function create({ definePlugin, PLUGIN_HOOKS, createStore }) {
+  const store = createStore('vat');           // no storage touched yet
+  return definePlugin({
+    id: 'vat', /* … */
+    actions: {
+      [PLUGIN_HOOKS.AFTER_ORDER_CREATE]: async (order) => {
+        await store.put('evidence', order.id, { at: new Date().toISOString() });
+      },
+    },
+  });
+}
+```
 
 ## Your own settings
 
@@ -1000,8 +1444,11 @@ routes: [{
 }]
 ```
 
-Outside a handler — in a filter, an action, or setup code — build it yourself
-from the stable barrel:
+Outside a handler — in a filter, an action, a timer — a **compiled external
+plugin** asks the host: `host.createStore('<your-id>')` (see "The contract").
+It must import nothing from the host at runtime, so this is the only way it
+gets a store there. A plugin bundled in this repository can build the same
+store from the stable barrel:
 
 ```ts
 import { createPluginStore, LocalDB } from 'astrobaas/core';
@@ -1015,8 +1462,9 @@ await store.delete('orders', 'ord_1');
 await store.clear('orders');
 ```
 
-Migrations receive the same store as their argument (see below), so all three
-paths read and write the same namespaced records.
+Migrations receive the same store as their argument (see below), so every
+path — `ctx.store`, `host.createStore`, `createPluginStore`, migrations — reads
+and writes the same namespaced records, on all three storage drivers.
 
 Deliberately small: no query language, no joins, no indexes beyond the
 namespace. `list()` filters in-process and is **capped at 5,000 records**. Past

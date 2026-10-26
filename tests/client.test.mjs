@@ -11,25 +11,11 @@
  *
  * Run with:  node tests/client.test.mjs
  */
-import { transform } from 'esbuild';
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+// Bundled, not transformed file-by-file: the client re-exports the variant
+// picker rule from lib/, so it is no longer a single file.
+import { loadTs } from './lib/load.mjs';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const cacheDir = path.join(here, '..', 'node_modules', '.cache');
-await fs.mkdir(cacheDir, { recursive: true });
-
-async function load(rel) {
-  const src = await fs.readFile(path.join(here, '..', rel), 'utf8');
-  // Strip the type-only import from core/models so esbuild needn't resolve it.
-  const { code } = await transform(src, { loader: 'ts', format: 'esm' });
-  const tmp = path.join(cacheDir, `astrobaas-${path.basename(rel)}-${process.pid}.mjs`);
-  await fs.writeFile(tmp, code);
-  const mod = await import(pathToFileURL(tmp).href);
-  await fs.rm(tmp, { force: true });
-  return mod;
-}
+const load = (rel) => loadTs(rel, 'client');
 
 const { createClient, AstroBaasError } = await load('src/client/index.ts');
 
@@ -402,6 +388,17 @@ function mockFetch(scripted) {
   check('createClient requires a baseUrl', threw);
 }
 
+/* ─── Stock status ────────────────────────────────────────────────────────── */
+{
+  const fetchImpl = mockFetch({ body: { success: true, data: { status: 'low-stock' } } });
+  const c = createClient('https://cms.example.com', { fetch: fetchImpl });
+  const got = await c.products.stockStatus('a slug/with space');
+  check('products.stockStatus GETs the stock-status route, path-encoded',
+    fetchImpl.calls[0].url === 'https://cms.example.com/api/products/a%20slug%2Fwith%20space/stock-status'
+    && (fetchImpl.calls[0].init.method ?? 'GET') === 'GET');
+  check('...and returns the data, not the envelope', got?.status === 'low-stock');
+}
+
 /* ─── Commerce ──────────────────────────────────────────────────────────────
  *
  * The REST API has had products, orders, customers, coupons and media since
@@ -429,17 +426,47 @@ function mockFetch(scripted) {
     && /[?&]limit=10/.test(fetchImpl.calls[1].url)
     && /[?&]offset=20/.test(fetchImpl.calls[1].url));
 
-  // A false boolean is OMITTED, not sent as "false". The route reads the
-  // presence of the parameter, so `featured=false` would filter to featured
-  // products — the exact opposite of what the caller asked for.
+  // A true boolean goes out as `1`, and a false one is OMITTED, not sent as
+  // "false". The route does NOT read the presence of the parameter: it reads
+  // the value through `queryFlag` (src/lib/http/query-flags.ts), where only
+  // `1` and `true` mean yes. Until that helper existed the product route read
+  // `=== 'true'`, so this `1` applied no filter at all. That the route honours
+  // what is sent here is pinned in tests/query-flags.test.mjs, which drives
+  // this client against the real route handler.
   await c.products.list({ featured: true, on_sale: false });
   check('a TRUE boolean is sent', /[?&]featured=1/.test(fetchImpl.calls[2].url));
   check('...and a FALSE one is omitted, never sent as "false"',
     !/on_sale/.test(fetchImpl.calls[2].url));
 
+  // A client of its own, so the call indexes the rest of this block counts on
+  // do not move.
+  const sortFetch = mockFetch({ body: { success: true, data: [] } });
+  const sc = createClient('https://cms.example.com', { fetch: sortFetch });
+  await sc.products.list({ search: 'frame', sort: 'price_asc', locale: 'de' });
+  await sc.products.list({ search: 'frame' });
+  check('products.list sends sort and locale as the route parses them',
+    /[?&]sort=price_asc/.test(sortFetch.calls[0].url) && /[?&]locale=de/.test(sortFetch.calls[0].url));
+  check('...and omits sort when it is not given', !/sort=/.test(sortFetch.calls[1].url));
+
   await c.products.get('smoke-widget');
   check('products.get uses the slug path',
     fetchImpl.calls[3].url === 'https://cms.example.com/api/products/smoke-widget');
+
+  // Staff opening a draft opt in, exactly as the list does; the default stays
+  // the public answer. Checked on a separate client so the call indexes above
+  // and below are unchanged.
+  {
+    const urls = [];
+    const c2 = createClient('https://cms.example.com', {
+      fetch: async (url) => { urls.push(String(url)); return new Response(JSON.stringify({ success: true, data: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } }); },
+    });
+    await c2.products.get('draft-thing', { all: true });
+    await c2.products.get('draft-thing', { all: false });
+    check('products.get({ all: true }) asks for unpublished products',
+      urls[0] === 'https://cms.example.com/api/products/draft-thing?all=true');
+    check('...and without it the default public read is unchanged',
+      urls[1] === 'https://cms.example.com/api/products/draft-thing');
+  }
 
   await c.products.notifyWhenBack('abc', 'me@example.com');
   check('notifyWhenBack POSTs to the product route',
@@ -484,6 +511,67 @@ function mockFetch(scripted) {
   await c.products.list({});
   check('an empty filter set leaves no trailing question mark',
     fetchImpl.calls[12].url === 'https://cms.example.com/api/products');
+}
+
+// ---- order tags: the wire, as the routes parse it ----
+{
+  const fetchImpl = mockFetch({ body: { success: true, data: { tags: [] } } });
+  const c = createClient('https://cms.example.com', { fetch: fetchImpl });
+
+  await c.orders.list({ tag: 'VIP & co' });
+  check('orders.list sends ?tag= encoded',
+    fetchImpl.calls[0].url === 'https://cms.example.com/api/orders?tag=VIP+%26+co');
+
+  await c.orders.tags();
+  check('orders.tags GETs the counts route',
+    fetchImpl.calls[1].url === 'https://cms.example.com/api/orders/tags'
+    && (fetchImpl.calls[1].init.method ?? 'GET') === 'GET');
+
+  await c.orders.addTags('o 1', 'Fragile');
+  check('orders.addTags POSTs { tag } to the order route, id encoded',
+    fetchImpl.calls[2].url === 'https://cms.example.com/api/orders/o%201/tags'
+    && fetchImpl.calls[2].init.method === 'POST'
+    && JSON.parse(fetchImpl.calls[2].init.body).tag === 'Fragile');
+
+  await c.orders.addTags('o1', ['A', 'B']);
+  check('...and a list as { tags }', JSON.stringify(JSON.parse(fetchImpl.calls[3].init.body)) === '{"tags":["A","B"]}');
+
+  await c.orders.removeTag('o1', 'Needs review');
+  check('orders.removeTag DELETEs with ?tag=',
+    fetchImpl.calls[4].url === 'https://cms.example.com/api/orders/o1/tags?tag=Needs%20review'
+    && fetchImpl.calls[4].init.method === 'DELETE');
+
+  await c.orders.renameTag('VIP', 'Premium');
+  check('orders.renameTag PATCHes { from, to }',
+    fetchImpl.calls[5].url === 'https://cms.example.com/api/orders/tags'
+    && fetchImpl.calls[5].init.method === 'PATCH'
+    && JSON.parse(fetchImpl.calls[5].init.body).to === 'Premium');
+
+  await c.orders.deleteTag('Old');
+  check('orders.deleteTag DELETEs the collection route with ?tag=',
+    fetchImpl.calls[6].url === 'https://cms.example.com/api/orders/tags?tag=Old'
+    && fetchImpl.calls[6].init.method === 'DELETE');
+}
+
+// ---- order timeline: the wire ----
+{
+  const fetchImpl = mockFetch({ body: { success: true, data: [] } });
+  const c = createClient('https://cms.example.com', { fetch: fetchImpl });
+
+  await c.orders.timeline('o 1');
+  check('orders.timeline GETs the order\'s timeline route, id encoded, no query by default',
+    fetchImpl.calls[0].url === 'https://cms.example.com/api/orders/o%201/timeline'
+    && (fetchImpl.calls[0].init.method ?? 'GET') === 'GET');
+
+  await c.orders.timeline('o1', { filter: 'payments', limit: 20, offset: 40 });
+  check('...and sends filter, limit and offset',
+    fetchImpl.calls[1].url === 'https://cms.example.com/api/orders/o1/timeline?filter=payments&limit=20&offset=40');
+
+  await c.orders.addTimelineComment('o1', 'Called the customer');
+  check('orders.addTimelineComment POSTs { text }',
+    fetchImpl.calls[2].url === 'https://cms.example.com/api/orders/o1/timeline'
+    && fetchImpl.calls[2].init.method === 'POST'
+    && JSON.parse(fetchImpl.calls[2].init.body).text === 'Called the customer');
 }
 
 // ---- orders.place is idempotent across its own retries (hardening S4.4) ----

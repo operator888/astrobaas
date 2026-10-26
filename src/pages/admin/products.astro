@@ -12,6 +12,9 @@ import Pagination from '../../components/admin/Pagination.astro';
 import BulkProductBar from '../../components/admin/BulkProductBar.astro';
 import { productListMatches } from '../../lib/commerce/product-list-filter';
 import { readPaging, listHref } from '../../lib/admin-paging';
+import { productStockStatus, resolveLowStockThreshold } from '../../lib/commerce/stock-status';
+import { settingsMap } from '../../lib/settings-map';
+import { isGrouped, readGroup, GROUP_LIMITS } from '../../lib/commerce/grouped';
 
 await LocalDB.init();
 const user = Astro.locals.user;
@@ -87,7 +90,23 @@ const brandVariants = brandSummaries
   .filter((b) => b.spellings.length > 1)
   .sort((a, b) => b.spellings.length - a.spellings.length || b.count - a.count);
 const active = products.filter((p) => p.status === 'active').length;
-const outOfStock = products.filter((p) => !p.in_stock).length;
+// The same derivation the public API and the storefront badge use — not the
+// stored `in_stock`, which says "in stock" for a variable product whose every
+// variant has sold out.
+const lowStockDefault = resolveLowStockThreshold(settingsMap(await LocalDB.getSettings()));
+/*
+ * A grouped product has no price or stock of its own: both are read from its
+ * members, the same derivation (readGroup) the product API uses, so this row
+ * and the storefront's group page cannot disagree. Staff view: every member is
+ * listed, but the price and the badge are judged on the ones shoppers see.
+ */
+const productById = new Map(products.map((p) => [p.id, p]));
+const groupViews = new Map(products.filter((p) => isGrouped(p)).map((p) => [p.id, readGroup(
+  p, (k) => productById.get(k), { publicOnly: false, defaultThreshold: lowStockDefault },
+)]));
+const stockOf = (p: (typeof products)[number]) =>
+  groupViews.get(p.id)?.stock_status ?? productStockStatus(p, lowStockDefault);
+const outOfStock = products.filter((p) => stockOf(p).status === 'out-of-stock').length;
 const onSale = products.filter((p) => p.on_sale).length;
 // The hardcoded el-GR here was one of five, and disagreed with the sale
 // email's formatMoney — the screen and the receipt stated the same total two
@@ -253,7 +272,12 @@ const shopCurrency = await getShopCurrency();
               </td>
               <td class="px-4 py-2 text-gray-600">{p.brand}</td>
               <td class="px-4 py-2 text-right">
-                {p.on_sale && p.sale_price_cents != null ? (
+                {groupViews.has(p.id) ? (
+                  <span class="whitespace-nowrap">{(() => {
+                    const from = groupViews.get(p.id)!.price_from_cents;
+                    return from === null ? '—' : `from ${money(from)}`;
+                  })()}</span>
+                ) : p.on_sale && p.sale_price_cents != null ? (
                   <span><s class="text-gray-400">{money(p.regular_price_cents ?? p.price_cents)}</s> <b>{money(p.price_cents)}</b></span>
                 ) : (
                   money(p.price_cents)
@@ -265,10 +289,28 @@ const shopCurrency = await getShopCurrency();
                   grew to three lines of chrome around one word. */}
               <td class="px-4 py-2">
                 <div class="flex flex-wrap items-center gap-1">
-                  <span class={`px-2 py-0.5 rounded-full text-xs whitespace-nowrap ${p.in_stock ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-700'}`}>
-                    {p.in_stock ? 'in stock' : 'out'}
-                  </span>
+                  {(() => {
+                    const st = stockOf(p).status;
+                    const tone = st === 'out-of-stock' ? 'bg-red-100 text-red-700'
+                      : st === 'low-stock' ? 'bg-amber-100 text-amber-800' : 'bg-green-100 text-green-800';
+                    const label = st === 'out-of-stock' ? 'out' : st === 'low-stock' ? 'low stock' : 'in stock';
+                    return <span class={`px-2 py-0.5 rounded-full text-xs whitespace-nowrap ${tone}`}>{label}</span>;
+                  })()}
                   <span class="px-2 py-0.5 rounded-full text-xs whitespace-nowrap bg-gray-100 text-gray-600">{p.status}</span>
+                  {groupViews.has(p.id) && (() => {
+                    const g = groupViews.get(p.id)!;
+                    const out = g.members.filter((m) => m.stock_status.status === 'out-of-stock').length;
+                    return (
+                      <>
+                        <span class="px-2 py-0.5 rounded-full text-xs whitespace-nowrap bg-indigo-100 text-indigo-800">group of {g.members.length}</span>
+                        {out > 0 && (
+                          <span class="px-2 py-0.5 rounded-full text-xs whitespace-nowrap bg-amber-100 text-amber-800" data-group-warning>
+                            {out} member{out === 1 ? '' : 's'} out of stock
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               </td>
               {/*
@@ -315,6 +357,7 @@ const shopCurrency = await getShopCurrency();
           <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-blue-600 text-blue-700 font-medium" data-tab="general">General</button>
           <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="images">Images</button>
           <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="variants">Variants</button>
+          <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="group">Group</button>
           <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="inventory">Inventory</button>
           <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="shipping">Shipping</button>
           <button type="button" class="tab-btn px-3 py-2 text-sm border-b-2 border-transparent text-gray-500" data-tab="safety">Safety</button>
@@ -606,14 +649,54 @@ const shopCurrency = await getShopCurrency();
           </p>
         </section>
 
+        <!-- ---------------- Group ---------------- -->
+        {/*
+          A grouped product shows several products on one page; each is bought
+          on its own line, at its own price. The members are chosen by search,
+          not by typing ids, and the list warns about any member a shopper
+          cannot buy right now. Rules the server enforces: lib/commerce/grouped.ts.
+        */}
+        <section class="tab-panel hidden" data-panel="group">
+          <label class="flex items-start gap-2 text-sm">
+            <input name="is_grouped" type="checkbox" class="mt-0.5 rounded border-gray-300" />
+            <span>
+              <strong>This is a grouped product</strong> — one page showing {GROUP_LIMITS.min}–{GROUP_LIMITS.max}
+              related products. Each keeps its own SKU, price and stock and is added to the cart on its own.
+            </span>
+          </label>
+          <div id="group-editor" class="mt-4 space-y-3" data-min={GROUP_LIMITS.min} data-max={GROUP_LIMITS.max} hidden>
+            <p class="text-xs text-gray-500">
+              A group has no price or stock of its own: the shop shows "from" its cheapest product, and the
+              price, sale and stock fields on the other tabs are ignored.
+            </p>
+            <div id="group-warning" role="status" class="hidden"></div>
+            <div>
+              <div class="flex items-center justify-between text-sm">
+                <span class="font-medium text-gray-700">Products in this group</span>
+                <span id="group-count" class="text-xs text-gray-500"></span>
+              </div>
+              <ol id="group-members" class="mt-1 divide-y divide-gray-100 border border-gray-200 rounded-lg"></ol>
+              <p id="group-empty" class="text-sm text-gray-400 mt-1">No products yet — search below to add some.</p>
+            </div>
+            <div>
+              <label class="text-sm" for="group-search">Add a product</label>
+              <input id="group-search" type="search" autocomplete="off" placeholder="Search by name, SKU or brand…"
+                class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+              <p id="group-search-msg" class="text-xs text-gray-500 mt-1"></p>
+              <ul id="group-results" class="mt-1 divide-y divide-gray-100"></ul>
+            </div>
+          </div>
+        </section>
+
         <!-- ---------------- Inventory ---------------- -->
         <section class="tab-panel hidden grid grid-cols-2 gap-4" data-panel="inventory">
           <label class="text-sm">Stock (empty = untracked)
             <input name="stock" type="number" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
             <span class="text-xs text-gray-400">Can go negative when backorders are allowed.</span>
           </label>
-          <label class="text-sm">Low-stock warning at
+          <label class="text-sm">Low-stock threshold (units)
             <input name="low_stock_threshold" type="number" min="0" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+            <span class="text-xs text-gray-400">Empty = the shop default (Settings → Shop). 0 = never show "low stock".</span>
           </label>
           <label class="text-sm">Backorders
             <select name="backorders" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg">
@@ -657,9 +740,28 @@ const shopCurrency = await getShopCurrency();
               <span>Downloadable</span>
             </label>
           </div>
-          <label class="col-span-2 text-sm">Downloads (one per line: <code>Name | https://url</code>)
+          <label class="col-span-2 text-sm">Downloads (one per line: <code>Name | https://url</code> or <code>Name | private:pf_…</code>)
             <textarea name="downloads_text" rows="3" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs"></textarea>
-            <span class="text-xs text-gray-400">Only https and /media URLs are stored.</span>
+            <span class="text-xs text-gray-400">
+              Buyers get signed, expiring links once the order is paid; the real location is never published.
+              A private upload is streamed by the CMS and stays hidden. An https URL is revealed to the buyer
+              by the redirect when they download. Files under /uploads are public to anyone with the path.
+            </span>
+          </label>
+          <div class="col-span-2 text-sm flex flex-wrap items-center gap-2">
+            <label class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-gray-300 cursor-pointer hover:bg-gray-50">
+              <span>Upload a private file…</span>
+              <input id="download-upload" type="file" class="sr-only" accept=".pdf,.zip,.epub,.mp3,.png,.jpg,.jpeg,.gif,.webp" />
+            </label>
+            <span id="download-upload-status" class="text-xs text-gray-500" aria-live="polite"></span>
+          </div>
+          <label class="text-sm">Download limit
+            <input name="download_limit" type="number" min="0" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+            <span class="text-xs text-gray-400">Downloads of each file per purchase. Blank = shop default, 0 = unlimited.</span>
+          </label>
+          <label class="text-sm">Download expiry (days)
+            <input name="download_expiry_days" type="number" min="0" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
+            <span class="text-xs text-gray-400">Days after payment. Blank = shop default, 0 = never.</span>
           </label>
         </section>
 
@@ -708,6 +810,17 @@ const shopCurrency = await getShopCurrency();
           <label class="col-span-2 text-sm">Attributes (one per line: <code>Colour: Black, Tortoise</code>)
             <textarea name="attributes_text" rows="3" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs"></textarea>
           </label>
+          <div class="col-span-2 text-sm border border-gray-200 rounded-lg p-3" role="group" aria-labelledby="swatch-editor-title" data-swatch-section>
+            <h3 id="swatch-editor-title" class="font-medium">Swatches</h3>
+            <p class="text-xs text-gray-500 mt-0.5">
+              Give a value a colour or an image, and the shop shows it as a swatch instead of a word.
+              An option is shown as swatches when you tick it, or when every value has one.
+              Images: an <code>/uploads/…</code> path from the media library, or an https address.
+            </p>
+            <p class="text-xs text-gray-500 mt-2" data-swatch-empty>Add attributes above to give their values swatches.</p>
+            <div class="mt-2 space-y-4" data-swatch-editor></div>
+            <datalist id="swatch-image-options"></datalist>
+          </div>
           <label class="text-sm">Upsell product ids (comma separated)
             <input name="upsell_text" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" />
           </label>
@@ -743,6 +856,7 @@ const shopCurrency = await getShopCurrency();
   import { api, apiFetch } from '../../lib/apiClient';
   import { foldForSearch as fold } from '../../lib/text-search';
   import { loadEditorSurface } from '../../lib/editor-insert';
+  import { swatchStateFrom, metaFor, applySwatchState, colorInputValue } from '../../lib/swatch-form';
 
   /**
    * The GPSR fields, named ONCE so the load and the save cannot disagree.
@@ -1010,6 +1124,34 @@ const shopCurrency = await getShopCurrency();
    */
   const uploadInput = document.getElementById('image-upload');
   const uploadStatus = document.getElementById('image-upload-status');
+
+  // A product download stored PRIVATELY: the answer is a `private:pf_…`
+  // reference, appended to the Downloads list under the file's own name.
+  const dlUpload = document.getElementById('download-upload');
+  const dlStatus = document.getElementById('download-upload-status');
+  dlUpload?.addEventListener('change', async () => {
+    const file = dlUpload.files && dlUpload.files[0];
+    if (!file) return;
+    dlUpload.disabled = true;
+    dlStatus.textContent = `Uploading ${file.name}…`;
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await apiFetch('/api/downloads/upload', { method: 'POST', body: fd });
+      if (res.ok && res.data?.url) {
+        const ta = form.elements.namedItem('downloads_text');
+        const name = String(res.data.original_name || file.name).replace(/\|/g, ' ').trim() || 'Download';
+        ta.value = (ta.value.trim() ? ta.value.trim() + '\n' : '') + `${name} | ${res.data.url}`;
+        form.elements.namedItem('downloadable').checked = true;
+        dlStatus.textContent = `${name} stored privately. Save the product to keep it.`;
+      } else {
+        dlStatus.textContent = res.error || 'Upload failed';
+      }
+    } finally {
+      dlUpload.disabled = false;
+      dlUpload.value = '';
+    }
+  });
 
   uploadInput.addEventListener('change', async () => {
     const files = Array.from(uploadInput.files || []);
@@ -1307,6 +1449,151 @@ const shopCurrency = await getShopCurrency();
     renderVariants();
   });
 
+  /* ---------------- group members ----------------
+   * An ordered list of member summaries, as GET /api/products/{id} returns
+   * them in `grouped_products` (staff read: hidden and draft members too).
+   * Candidates come from the product list route, searched on the server. What
+   * is sent on save is only the ids, in this order; the server re-validates
+   * every rule (lib/commerce/grouped.ts) — the checks here only save a trip.
+   * Rendered with textContent, never innerHTML: names are merchant data.
+   */
+  const GROUP_MAX = Number(document.getElementById('group-editor').dataset.max) || 10;
+  const GROUP_MIN = Number(document.getElementById('group-editor').dataset.min) || 2;
+  let groupMembers = [];
+  const groupEditor = document.getElementById('group-editor');
+  const groupList = document.getElementById('group-members');
+  const groupResults = document.getElementById('group-results');
+  const groupSearch = document.getElementById('group-search');
+  const groupSearchMsg = document.getElementById('group-search-msg');
+  const groupWarning = document.getElementById('group-warning');
+  const moneyText = (c) => (typeof c === 'number' ? (c / 100).toFixed(2) : '—');
+  const memberOut = (m) => m.stock_status && m.stock_status.status === 'out-of-stock';
+  const memberUnbuyable = (m) => m.stock_status && m.stock_status.purchasable === false;
+  const memberUnseen = (m) => (m.status && m.status !== 'active') || m.catalog_visibility === 'hidden';
+
+  function setGrouped(on) {
+    form.elements.is_grouped.checked = on;
+    groupEditor.hidden = !on;
+    // A group has no price: the regular price must not block the save.
+    form.elements.price.required = !on;
+  }
+
+  function renderGroup() {
+    groupList.replaceChildren();
+    document.getElementById('group-empty').hidden = groupMembers.length > 0;
+    document.getElementById('group-count').textContent = `${groupMembers.length} of ${GROUP_MAX}`;
+    groupMembers.forEach((m, i) => {
+      const li = document.createElement('li');
+      li.className = 'flex items-center gap-2 px-3 py-2 text-sm';
+      li.dataset.memberId = m.id;
+      const pos = document.createElement('span');
+      pos.className = 'w-5 text-gray-400 text-xs';
+      pos.textContent = String(i + 1);
+      const name = document.createElement('span');
+      name.className = 'flex-1 min-w-0';
+      const strong = document.createElement('span');
+      strong.className = 'font-medium text-gray-900';
+      strong.textContent = m.name;
+      const meta = document.createElement('span');
+      meta.className = 'block text-xs text-gray-500';
+      meta.textContent = [m.sku, moneyText(m.price_cents)].filter(Boolean).join(' · ');
+      name.append(strong, meta);
+      li.append(pos, name);
+      const badge = (text, tone) => {
+        const b = document.createElement('span');
+        b.className = `px-2 py-0.5 rounded-full text-xs whitespace-nowrap ${tone}`;
+        b.textContent = text;
+        li.appendChild(b);
+      };
+      if (memberOut(m)) badge(memberUnbuyable(m) ? 'out of stock' : 'backorder', 'bg-red-100 text-red-700');
+      else if (m.stock_status && m.stock_status.status === 'low-stock') badge('low stock', 'bg-amber-100 text-amber-800');
+      if (memberUnseen(m)) badge('not shown to shoppers', 'bg-gray-100 text-gray-600');
+      if (m.type === 'variable') badge('has options', 'bg-gray-100 text-gray-600');
+      const btn = (text, label, on, disabled) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'px-1.5 py-0.5 text-xs rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-30';
+        b.textContent = text;
+        b.setAttribute('aria-label', label);
+        b.disabled = !!disabled;
+        b.addEventListener('click', on);
+        li.appendChild(b);
+      };
+      btn('↑', `Move ${m.name} up`, () => { groupMembers.splice(i - 1, 0, groupMembers.splice(i, 1)[0]); renderGroup(); }, i === 0);
+      btn('↓', `Move ${m.name} down`, () => { groupMembers.splice(i + 1, 0, groupMembers.splice(i, 1)[0]); renderGroup(); }, i === groupMembers.length - 1);
+      btn('Remove', `Remove ${m.name} from the group`, () => { groupMembers.splice(i, 1); renderGroup(); });
+      groupList.appendChild(li);
+    });
+
+    // The warning a merchant needs before shoppers find it: a member that
+    // cannot be bought right now, or that shoppers will not see at all.
+    const out = groupMembers.filter((m) => memberOut(m) && memberUnbuyable(m));
+    const unseen = groupMembers.filter(memberUnseen);
+    const lines = [];
+    if (out.length) lines.push(`Out of stock: ${out.map((m) => m.name).join(', ')}. Shoppers see it in the group but cannot add it.`);
+    if (unseen.length) lines.push(`Not shown to shoppers (draft, archived or hidden): ${unseen.map((m) => m.name).join(', ')}.`);
+    groupWarning.replaceChildren(...lines.map((t) => { const el = document.createElement('p'); el.textContent = t; return el; }));
+    groupWarning.className = lines.length
+      ? 'text-sm rounded-lg px-3 py-2 bg-amber-50 text-amber-900 border border-amber-200 space-y-1'
+      : 'hidden';
+  }
+
+  let groupSearchSeq = 0;
+  let groupSearchTimer = null;
+  async function searchGroupCandidates() {
+    const q = groupSearch.value.trim();
+    const seq = ++groupSearchSeq;
+    groupResults.replaceChildren();
+    if (q.length < 2) { groupSearchMsg.textContent = q ? 'Type at least two letters.' : ''; return; }
+    groupSearchMsg.textContent = 'Searching…';
+    const res = await api.get(`/api/products?all=true&limit=20&search=${encodeURIComponent(q)}`);
+    if (seq !== groupSearchSeq) return; // a newer search has started
+    if (!res.ok) { groupSearchMsg.textContent = res.error || 'Search failed'; return; }
+    const self = form.elements.id.value;
+    const chosen = new Set(groupMembers.map((m) => m.id));
+    const all = Array.isArray(res.data) ? res.data : [];
+    const usable = all.filter((p) => p.id !== self && !chosen.has(p.id)
+      && p.type !== 'grouped' && !(Array.isArray(p.variants) && p.variants.length));
+    const skipped = all.length - usable.length;
+    groupSearchMsg.textContent = usable.length
+      ? (skipped ? `${skipped} not offered: already in the group, a group itself, or has variants.` : '')
+      : (all.length ? 'Nothing here can join: already in the group, a group itself, or has variants.' : 'No products match.');
+    for (const p of usable) {
+      const li = document.createElement('li');
+      li.className = 'flex items-center gap-2 py-1.5 text-sm';
+      const label = document.createElement('span');
+      label.className = 'flex-1 min-w-0';
+      label.textContent = `${p.name}${p.sku ? ` · ${p.sku}` : ''} · ${moneyText(p.price_cents)}`;
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'px-2 py-0.5 text-xs rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40';
+      add.textContent = 'Add';
+      add.setAttribute('aria-label', `Add ${p.name} to the group`);
+      add.disabled = groupMembers.length >= GROUP_MAX;
+      add.addEventListener('click', () => {
+        if (groupMembers.length >= GROUP_MAX) return alert(`A group holds at most ${GROUP_MAX} products.`);
+        groupMembers.push({
+          id: p.id, name: p.name, sku: p.sku, slug: p.slug, type: 'simple',
+          price_cents: p.price_cents, stock_status: p.stock_status,
+          status: p.status, catalog_visibility: p.catalog_visibility ?? 'visible',
+        });
+        renderGroup();
+        li.remove();
+      });
+      li.append(label, add);
+      groupResults.appendChild(li);
+    }
+  }
+  groupSearch.addEventListener('input', () => {
+    clearTimeout(groupSearchTimer);
+    groupSearchTimer = setTimeout(searchGroupCandidates, 250);
+  });
+  // Enter in the search box must search, not submit the whole product form.
+  groupSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(groupSearchTimer); void searchGroupCandidates(); }
+  });
+  form.elements.is_grouped.addEventListener('change', () => setGrouped(form.elements.is_grouped.checked));
+
   /* ---------------- tabs ---------------- */
   document.getElementById('tab-bar').addEventListener('click', (e) => {
     const btn = e.target.closest('.tab-btn');
@@ -1331,8 +1618,161 @@ const shopCurrency = await getShopCurrency();
     if (i < 0) return null;
     const name = line.slice(0, i).trim();
     const values = csv(line.slice(i + 1));
-    return name && values.length ? { name, values, visible: true } : null;
+    return name && values.length ? { name, values } : null;
   }).filter(Boolean);
+
+  /* ---------------- swatches ----------------
+   * What the text cannot spell — a colour or image per value, "show as
+   * swatches", and `visible` — is held here, keyed by attribute name and value,
+   * and put back onto the parsed attributes on save (lib/swatch-form.ts). The
+   * text stays the one place the values are edited; this editor follows it.
+   * Built with textContent and properties, never innerHTML: names, values and
+   * image addresses are the merchant's and the API's.
+   */
+  let swatchState = {};
+  const swatchEditor = document.querySelector('[data-swatch-editor]');
+  const swatchEmpty = document.querySelector('[data-swatch-empty]');
+
+  function renderSwatchEditor() {
+    const attrs = textToAttrs(form.elements.attributes_text.value);
+    swatchEditor.textContent = '';
+    swatchEmpty.hidden = attrs.length > 0;
+
+    const options = document.getElementById('swatch-image-options');
+    options.textContent = '';
+    for (const img of images) {
+      // Only what the server accepts as a swatch image: our uploads, or https.
+      if (!img?.src || isVideoSrc(img.src) || !/^(\/uploads\/|https:\/\/)/i.test(img.src)) continue;
+      const o = document.createElement('option');
+      o.value = img.src;
+      options.appendChild(o);
+    }
+
+    attrs.forEach((a, ai) => {
+      const meta = metaFor(swatchState, a.name);
+      const box = document.createElement('fieldset');
+      box.className = 'border-t border-gray-100 pt-3';
+      box.dataset.swatchAttr = a.name;
+      const legend = document.createElement('legend');
+      legend.className = 'font-medium text-gray-800 pr-2';
+      legend.textContent = a.name;
+      box.appendChild(legend);
+
+      const mark = document.createElement('label');
+      mark.className = 'flex items-center gap-2 text-xs mb-2';
+      const markBox = document.createElement('input');
+      markBox.type = 'checkbox';
+      markBox.className = 'rounded border-gray-300';
+      markBox.checked = meta.swatch;
+      markBox.dataset.swatchMark = '';
+      markBox.addEventListener('change', () => { meta.swatch = markBox.checked; });
+      const markText = document.createElement('span');
+      markText.textContent = `Show ${a.name} as swatches`;
+      mark.append(markBox, markText);
+      box.appendChild(mark);
+
+      const table = document.createElement('table');
+      table.className = 'w-full text-xs';
+      const head = document.createElement('tr');
+      for (const h of ['Value', 'Colour', 'Hex', 'Image', '']) {
+        const th = document.createElement('th');
+        th.className = 'text-left font-normal text-gray-500 pb-1 pr-2';
+        th.textContent = h;
+        head.appendChild(th);
+      }
+      const thead = document.createElement('thead');
+      thead.appendChild(head);
+      table.appendChild(thead);
+      const tbody = document.createElement('tbody');
+
+      a.values.forEach((value, vi) => {
+        const sw = meta.swatches[value] ??= {};
+        const tr = document.createElement('tr');
+        tr.dataset.swatchValue = value;
+        const td = (child) => {
+          const c = document.createElement('td');
+          c.className = 'py-1 pr-2 align-middle';
+          if (child) c.appendChild(child);
+          tr.appendChild(c);
+          return c;
+        };
+        const id = `sw-${ai}-${vi}`;
+        const name = document.createElement('label');
+        name.htmlFor = `${id}-hex`;
+        name.textContent = value;
+        td(name);
+
+        const picker = document.createElement('input');
+        picker.type = 'color';
+        picker.className = 'h-8 w-10 border border-gray-300 rounded cursor-pointer';
+        picker.setAttribute('aria-label', `${a.name} ${value}: pick a colour`);
+        picker.value = colorInputValue(sw.color) ?? '#000000';
+        td(picker);
+
+        const hex = document.createElement('input');
+        hex.type = 'text';
+        hex.id = `${id}-hex`;
+        hex.className = 'w-24 px-2 py-1 border border-gray-200 rounded font-mono';
+        hex.placeholder = '#rrggbb';
+        hex.autocomplete = 'off';
+        hex.spellcheck = false;
+        hex.value = sw.color ?? '';
+        hex.dataset.swatchColor = '';
+        const showHexState = () => {
+          const bad = hex.value.trim() !== '' && !colorInputValue(hex.value);
+          hex.setAttribute('aria-invalid', bad ? 'true' : 'false');
+          hex.classList.toggle('border-red-500', bad);
+        };
+        hex.addEventListener('input', () => {
+          sw.color = hex.value.trim();
+          const c = colorInputValue(hex.value);
+          if (c) picker.value = c;
+          showHexState();
+        });
+        picker.addEventListener('input', () => {
+          hex.value = picker.value;
+          sw.color = picker.value;
+          showHexState();
+        });
+        showHexState();
+        td(hex);
+
+        const image = document.createElement('input');
+        image.type = 'text';
+        image.className = 'w-full px-2 py-1 border border-gray-200 rounded font-mono';
+        image.placeholder = '/uploads/… or https://…';
+        image.setAttribute('list', 'swatch-image-options');
+        image.setAttribute('aria-label', `${a.name} ${value}: swatch image`);
+        image.value = sw.image ?? '';
+        image.dataset.swatchImage = '';
+        image.addEventListener('input', () => { sw.image = image.value.trim(); });
+        td(image);
+
+        const clear = document.createElement('button');
+        clear.type = 'button';
+        clear.className = 'text-gray-600 hover:underline';
+        clear.textContent = 'Clear';
+        clear.setAttribute('aria-label', `Clear the ${value} swatch`);
+        clear.addEventListener('click', () => {
+          sw.color = '';
+          sw.image = '';
+          hex.value = '';
+          image.value = '';
+          picker.value = '#000000';
+          showHexState();
+        });
+        td(clear);
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      box.appendChild(table);
+      swatchEditor.appendChild(box);
+    });
+  }
+  form.elements.attributes_text.addEventListener('input', renderSwatchEditor);
+  // The image suggestions are the gallery's photos: refresh them when the
+  // operator opens the Advanced tab, after any gallery edit.
+  document.querySelector('.tab-btn[data-tab="advanced"]')?.addEventListener('click', renderSwatchEditor);
 
   const dlToText = (arr) => (arr || []).map((d) => `${d.name} | ${d.url}`).join('\n');
   const textToDl = (t) => String(t || '').split('\n').map((line) => {
@@ -1357,6 +1797,14 @@ const shopCurrency = await getShopCurrency();
     renderImages();
     variants = [];
     renderVariants();
+    swatchState = {};
+    renderSwatchEditor();
+    groupMembers = [];
+    groupSearch.value = '';
+    groupResults.replaceChildren();
+    groupSearchMsg.textContent = '';
+    setGrouped(false);
+    renderGroup();
     // Nothing was loaded, so nothing is a base — and a previous edit's bases
     // must not follow the operator into a new product.
     loadedStock = null;
@@ -1382,7 +1830,8 @@ const shopCurrency = await getShopCurrency();
       // saving without edits submitted `variants: []`, `images: []`,
       // `attributes: []` and silently destroyed them. One source of truth also
       // means adding a field here can never drift from what the row serialised.
-      const res = await api.get(`/api/products/${edit.dataset.id}`);
+      // `?all=true`: drafts and archived products are staff-only and opt-in.
+      const res = await api.get(`/api/products/${edit.dataset.id}?all=true`);
       if (!res.ok) return alert(res.error || 'Could not load that product');
       const p = res.data;
       const f = form.elements;
@@ -1422,11 +1871,15 @@ const shopCurrency = await getShopCurrency();
       f.virtual.checked = p.virtual === true;
       f.downloadable.checked = p.downloadable === true;
       f.downloads_text.value = dlToText(p.downloads);
+      f.download_limit.value = p.download_limit ?? '';
+      f.download_expiry_days.value = p.download_expiry_days ?? '';
 
       f.catalog_visibility.value = p.catalog_visibility ?? 'visible';
       f.position.value = p.position ?? '';
       f.tags_text.value = (p.tags || []).join(', ');
       f.attributes_text.value = attrsToText(p.attributes);
+      // After the gallery below is loaded, so its photos are offered as images.
+      swatchState = swatchStateFrom(p.attributes);
       f.upsell_text.value = (p.upsell_ids || []).join(', ');
       f.cross_sell_text.value = (p.cross_sell_ids || []).join(', ');
       f.purchase_note.value = p.purchase_note ?? '';
@@ -1483,6 +1936,19 @@ const shopCurrency = await getShopCurrency();
       // stock inputs write straight into these objects.
       loadedVariantStock = new Map(variants.filter((v) => v.id).map((v) => [v.id, v.stock ?? null]));
       renderVariants();
+      renderSwatchEditor();
+
+      // The members as the staff read resolved them — hidden and draft ones
+      // included, so a save never drops a member this reader could not see.
+      groupMembers = Array.isArray(p.grouped_products) ? p.grouped_products.map((m) => ({ ...m })) : [];
+      groupSearch.value = '';
+      groupResults.replaceChildren();
+      groupSearchMsg.textContent = '';
+      setGrouped(p.type === 'grouped');
+      // A group's price is derived ("from"), not its own: shown empty, so
+      // unticking "grouped" makes the operator type a real price.
+      if (p.type === 'grouped') { f.price.value = ''; f.sale_price.value = ''; }
+      renderGroup();
 
       document.getElementById('dialog-title').textContent = 'Edit product';
       showTab('general');
@@ -1499,18 +1965,31 @@ const shopCurrency = await getShopCurrency();
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const f = form.elements;
+    const grouped = f.is_grouped.checked;
+    if (grouped && groupMembers.length < GROUP_MIN) {
+      alert(`A group needs at least ${GROUP_MIN} products. Add them on the Group tab.`);
+      showTab('group');
+      groupSearch.focus();
+      return;
+    }
+    if (grouped && variants.length) {
+      alert('A grouped product cannot have variants. Remove them on the Variants tab, or untick "grouped".');
+      showTab('variants');
+      return;
+    }
 
     // Money is validated BEFORE anything is sent. `?? 0` used to stand here, so
     // an unparseable regular price became a product priced at zero, and an
     // unparseable sale price became no sale at all — both silently.
-    const regular = toCents(f.price.value);
+    // A group has no price of its own; the server forces it to nothing.
+    const regular = grouped ? 0 : toCents(f.price.value);
     if (regular === null || Number.isNaN(regular)) {
       alert('Enter a regular price, for example 159,00 or 159.00.\n\nThousands separators are not accepted — write 1159,00 rather than 1.159,00.');
       showTab('general');
       f.price.focus();
       return;
     }
-    const sale = toCents(f.sale_price.value);
+    const sale = grouped ? null : toCents(f.sale_price.value);
     if (Number.isNaN(sale)) {
       alert('The sale price is not a price I can read.\n\nUse 129,00 or 129.00, or leave it empty for no sale.');
       showTab('general');
@@ -1580,6 +2059,8 @@ const shopCurrency = await getShopCurrency();
       requires_shipping: !f.virtual.checked,
       downloadable: f.downloadable.checked,
       downloads: textToDl(f.downloads_text.value),
+      download_limit: intOrNull(f.download_limit.value),
+      download_expiry_days: intOrNull(f.download_expiry_days.value),
 
       images,
       custom: readCustomFields(),
@@ -1591,13 +2072,16 @@ const shopCurrency = await getShopCurrency();
       catalog_visibility: f.catalog_visibility.value,
       position: f.position.value === '' ? undefined : parseInt(f.position.value, 10),
       tags: csv(f.tags_text.value),
-      attributes: textToAttrs(f.attributes_text.value),
+      attributes: applySwatchState(textToAttrs(f.attributes_text.value), swatchState),
       upsell_ids: csv(f.upsell_text.value),
       cross_sell_ids: csv(f.cross_sell_text.value),
       purchase_note: f.purchase_note.value || undefined,
       featured: f.featured.checked,
       reviews_enabled: f.reviews_enabled.checked,
       categories,
+      // Any type but `grouped` is derived by the server from `variants`.
+      type: grouped ? 'grouped' : 'simple',
+      grouped_product_ids: grouped ? groupMembers.map((m) => m.id) : [],
     };
 
     const res = id ? await api.put(`/api/products/${id}`, body) : await api.post('/api/products', body);

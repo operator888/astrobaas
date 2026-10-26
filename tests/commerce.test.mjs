@@ -275,7 +275,7 @@ const okPatch = (over = {}) => {
     normalizeMeasurement, normalizeBackorders, normalizeCatalogVisibility, normalizeTaxStatus,
     normalizeClassSlug, normalizeGtin, normalizeTags, normalizeDimensions, normalizeAttributes,
     normalizeDownloads, normalizeLinkedIds, normalizeImages, setMainImage, mainImage,
-    availableFor, isLowStock, saleActiveAt, WRITABLE_PRODUCT_FIELDS,
+    availableFor, saleActiveAt, WRITABLE_PRODUCT_FIELDS,
     pickWritableProductFields, PRODUCT_LIMITS,
   } = PF;
 
@@ -414,11 +414,10 @@ const okPatch = (over = {}) => {
     availableFor({ stock: 10 }, 0).code === 'invalid-quantity');
 
   // ---- low stock ----
-  check('at or below the threshold is low', isLowStock({ stock: 2, low_stock_threshold: 2 }) &&
-    isLowStock({ stock: 1, low_stock_threshold: 2 }));
-  check('above the threshold is not low', !isLowStock({ stock: 5, low_stock_threshold: 2 }));
-  check('no threshold means never low', !isLowStock({ stock: 0 }) && !isLowStock({ stock: 0, low_stock_threshold: null }));
-  check('untracked stock is never low', !isLowStock({ stock: null, low_stock_threshold: 5 }));
+  // `isLowStock` was removed: nothing in src/ called it and its rule ("no
+  // threshold means never low") contradicted the shop-wide default. The rule
+  // now lives in lib/commerce/stock-status.ts and tests/stock-status.test.mjs.
+  check('isLowStock is gone, so there is one low-stock rule', PF.isLowStock === undefined);
 
   // ---- scheduled sales ----
   const T = Date.parse('2026-06-15T12:00:00Z');

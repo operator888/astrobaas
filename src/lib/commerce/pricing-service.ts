@@ -8,10 +8,14 @@
  */
 
 import { LocalDB } from '../localdb';
+import { pluginManager, PLUGIN_HOOKS } from '../plugin-system';
+import type { Address, OrderLineAddon } from '../../core/models';
+import { priceLineAddons, COUPONS_DISCOUNT_ADDONS } from './line-addons';
 import {
-  resolveTaxSettings, resolveTaxTreatment, rateForTreatment,
+  resolveTaxTreatment, rateForTreatment, productIsTaxable,
   type TaxSettings, type TaxTreatment,
 } from './tax';
+import { resolveTaxSettingsWithPlugins } from './tax-plugins';
 import {
   availableMethods, resolveChosenMethod,
   type AvailableMethod, type ShippingDestination, type ShippableBasket,
@@ -29,6 +33,18 @@ export interface BasketRequestLine {
   /** Required when the product is variable. */
   variant_id?: string | null;
   qty: number;
+  /**
+   * Priced add-on selections, keyed by namespace (`{ lens: ['ar'] }`), as the
+   * client sent them. Checked and priced by PLUGIN_HOOKS.ORDER_LINE_ADDONS —
+   * see lib/commerce/line-addons.ts.
+   */
+  addons?: unknown;
+  /**
+   * The line's prescription AS POSTED (display units). Not validated here —
+   * ORDER_LINE_EXTRAS does that at checkout — only handed to the add-on
+   * filter, which may price by power.
+   */
+  prescription?: unknown;
 }
 
 export interface PriceBasketInput {
@@ -40,6 +56,8 @@ export interface PriceBasketInput {
    * credential and live behind the seam.
    */
   customer_tax_id?: string;
+  /** The country the tax id was entered next to (billing). A hint only. */
+  customer_tax_country?: string;
   shipping_method_id?: string | null;
   coupon_code?: string | null;
   /** Used for per-customer coupon limits. */
@@ -49,7 +67,7 @@ export interface PriceBasketInput {
 }
 
 export type PriceFailure =
-  | { ok: false; status: number; message: string; code?: string };
+  | { ok: false; status: number; message: string; code?: string; params?: Record<string, string | number> };
 
 export interface PricedBasket {
   /** Whose tax rules were applied. Recorded so an order can state it. */
@@ -60,6 +78,12 @@ export interface PricedBasket {
   products: Product[];
   /** What each line actually resolved to (variant price, name, stock). */
   resolved: ResolvedPurchasable[];
+  /**
+   * The add-ons priced into each line, aligned with `totals.lines`; `[]` for
+   * a line with none. Their `unit_price_cents` are already inside the line's
+   * `unit_price_cents` — an order freezes these, it never re-prices them.
+   */
+  addons: OrderLineAddon[][];
   shipping: AvailableMethod | null;
   availableShipping: AvailableMethod[];
   coupon: CouponResult | null;
@@ -68,8 +92,9 @@ export interface PricedBasket {
 
 export type PriceResult = PricedBasket | PriceFailure;
 
-const fail = (status: number, message: string, code?: string): PriceFailure =>
-  ({ ok: false, status, message, code });
+const fail = (
+  status: number, message: string, code?: string, params?: Record<string, string | number>,
+): PriceFailure => ({ ok: false, status, message, code, ...(params ? { params } : {}) });
 
 /**
  * Resolve + price a basket.
@@ -92,12 +117,17 @@ export async function priceBasket(
   const settingsRows = await LocalDB.getSettings();
   const settingsMap: Record<string, unknown> = {};
   for (const r of settingsRows) settingsMap[r.key] = r.value;
-  const tax = resolveTaxSettings(settingsMap);
+  // The operator's rows plus any PLUGIN_HOOKS.TAX_RATES rows — the same
+  // table the tax-override route uses. See lib/commerce/tax-plugins.ts.
+  const tax = resolveTaxSettingsWithPlugins(settingsMap);
 
   // --- resolve products ---
   const products: Product[] = [];
   const resolvedLines: ResolvedPurchasable[] = [];
   const lines: TotalsLine[] = [];
+  const lineAddons: OrderLineAddon[][] = [];
+  /** Per-unit add-on cents of each line, for the coupon decision below. */
+  const addonUnits: number[] = [];
   for (const item of input.items) {
     const qty = Math.floor(Number(item.qty));
     if (!Number.isFinite(qty) || qty < 1) return fail(400, 'Invalid quantity');
@@ -126,14 +156,45 @@ export async function priceBasket(
       }
     }
 
+    /*
+     * THE unit price, decided HERE and nowhere else.
+     *
+     * PLUGIN_HOOKS.PRODUCT_PRICE used to be applied only by placeOrder, to
+     * each stored line's `total_cents`, while the order's totals came from
+     * this function at the catalogue price: as soon as a plugin used the hook,
+     * a quote disagreed with its order and an order's lines disagreed with its
+     * own total. Applied here, the quote, the totals and the frozen lines all
+     * read one number.
+     */
+    const unit = pluginManager.applyFilters(
+      PLUGIN_HOOKS.PRODUCT_PRICE, resolved.price_cents, product, { qty, variant: resolved },
+    ) as number;
+    if (!Number.isInteger(unit) || unit < 0) {
+      return fail(500, 'Price hook returned an invalid price', 'checkout.price_invalid');
+    }
+
+    // Priced add-ons, ON TOP of that unit price and BEFORE coupons, the
+    // free-shipping threshold and tax, so every total below sees them.
+    const priced = priceLineAddons({
+      line: item as unknown as Record<string, unknown>,
+      product,
+      variant: resolved,
+      qty,
+      name: resolved.name,
+      settings: settingsMap,
+    });
+    if (!priced.ok) return fail(priced.status, priced.message, priced.code, priced.params);
+
     products.push(product);
     resolvedLines.push(resolved);
+    lineAddons.push(priced.addons);
+    addonUnits.push(priced.unit_cents);
     lines.push({
       product_id: product.id,
       variant_id: resolved.variant_id,
       name: resolved.name,
       qty,
-      unit_price_cents: resolved.price_cents,
+      unit_price_cents: unit + priced.unit_cents,
       tax_class: product.tax_class,
       tax_status: product.tax_status,
       weight_grams: resolved.weight_grams ?? 0,
@@ -144,7 +205,12 @@ export async function priceBasket(
 
   // --- coupon (before shipping, because it may waive shipping) ---
   const nowMs = input.nowMs ?? Date.now();
-  const subtotalForCoupon = lines.reduce(
+  // What a coupon may discount, per line. COUPONS_DISCOUNT_ADDONS is the
+  // owner's decision on add-ons; see lib/commerce/line-addons.ts.
+  const couponAmount = (l: TotalsLine, i: number) =>
+    Math.round(l.unit_price_cents) * l.qty - (COUPONS_DISCOUNT_ADDONS ? 0 : addonUnits[i] * l.qty);
+  const subtotalForCoupon = lines.reduce((s, l, i) => s + couponAmount(l, i), 0);
+  const subtotalAll = lines.reduce(
     (s, l) => s + Math.round(l.unit_price_cents) * l.qty, 0,
   );
   let coupon: CouponResult | null = null;
@@ -156,7 +222,7 @@ export async function priceBasket(
   const couponLines = lines.map((l, i) => ({
     product_id: l.product_id,
     categories: products[i].categories,
-    amount_cents: Math.round(l.unit_price_cents) * l.qty,
+    amount_cents: couponAmount(l, i),
   }));
 
   if (code) {
@@ -237,7 +303,7 @@ export async function priceBasket(
     // The free-shipping threshold is judged AFTER the discount: a coupon that
     // drops a basket below the threshold should also drop the free shipping,
     // or the two promotions stack in a way nobody intended.
-    subtotal_cents: Math.max(0, subtotalForCoupon - discount_cents),
+    subtotal_cents: Math.max(0, subtotalAll - discount_cents),
     weight_grams,
     requiresShipping,
   };
@@ -277,7 +343,21 @@ export async function priceBasket(
     settings: tax,
     destination: dest,
     customerTaxId: input.customer_tax_id,
-    classes: [...new Set(lines.map((l) => l.tax_class ?? tax.defaultClass))],
+    customerCountry: input.customer_tax_country,
+    // PLUGIN_HOOKS.TAX_ID_VERDICT. resolveTaxTreatment calls this only where
+    // the answer could change the sale's tax, so a shop without reverse
+    // charge — or without a verifier — pays nothing for it. Settings are read
+    // here (async) and handed in, because the filter is synchronous.
+    taxIdVerdict: ({ taxId, country }) => pluginManager.applyFilters(
+      PLUGIN_HOOKS.TAX_ID_VERDICT,
+      { status: 'unchecked' },
+      { taxId, ...(country ? { country } : {}), destination: dest.country, settings: { ...settingsMap } },
+    ),
+    // Only lines that are TAXED need a rate. A `tax_status: 'none'` product
+    // owes no VAT anywhere, so a missing row for its class must not refuse
+    // the sale (domestic or destination).
+    classes: [...new Set(lines.filter((l) => productIsTaxable(l.tax_status))
+      .map((l) => l.tax_class ?? tax.defaultClass))],
   });
 
   /*
@@ -293,7 +373,9 @@ export async function priceBasket(
     return fail(
       409,
       `No VAT rate on file for ${m?.country} (${(m?.classes ?? []).join(', ')}). `
-      + 'Add a rate for it in the tax settings before selling there.',
+      + (m?.country && m.country === tax.originCountry
+        ? 'Add a rate for it to your own country\'s rows in the tax settings.'
+        : 'Add a rate for it in the tax settings before selling there.'),
       'checkout.tax_not_configured',
     );
   }
@@ -314,11 +396,36 @@ export async function priceBasket(
     totals,
     products,
     resolved: resolvedLines,
+    addons: lineAddons,
     shipping: shipping ? { ...shipping, cost_cents: shippingCost } : null,
     availableShipping: offered,
     coupon,
     tax,
   };
+}
+
+/**
+ * The buyer's tax id for pricing, from the order's addresses.
+ *
+ * ONE reader for `placeOrder` and the quote route, so the two cannot disagree
+ * about which number a sale was priced on. The billing address wins (it is
+ * the invoice's counterparty); the delivery address is the fallback, which is
+ * also what `placeOrder` stores as billing when none was sent.
+ *
+ * Captured, never validated (see `Address.tax_id`): whatever is here only
+ * ever feeds reverse charge, and nothing about it can refuse an order.
+ */
+export function buyerTaxId(
+  billing?: Pick<Address, 'tax_id' | 'country'> | null,
+  shipping?: Pick<Address, 'tax_id' | 'country'> | null,
+): { customer_tax_id?: string; customer_tax_country?: string } {
+  for (const a of [billing, shipping]) {
+    const id = typeof a?.tax_id === 'string' ? a.tax_id.trim() : '';
+    if (!id) continue;
+    const country = typeof a?.country === 'string' && a.country.trim() ? a.country.trim() : undefined;
+    return { customer_tax_id: id, ...(country ? { customer_tax_country: country } : {}) };
+  }
+  return {};
 }
 
 /** Allocate the next order number atomically. */

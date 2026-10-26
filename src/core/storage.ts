@@ -22,6 +22,7 @@ import type {
   Order,
   OrderStatus,
   PaymentStatus,
+  InvoiceDocument,
   Customer,
   Post,
   Category,
@@ -130,6 +131,41 @@ export type RefundAppend =
   | { outcome: 'appended'; order: Order }
   | { outcome: 'duplicate'; order: Order }
   | { outcome: 'missing' };
+
+/**
+ * What `compareAndSetOrderTags` found.
+ *
+ *  - applied: the stored tags were still `expected`; `next` is written
+ *  - changed: they are not — someone else wrote since the caller read; re-read
+ *  - missing: no such order
+ */
+export type OrderTagsWrite =
+  | { outcome: 'applied'; order: Order }
+  | { outcome: 'changed' }
+  | { outcome: 'missing' };
+
+/** What `compareAndSetOrderTimeline` found — same three answers as `OrderTagsWrite`. */
+export type OrderTimelineWrite =
+  | { outcome: 'applied'; order: Order }
+  | { outcome: 'changed' }
+  | { outcome: 'missing' };
+/** What `compareAndSetOrderInvoiceRecords` found — the same three answers. */
+export type OrderInvoiceRecordsWrite = OrderTagsWrite;
+
+/**
+ * The order fields `compareAndSetOrderField` may write. A closed list, because
+ * the field name becomes a JSON path in SQL and because each field here has
+ * exactly one owning module that does its read-modify-write through it:
+ *
+ *  - `tags`         — lib/commerce/order-tags.ts
+ *  - `entitlements` — lib/commerce/download-entitlements.ts (the download
+ *                     count: two downloads at once must not both see "4 of 5")
+ */
+export const ORDER_CAS_FIELDS = ['tags', 'entitlements'] as const;
+export type OrderCasField = (typeof ORDER_CAS_FIELDS)[number];
+
+/** What `compareAndSetOrderField` found. Same three answers as the tags write. */
+export type OrderFieldWrite = OrderTagsWrite;
 
 /**
  * What `claimIdempotencyKey` found.
@@ -309,6 +345,68 @@ export interface Storage {
    * first.
    */
   appendRefund(id: string, record: RefundRecord): Promise<RefundAppend>;
+  /**
+   * ATOMICALLY replace an order's staff `tags`, but only while the stored
+   * value is still `expected` (the raw value the caller read: `undefined` =
+   * the field is absent). An empty `next` removes the field, so an untagged
+   * order carries no `tags: []`.
+   *
+   * A staff tag edit is read-modify-write — "add VIP to the ones it has" —
+   * and two staff adding different tags at once each wrote their own full
+   * list, the second erasing the first. This makes the comparison and the
+   * write one step (a conditional UPDATE on the relational driver, one
+   * `locked()` hold on lowdb and doc-blob), and the caller retries on
+   * `changed`. Records the change in the content feed as `updateOrder` does,
+   * and only when it lands. Nothing else on the order is touched, so a
+   * payment landing at the same moment is not lost either.
+   *
+   * Use `lib/commerce/order-tags.ts`; it owns the normalisation and the
+   * limits, and this method trusts what it is given.
+   */
+  compareAndSetOrderTags(id: string, expected: unknown, next: readonly string[]): Promise<OrderTagsWrite>;
+  /**
+   * ATOMICALLY replace an order's `invoice_records`, but only while the stored
+   * value is still `expected` (the raw value the caller read; `undefined` =
+   * absent). The same compare-and-set as `compareAndSetOrderTags`, on the
+   * same three driver shapes, for the same reason: creating a record, adding
+   * a credit memo and claiming a record for an issuer are each
+   * read-decide-write, and two at once (a payment webhook and an admin click,
+   * two refunds) must not both decide "there is no record yet" and both write
+   * one. The loser gets `changed`, re-reads, and finds the winner's record.
+   *
+   * Only `invoice_records` and `updated_at` are written. Use
+   * `lib/commerce/invoice-records.ts`, which owns every rule; this method
+   * trusts what it is given.
+   */
+  compareAndSetOrderInvoiceRecords(
+    id: string, expected: unknown, next: readonly InvoiceDocument[],
+  ): Promise<OrderInvoiceRecordsWrite>;
+
+  /**
+   * ATOMICALLY replace an order's stored `timeline`, but only while the stored
+   * value is still `expected` (the raw value the caller read; `undefined` =
+   * absent). The same contract as `compareAndSetOrderTags`, for the same
+   * reason: an append is read-modify-write, and two requests appending at
+   * once each wrote their own full list, the second erasing the first.
+   *
+   * An empty `next` removes the field. Only `timeline` is touched, so a
+   * payment landing at the same moment is not lost. It is NOT an edit of the
+   * order as the API presents it (the order endpoints strip the field), so it
+   * bumps no `updated_at` and writes no change-feed row: a status change is
+   * still exactly one feed entry.
+   *
+   * Use `lib/commerce/order-timeline.ts`; it owns the entry shape, the bound
+   * and the retry loop, and this method trusts what it is given.
+   */
+  compareAndSetOrderTimeline(id: string, expected: unknown, next: readonly unknown[]): Promise<OrderTimelineWrite>;
+  /**
+   * The same compare-and-set, for any field in {@link ORDER_CAS_FIELDS}:
+   * write `next` to `field` only while the stored value is still `expected`
+   * (`undefined` = absent). `next === undefined` removes the field. Only that
+   * field and `updated_at` are written, and the change feed records it naming
+   * only that field. `compareAndSetOrderTags` is this with `field = 'tags'`.
+   */
+  compareAndSetOrderField(id: string, field: OrderCasField, expected: unknown, next: unknown): Promise<OrderFieldWrite>;
 
   // Idempotency keys (POST /api/orders `Idempotency-Key`). Durable, so a
   // retry after a restart still gets the first answer, and — on the

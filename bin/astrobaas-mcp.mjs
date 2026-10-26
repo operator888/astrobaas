@@ -191,7 +191,10 @@ const TOOLS = [
       type: 'object',
       properties: {
         category: { type: 'string', description: 'Product category id or slug.' },
-        featured: { type: 'boolean' },
+        featured: {
+          type: 'boolean',
+          description: 'true: only featured products. false or omitted: no featured filter — the API has no "only non-featured" filter.',
+        },
         search: { type: 'string' },
         limit: { type: 'integer', minimum: 1, maximum: 200 },
       },
@@ -200,7 +203,12 @@ const TOOLS = [
     run: (a = {}) => {
       const qs = new URLSearchParams();
       if (a.category) qs.set('category', a.category);
-      if (a.featured !== undefined) qs.set('featured', String(a.featured));
+      // Only a TRUE flag is a filter. The route reads anything but `true` as
+      // "no filter", so sending `featured=false` looked like a request for
+      // non-featured products and quietly returned all of them. A false flag
+      // is omitted, as the typed client does. TRUE stays the literal `true`
+      // (the client sends `1`): `true` is what the route on main reads.
+      if (a.featured === true) qs.set('featured', 'true');
       if (a.search) qs.set('search', a.search);
       if (a.limit) qs.set('limit', String(a.limit));
       const q = qs.toString();
@@ -350,9 +358,25 @@ const TOOLS = [
   },
   {
     name: 'list_customers',
-    description: 'List customers. STAFF ONLY — this is PII. Needs a key with customers:read.',
-    inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 200 } }, additionalProperties: false },
-    run: (a = {}) => apiRequest('GET', `/api/customers${a.limit ? `?limit=${a.limit}` : ''}`),
+    description:
+      'List customers, newest first. STAFF ONLY — this is PII. Needs a key with customers:read. Paged like list_orders: 50 per call unless `limit` says otherwise (max 200). Getting `limit` rows back means there may be more — call again with `offset`.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        search: { type: 'string', description: 'Matches email, name or phone; accent- and case-insensitive.' },
+        limit: { type: 'integer', minimum: 1, maximum: 200 },
+        offset: { type: 'integer', minimum: 0 },
+      },
+      additionalProperties: false,
+    },
+    run: (a = {}) => {
+      const qs = new URLSearchParams();
+      if (a.search) qs.set('search', a.search);
+      if (a.limit) qs.set('limit', String(a.limit));
+      if (a.offset) qs.set('offset', String(a.offset));
+      const q = qs.toString();
+      return apiRequest('GET', `/api/customers${q ? `?${q}` : ''}`);
+    },
   },
   {
     name: 'list_payment_methods',

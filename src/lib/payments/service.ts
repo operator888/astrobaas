@@ -10,6 +10,7 @@
 import { LocalDB } from '../localdb';
 import { setOrderStatus, releasesStock } from '../commerce-service';
 import { recordAudit, AUDIT } from '../audit';
+import { recordOrderEvent } from '../commerce/order-timeline';
 import type { Order } from '../../core/models';
 import type { PaymentProvider, ProviderContext, VerifiedEvent } from './types';
 import { providerContext, getProvider, onlineMethodIds } from './registry';
@@ -24,6 +25,7 @@ import {
   resolvePaymentHoldSettings, holdStartMs, holdDeadlineMs,
 } from '../commerce/payment-hold';
 import { notifyNeedsRefund } from './late-payment';
+import { syncInvoiceRecordsSafely } from '../commerce/invoice-records';
 
 export interface StartPaymentResult {
   ok: boolean;
@@ -253,6 +255,22 @@ export async function applyVerifiedEvent(event: VerifiedEvent, opts: ApplyOption
     }
     if (claim.outcome === 'changed') continue; // decide again from the order as it now is
 
+    // The order's own timeline keeps the verdict and when it came — the order
+    // itself keeps only the resulting payment_status. Recorded by the request
+    // that won the claim (a duplicate delivery returned above), and BEFORE the
+    // status move below, so the timeline reads payment first, then the move it
+    // caused. A decline is derived from `payment_declined_at`, not stored.
+    if (decision.action !== 'decline') {
+      await recordOrderEvent(order.id, {
+        event: decision.action === 'capture'
+          ? 'payment.captured'
+          : decision.action === 'refund' ? 'payment.refunded' : 'payment.failed',
+        actor: 'provider',
+        ...(Number.isSafeInteger(event.amountCents) && (event.amountCents as number) > 0
+          ? { amount_cents: event.amountCents as number } : {}),
+      });
+    }
+
     if (decision.action === 'decline') {
       await afterDecline(claim.order, event);
       return { applied: true, decision, orderNumber: order.number };
@@ -284,6 +302,15 @@ export async function applyVerifiedEvent(event: VerifiedEvent, opts: ApplyOption
         console.error(`[payments] order ${order.number} status change failed: ${res.message}`);
         if (decision.action === 'capture') await flagIfPaidWithoutStock(order.id, event);
       }
+    }
+
+    // The payment landed: an order whose shop records invoices "on paid" gets
+    // its frozen record now. A refund made in the provider's dashboard never
+    // reaches the refund ledger, so its credit memo is made here, for what the
+    // ledger does not cover. After the status move, never instead of it, and
+    // it cannot fail the event — see invoice-records.ts.
+    if (decision.paymentStatus === 'paid' || decision.paymentStatus === 'refunded') {
+      await syncInvoiceRecordsSafely(order.id);
     }
 
     const auditAction =
@@ -635,6 +662,10 @@ export async function refundOrder(
 
   const appended = await LocalDB.appendRefund(order.id, record);
   if (appended.outcome === 'missing') return { ok: false, status: 404, message: 'Order not found' };
+  // The credit memo follows the LEDGER entry, so it exists exactly when the
+  // refund does — for this request and for a duplicate of it alike (the sync
+  // is idempotent per refund id). It never fails the refund.
+  await syncInvoiceRecordsSafely(order.id);
   const after = appended.order;
   const remainingAfter = refundableRemaining(after);
 

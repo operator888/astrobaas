@@ -6,6 +6,588 @@ semver yet because the API surface is pre-alpha.
 
 ## [Unreleased]
 
+### Product reviews: a public door, a moderation queue, and GDPR (text reviews)
+
+Customers can review a product through `POST /api/products/{ref}/reviews`, and a
+storefront reads the published ones with `GET /api/products/{ref}/reviews`: paged,
+filterable by rating, locale and verified buyer, with the average and the count
+per star. Turn reviews on under **Settings → Reading**; moderate them under the
+new **Reviews** screen (`/admin/reviews`), which shows waiting, published,
+rejected and spam reviews with filters and bulk approve / reject / spam / delete.
+The dashboard says when reviews are waiting.
+
+- **A proof of work is always required** to submit a review (fetch a challenge
+  with `GET /api/captcha/challenge?surface=reviews`). The honeypot, the per-IP
+  limit and the spam score apply too, and one address can review a product once.
+- **"Verified buyer" is set by the server**: only when the email has a paid order
+  in state processing or completed that contains the product. A paid order that
+  was cancelled, refunded or put on hold no longer counts, on this route or
+  anywhere else that asks.
+- New reviews wait for approval. **Settings → Reading** has a new, off-by-default
+  option to publish a verified buyer's review at once.
+- The answer to a submission is the same whatever happened, so the form cannot be
+  used to find out whether someone bought a product.
+- **Behaviour change:** `POST /api/content/review` no longer accepts reviews from
+  the public (it answers 404); the product route above is the only public door.
+  Staff can still add reviews in the admin.
+- **Privacy fix:** the public `GET /api/content/comment` and
+  `GET /api/content/review` returned each commenter's and reviewer's email
+  address. They no longer do. Content-type fields can now be marked
+  `private: true` to keep them out of public reads, and a public `?where.` filter
+  on such a field is ignored. Spam scores are no longer in public reads either.
+- **Behaviour change:** the anonymous change feed (`/api/content/changes`) no
+  longer lists changes to moderated collections (comments and reviews): those
+  rows were written on arrival, pending and spam included. Staff still see them.
+- Turning reviews off also removes the star rating from `GET /api/products/{ref}`.
+- Moderation states gain `spam` (also on comments and in the generic content
+  screen). Moderation is audited (`review.moderate`), and approving stamps
+  `published_at` once.
+- **GDPR:** a data-subject export lists the person's reviews, even if reviews
+  were switched off later. Erasure keeps a published review's star rating, so the
+  product's average does not change, and removes the name, email, title and text.
+  Unpublished reviews are deleted.
+- Photos and video are not part of this. Plugins get two hooks for them,
+  `REVIEW_MEDIA` and `AFTER_REVIEW_DELETE` (see `PLUGIN_DEVELOPMENT.md`).
+- Not yet: a review form in the storefront starter, and notification emails.
+
+### `products.list({ all: true })` from the typed client now shows drafts
+
+The typed client sends a true boolean as `1`, but `GET /api/products` has only
+ever read `?all=` as `true`. A staff `products.list({ all: true })` therefore
+never saw drafts or archived products. Every boolean query flag the route reads
+now goes through one shared reader, where `1` and `true` mean yes and anything
+else means no.
+
+- `GET /api/products`: `all` accepts `1` as well as `true`, and still needs a
+  staff caller. `0`, `false` or no value list only active products.
+- No other route the typed client calls reads a boolean query flag. A test
+  flags any API route that compares a query value to `'true'` or `'1'`
+  directly instead of using the shared reader.
+
+### Sort search results by price, newest or name
+
+`GET /api/products` takes `?sort=`: `relevance` (default, unchanged),
+`price_asc`, `price_desc`, `newest`, `name_asc`, `name_desc`. It works with
+`?search=`, `?category=`, `?brand=`, `?on_sale=` and paging: the server sorts
+the whole matching set, so `meta.total` and `meta.hasMore` describe the same
+list whatever the order. Price means what a buyer is charged (the sale price
+while a sale is live; a variable product by its cheapest variant, which every
+product response now carries as `price_from_cents`, with `price_to_cents`).
+Equal keys keep relevance order, then the shop's order, then id, so page 2 is
+always the continuation of page 1. With no `sort`, order is exactly as before. An unknown value is a 422 instead of being ignored.
+
+- `GET /api/search` (blog posts) accepts `relevance`, `newest`, `name_asc`,
+  `name_desc`; `price_*` is a 422 there, since posts have no price.
+- The typed client's `products.list` takes `sort` and `locale`; the starter
+  storefront's search page has a sort menu that only sends the value.
+- Fixed: `on_sale=1` and `featured=1` — what the typed client sends — were not
+  recognised; only `true` was. Both now work.
+- Not included: popularity and rating sorts (nothing records either) and an
+  admin default-sort setting.
+
+### One timeline of everything that happened to an order
+
+**Admin → Orders → Timeline** on each order lists, newest first, when the order
+was placed, every status change and who made it, payments and refunds with their
+amounts, shipping with the tracking number, staff note edits, tag changes and
+tax overrides. Filter by Status, Payments, Shipments or Notes; export the list
+as CSV; add a comment for the team.
+
+- API: `GET /api/orders/{id}/timeline` (`?filter=`, `?limit=`, `?offset=`,
+  `?format=csv`) and `POST /api/orders/{id}/timeline` `{ text }`. Also in the
+  typed client (`orders.timeline()`, `addTimelineComment()`).
+- What an order's own fields already say is derived when read; only events no
+  field records (status moves, payment verdicts, notes, tags) are stored on the
+  order, at most 100 per order. Status and payment history starts with this
+  release — older orders show what their own fields say.
+- Staff-only: no email, receipt, public response or order endpoint carries it.
+  An erasure clears the free text. Two people writing at once both land on all
+  three drivers.
+- One module, `src/lib/commerce/order-timeline.ts`, is what bulk order actions
+  will call to record what they did.
+- `PUT /api/orders/{id}` now clears the staff note when sent `"staff_note": ""`
+  (it was silently ignored before). A client that always sends the field with
+  an empty value will now clear the note.
+
+### Priced add-ons on order lines (`ORDER_LINE_ADDONS`); `PRODUCT_PRICE` now reaches the quote and the order total
+
+**Fixed:** `PLUGIN_HOOKS.PRODUCT_PRICE` was applied only to each stored order
+line's `total_cents`, never to the quote or the order's totals. With any plugin
+on the hook, the cart and the amount charged used the catalogue price while the
+order's lines showed the plugin's price, so the lines did not add up to the
+order. The unit price is now decided once, in `priceBasket`, and the order
+freezes each line's total from that same priced line.
+
+- **Added:** `PLUGIN_HOOKS.ORDER_LINE_ADDONS`. A storefront sends a per-line
+  `addons` selection (`{ "lens": ["ar"] }`) on `POST /api/orders/quote` and
+  `POST /api/orders`; an installed plugin prices it inside `priceBasket`; it is
+  added to the unit price before coupons, the free-shipping threshold and tax;
+  and the order line freezes it as `OrderItem.addons` (`id`, `label`,
+  `unit_price_cents`, …). The quote returns it on `lines[].addons`. The
+  receipt, its PDF, the confirmation email and the admin order list show each
+  add-on. This is the seam the paid optical module's lens options need.
+- **Fail closed:** an unknown `addons` shape is a 400 naming the problem
+  (`checkout.addons_invalid`); a selection no plugin handles
+  (`checkout.addons_unsupported`) or that came back unpriced
+  (`checkout.addons_unpriced`) is a 400, never silently dropped; a plugin that
+  throws or returns a malformed result is a 500 (`checkout.addons_failed`).
+  Nothing is placed or reserved.
+- **Changed:** the quote now forwards `prescription` per line (to the add-on
+  filter), and its refusals carry `error.reason` / `error.params`, as the
+  order's do. The order now forwards the pricing step's reason codes
+  (`checkout.tax_not_configured` and others) instead of dropping them.
+- **Fixed:** on an order placed in another currency, `items[].total_cents` was
+  stored in the shop's base currency while every other amount, and the receipt,
+  used the order's currency. Lines are now frozen in the order's currency.
+- **Changed:** an `ORDER_LINE_EXTRAS` patch can no longer set a stored line's
+  `total_cents` or `addons`.
+- Coupons discount add-ons (an add-on is part of the line's price). The switch
+  is `COUPONS_DISCOUNT_ADDONS` in `src/lib/commerce/line-addons.ts`.
+
+### Domestic VAT no longer picks up another country's rate; new `TAX_RATES` hook
+
+**Fixed:** once the tax table held a row for another country, a domestic
+product whose tax class the shop's own rates lack was charged that foreign
+rate. A Greek shop whose only `reduced-2` row was Austria's 10% charged Greek
+buyers 10%. The domestic rate, its fallback to the default class and the manual
+tax override's class check now read only the shop's own country's rows (rows
+with no country, or the shop's). The override now refuses a class only another
+country has, instead of applying that country's rate.
+
+- **Changed:** when `shop_country` is set and the shop's own rows have neither
+  a product's class nor the default class, checkout and the quote now refuse
+  with 409 `checkout.tax_not_configured`, naming the shop's country and the
+  classes to add. Before, such a sale took whichever country's row came first,
+  or 0%. A shop with a working home ladder is never refused: an unknown class
+  still falls back to the default class. With no `shop_country` nothing is
+  refused, as before.
+- **Changed:** a manual tax override to a `tax_class` is refused on a line taxed
+  as destination, reverse charge or export, because it applies the shop's own
+  rate. A German consumer's 19% line overridden to `standard` used to become
+  Greek 24% without a word. `exempt: true` still works on any line.
+- **Fixed:** a product with `tax_status: "none"` no longer makes checkout
+  refuse a sale for a missing rate it never needs.
+- **Fixed:** a special-territory row and its mainland row for the same country
+  and class (mainland Spain and the Canaries, Greece and Άγιο Όρος) were treated
+  as duplicates and the second one was dropped. Postcodes are now part of a
+  row's identity. Prices change for shops that had both: a territory row listed
+  FIRST used to apply to the whole country (often 0%), and one listed second was
+  ignored. Both rows now apply where they should.
+- **Fixed:** a territory row none of whose postcodes was a recognised pattern
+  became a country-wide row, charging the territory's rate to the whole
+  country. It is now dropped.
+- **Changed:** a territory row no longer applies to a buyer outside the
+  territory: a class that exists only as a territory row takes the default
+  class elsewhere, and a manual override to such a class is refused.
+- **New plugin hook `PLUGIN_HOOKS.TAX_RATES`:** a synchronous filter through
+  which a rate pack (for example a maintained EU table) supplies rate rows. The
+  operator's rows always win. If a filter throws, the operator's rows are used
+  alone. Every supplied row the core does not use is logged. Plugin rows are
+  not cut at the operator's 50-row limit, which stays as it was. The quote, the
+  order and `POST /api/orders/{id}/tax-override` all use the same merged table.
+  See "Tax rates from a plugin" in `PLUGIN_DEVELOPMENT.md`.
+- `TaxRate` is now exported from `astrobaas/core`.
+
+### EU reverse charge now applies at checkout
+
+**Fixed:** with reverse charge switched on, a business buyer in another EU
+country who gave a VAT number was still charged VAT. Checkout and
+`POST /api/orders/quote` never passed the number to the tax calculation, so the
+reverse-charge rule could not apply to a real order. They now read
+`billing_address.tax_id`, falling back to the delivery address's. The quote
+also accepts `billing_address` and `shipping_address`, read the way an order
+reads them.
+
+- **Fixed:** a Greek VAT number written the correct way (`EL…`) was never
+  reverse-charged, because the EU country list uses `GR`. `EL` and `GR` are now
+  the same country everywhere they are compared, including an `EL` typed into
+  the EU list.
+- Unchanged: a tax id is still captured and never validated by the core, and
+  never the reason an order is refused. Reverse charge still needs all of: the
+  setting on, an EU destination other than the shop's country, and a VAT number
+  from another EU member state.
+- **New plugin hook `PLUGIN_HOOKS.TAX_ID_VERDICT`:** a synchronous filter
+  through which a verifier (for example a VIES module) says a VAT number is
+  `verified`, `invalid` or `unverified`. With no plugin, nothing changes. An
+  `unverified` number is charged VAT where a rate is on file and never blocks an
+  order. See "Tax-id verdicts" in `PLUGIN_DEVELOPMENT.md`.
+- **New `host.createStore(pluginId)`** for compiled external plugins: the
+  plugin's namespaced store, usable from a filter, an action or a timer, and
+  the same records a route's `ctx.store` sees.
+
+### Colour swatches in the variant selector
+
+A merchant can now give each value of an option a colour or an image, on
+**Admin → Products → Edit → Advanced → Swatches**, and tick *Show as
+swatches*. The storefront starter's variant selector then draws that option
+as colour or image swatches instead of words. It does the same, unticked,
+when every value has a swatch.
+
+- The swatches are accessible. Each one's name is always read to a screen
+  reader, and shows beside it on hover and keyboard focus. The chosen swatch
+  has a ring and a check mark, so the choice never depends on colour alone. A
+  pale colour gets a darker border. A sold-out swatch is cross-hatched, with
+  its name and the reason in words under it. On a touch screen every swatch
+  shows its name under it.
+- The colour is set through a CSS custom property by the starter's bundled
+  script, so the strict Content-Security-Policy still needs no
+  `'unsafe-inline'`. Without JavaScript the selector falls back to the plain
+  select, as before.
+- Product attributes have two new optional fields, `display: 'swatch'` and
+  `swatches: { <value>: { color, image } }`, on the API and in OpenAPI.
+  - A colour must be `#rgb` or `#rrggbb`, and is stored as `#rrggbb`.
+  - An image must be an `/uploads/…` path or an https address, and not a
+    video.
+  - A save with anything else is refused with 400 and names the value. It is
+    never saved and then quietly dropped.
+- `astrobaas/client` exports `swatchAxes`, which decides which options are
+  drawn as swatches, and `swatchOf`, `swatchColor`, `swatchImage` and
+  `isLightColor`.
+- Replacing a media file (**Media → Replace**) also rewrites the swatch images
+  that point at it.
+- Fixed: saving a product from the editor no longer turns a hidden attribute
+  (`visible: false`) back on.
+
+### Shoppers choose a variant option by option
+
+The storefront starter's product page now has a variant selector: one row of
+buttons per option, colour then size, in the order the merchant entered the
+attributes. A combination that does not exist, or is sold out, is disabled and
+says why beside it ("Sold out in Red", "Not available in Blue"). The price, the
+stock line, the SKU and the image follow the choice, a screen reader hears the
+new price, and the address keeps the choice as `?variant=<id>`, so a link opens
+it. Without JavaScript it is a plain select inside the buy form (the starter's
+cart itself still needs JavaScript, as before).
+
+- Each variant from `GET /api/products` and `GET /api/products/{ref}` now
+  carries a read-only `resolved`: its price, regular price, sale state, SKU and
+  image after inheriting from the product, worked out by the same function the
+  checkout prices an order with. It is never stored.
+- `astrobaas/client` exports the rule that decides which values can be chosen
+  (`variantAxes`, `axisStates`, `reconcileSelection`, `matchVariant` and
+  friends), so any storefront's picker agrees with the starter's.
+- The selector (`examples/storefront/src/components/VariantSelector.astro`) is
+  styled through `--ab-variant-*` custom properties with the shop's own tokens
+  as fallback, so a theme restyles it without editing its rules.
+- Changing an earlier option never swaps a value the shopper picked for
+  another: a size the new colour does not come in is cleared, and the page
+  says so ("L is not available in Red").
+
+### Invoice issuers can decline a record, retry, and report late
+
+What the first real issuer (the paid myDATA pack) needed from the
+`INVOICE_ISSUERS` seam:
+
+- **"Not mine."** An issuer can answer `{ ok: false, declined: true, reason }`.
+  The record then does not show "issue failed": with a chosen issuer the next
+  active one is asked, and a record every issuer declines is treated as with
+  no issuer, so the internal reference applies. The chosen issuer is asked
+  first, then the others in hook order. A failure is never passed on: every
+  retry goes to the issuer that failed. A credit memo goes only to the issuer
+  of its sale, and that issuer declining it is shown as a failure.
+- **Settings for issuers.** The `INVOICE_ISSUERS` filter now gets
+  `{ settings }`, and `issue()` gets `settings`, a stable idempotency `key`
+  (`astrobaas:<record id>`) and the `attempt` number. An issuer can leave
+  itself off the list while its own switch is off, without caching it.
+- **Automatic retries.** A failure marked `retryable: true`, a 30 s timeout,
+  a throw, or a claim left by a crash is retried by the background scheduler. Each
+  retry goes to the same issuer under the same key, after 2 minutes, then
+  backing off to 6 hours, for 10 calls at most. Two sweeps at once still call
+  the issuer once.
+- **Late success.** `ctx.reportLateSuccess()` records a document that arrived
+  after the timeout. It is accepted only while the record is unissued and
+  still that issuer's under that key, as a compare-and-set on all three
+  drivers.
+- **Tax treatment on every record line.** Each line carries `standard`,
+  `reverse-charge`, `export` or `exempt`, frozen from the priced order when
+  the record is finalised. It is absent when the order cannot say.
+- **Admin → Orders** shows why a record was declined and when the next
+  automatic attempt runs. **Send to issuer again** also works on a declined
+  record.
+
+### Orders keep an invoice record, and refunds a credit memo
+
+Every order can now carry a frozen **invoice record**: its lines, the VAT per
+rate as charged (shipping included), the seller and the buyer with their VAT ID,
+and the currency. Every refund adds a **credit memo** against it, so a record and
+its memos always net to what the customer kept. They are records, not tax
+documents: AstroBaaS is still not a fiscal device.
+
+- **When:** by default when the order is paid (or marked completed, which is how
+  a bank-transfer or cash-on-delivery order counts as settled). **Settings →
+  Invoices** can switch this to "when shipped" or "only by hand".
+- **Admin → Orders** shows each order's records with their state (draft, final,
+  issued with the issuer's number, issued elsewhere, or a failed issue with the
+  issuer's message), a PDF link, and the actions: create, finalise or cancel a
+  draft, credit a record in full to correct it, mark it issued elsewhere.
+- **Issuers are plugins.** A new hook, `INVOICE_ISSUERS`, lets a pack (a myDATA
+  provider, a Peppol access point, a ΦΗΜ bridge) issue each final record once;
+  its document number is the only invoice number a record ever shows. A record
+  marked issued elsewhere — or an order that already carries its POS number — is
+  never sent to an issuer, and neither are its credit memos. With more than one
+  issuer active, the shop chooses one. Issuing never holds up a payment webhook,
+  a checkout return or a refund: it runs after them.
+- A refund made in the provider's dashboard is credited when its webhook arrives.
+- Creating and correcting records by hand is admin-only, like refunds.
+- **Without an issuer** the PDF says plainly that it is not a tax document and
+  shows no invoice number. An optional internal reference (`REF-{year}-{n}`) is
+  printed as "Internal reference (not an invoice number)".
+- **The VAT ID is never checked** and never blocks checkout. An issuer that
+  rejects it shows its message on the record.
+- API: `GET|POST /api/orders/{id}/invoice-records`,
+  `GET /api/invoice-records/{id}/pdf` (staff, or the buyer with the receipt
+  token). Two simultaneous finalisations make one record on all three drivers.
+- A data-subject erasure removes the buyer from the records and keeps the figures.
+
+### Downloadable products: entitlements, signed links, limits, expiry and a log
+
+Selling a file now works end to end. Before this, a product's `downloads` were a
+list of `{ name, url }` that the **public product API published in full** — so
+anyone could read a paid file's URL from the catalogue — and nothing recorded who
+bought what.
+
+- **Entitlements.** When an order reaches `processing` or `completed`, each line
+  of a downloadable product gets an entitlement on the order
+  (`Order.entitlements`): files, download counts, a per-file limit, expiry, and a log of each
+  download (time, file, IP). A cancellation or a full refund revokes them;
+  reopening the order lifts that. `on-hold` (a risk hold) grants nothing.
+- **Signed, expiring links** at `GET /api/downloads/{token}`: an HMAC over the
+  order, entitlement and file, valid 24 hours (`downloads_link_ttl_hours`) or
+  until the entitlement expires. Every download is checked against the order as
+  it is now and counted with a compare-and-set, so concurrent downloads cannot
+  pass the limit (all three drivers). Refusals are 403 with
+  `error.reason` `downloads.limit_reached`, `downloads.expired`,
+  `downloads.revoked`, `downloads.link_invalid`.
+- **Private files.** `POST /api/downloads/upload` (catalogue staff) stores a file
+  in the private uploads directory and answers `private:pf_<id>`; the product
+  editor has an **Upload a private file…** button that adds it to the Downloads
+  list. Such files are streamed by the CMS and their location is never sent.
+  An `https://` download is a redirect issued after the checks pass, so the buyer
+  sees that URL when they download. PDF, ZIP, EPUB, MP3 and images, up to
+  `DOWNLOAD_MAX_FILE_MB` (100). The proxy configs allow 111 MB on that route.
+- **Limits and expiry.** **Settings → Shop → Downloads**: downloads per file
+  (default unlimited — a limit of 3 lets the buyer fetch each file 3 times), days of access (default 90), link lifetime (default 24 h).
+  Each product can override the first two in its editor.
+- **Delivery.** The receipt page (`/receipt?token=…`) has a **Your downloads**
+  section with fresh links each time it opens. When downloads are granted the
+  buyer gets an email listing the files with a link to that section, and the
+  order confirmation says where the downloads will appear. The emails link to
+  the receipt rather than to a counted download, because mail scanners open
+  every link in a message. A headless storefront can use
+  `GET /api/downloads?receipt=<receipt token>`.
+- **Admin → Orders** shows each order's downloads: state, count against limit,
+  expiry, files and the download log, with **Revoke**, **Restore**,
+  **Reset count** and **Grant downloads** (for orders that predate this).
+  API: `GET|POST /api/orders/{id}/downloads`, audited as
+  `order.downloads.update`.
+- **Breaking for storefronts that read `downloads[].url` from the public
+  catalogue:** anonymous `GET /api/products` and `/api/products/{ref}` now return
+  only `downloads[].name`. Staff still see the URL.
+- **GDPR.** The subject export includes the entitlements and log; an erasure
+  removes every IP from the log and revokes the entitlements, keeping counts
+  and times as the shop's record.
+- Download URLs starting `//` or `/\` (another host) are now refused like
+  `http:`, and a duplicate download name in one product is dropped.
+- Product files are stored apart from form uploads (their own id space), are
+  never swept as orphan form uploads and never deleted by an erasure.
+- **For custom `Storage` implementations:** the interface gains
+  `compareAndSetOrderField(id, field, expected, next)`;
+  `compareAndSetOrderTags` is now that with `field = 'tags'`.
+- On the doc-blob (libSQL document) driver the limit holds within one process,
+  like every other guarantee of that driver; run one writer process, or the
+  relational driver, if several processes serve downloads.
+- A cached anonymous catalogue response from before the upgrade may still
+  carry download URLs until the cache expires; purge the CDN cache after
+  deploying if the URLs matter.
+
+### Compiled plugins can read the catalogue (`host.catalog`, `host.money`)
+
+A factory-style external plugin is now handed `host.catalog` and `host.money`.
+This is the core seam `@astrobaas/ecommerce-plus` needs for its Google
+Merchant feed.
+
+- `catalog.listProducts()` returns every product in every status, drafts and
+  hidden ones included. `catalog.iterateProducts({ batchSize })` returns the
+  same products in batches, for large catalogues. `catalog.listBrands()`
+  returns every maker as `GET /api/brands` lists them, with the exact
+  `product.brand` spellings that belong to each.
+- Every product is a copy, with `stock_status` derived as in `GET /api/products`.
+  Its `custom` bag holds only the fields marked public: staff-only fields
+  never reach a plugin through this seam.
+- `money.currencyExponent(code)` is the core's own decimal-places table.
+- Types `PluginCatalog`, `CatalogProduct`, `CatalogBrand` and
+  `CatalogIterateOptions` are exported from `astrobaas/core`. See "Reading the
+  catalogue" in PLUGIN_DEVELOPMENT.md.
+
+### Grouped products: several products on one page
+
+A product can now be a **group**: one page that shows 2 to 10 related products
+(a camera, a lens, a tripod, a battery). Each product keeps its own SKU, price
+and stock and is bought on its own cart line. It is not a bundle: there is no
+group price and no discount.
+
+- **Admin → Products → edit → Group**: tick "This is a grouped product", find
+  products by name, SKU or brand, reorder or remove them. The tab warns when a
+  product in the group is out of stock or hidden from shoppers, and the product
+  list shows "from" the cheapest price and a "group of N" badge.
+- API: `type: 'grouped'` and `grouped_product_ids` on `POST`/`PUT
+  /api/products`. Reads return `grouped_products` (name, slug, price,
+  `stock_status`, image), `price_from_cents`, and set `price_cents` to the
+  "from" price. Draft and hidden products are left out of public reads. All of
+  it is worked out on each read, so a price or stock change shows straight away.
+- `POST /api/orders` and `/api/orders/quote` refuse the group itself
+  (`grouped-not-buyable`): add each product as its own line. Saving refuses
+  duplicates, a group inside a group, and a new product with variants.
+  Deleting a product takes it out of every group.
+- Storefront starter: a group's page lists its products, each with a quantity
+  box, and one **Add selected to cart** button. It is a plain form and works
+  without JavaScript on that page.
+
+### Orders can say which campaign brought the customer — with marketing consent only
+
+When a visitor arrives through a campaign link (`utm_source`, `utm_medium`,
+`utm_campaign`, `utm_term`, `utm_content`, or a Google/Meta/Microsoft ad click
+id) **and has allowed marketing cookies**, the shop remembers it in one
+first-party cookie for 90 days and puts it on the order as
+`order.attribution`: the first and the last campaign visit, each with its
+time. Without marketing consent nothing is kept, a cookie from before is
+deleted, and the order carries no attribution. Nothing is sent to an ad
+platform; like the rest of the order it appears in exports and the
+`order.created` webhook.
+
+- **Admin → Orders** shows the first and last touch on each order that has one.
+- **Admin → Insights → Where paid orders came from**: paid orders and revenue by
+  source, medium and campaign over a date range, first- or last-touch, with a
+  CSV export. API: `GET /api/orders/attribution` (`format=csv`); typed client
+  `orders.attribution()`.
+- **Headless storefronts** send `attribution` on `POST /api/orders`. It is
+  validated strictly (known keys only, length caps, sane times) and a bad one
+  is a `422` naming the field. Times are judged leniently (they come from the
+  shopper's device): a future `at` is clamped, an aged-out touch is dropped,
+  and a wrong clock never refuses the order. The example storefront captures
+  and sends it.
+  See INTEGRATION.md → "Campaign attribution".
+- **Google Ads** joins the analytics & marketing tags: paste the `AW-` id. It
+  loads only after **marketing** consent, its origins enter the CSP only when
+  `ANALYTICS_PROVIDERS` names `google-ads` at build time, and its `_gcl_au`
+  cookie is declared. GA4 stays under analytics consent, Meta Pixel under
+  marketing, as before.
+- The cookie declaration lists `astrobaas_attribution` (marketing, 90 days)
+  while the shop is on and attribution is not switched off.
+- GDPR: a data-subject export includes `attribution`; an erasure removes it.
+- **Settings → Analytics & marketing tags** has the switch
+  (`attribution_enabled`, on by default; each visitor's consent still decides).
+- **Visitors are asked for cookie consent once more.** The marketing category
+  now also covers this shop remembering the campaign, so its description
+  changed in all three languages and the consent version went from 1 to 2. A
+  "yes" given before did not cover this purpose.
+
+### Staff can open draft products again
+
+`GET /api/products/{ref}` returned 404 for every draft or archived product,
+even to signed-in staff, so clicking **Edit** on a draft in **Admin →
+Products** showed "Could not load that product". The route now follows the
+rule the list already used for `GET /api/products?all=true`: catalogue staff
+(admin, editor, manager, or an API key with such a role whose scopes, if it
+has any, include `products`) who add `?all=true` get draft and archived products, by id or
+slug. The admin editor does this for you. The typed client has
+`products.get(ref, { all: true })`.
+
+- Without `?all=true` every caller, staff included, gets the public answer:
+  404 for a draft. A storefront that calls with a staff-role API key therefore
+  cannot show a draft product by accident.
+- Anonymous callers, `viewer` keys and keys whose scopes do not name `products`
+  get 404 even with `?all=true`. The staff response is
+  `Cache-Control: private, no-store`, so a shared cache never stores it.
+- `products.list({ all: true })` in the typed client sends `all=1`, which the
+  list route ignored before. Both routes now accept `all=1` as well as
+  `all=true`.
+
+### `GET /api/customers` is paged, and MCP no longer sends `featured=false`
+
+- **`GET /api/customers` now honours `limit` and `offset`**, exactly like
+  `GET /api/orders`: 50 per page by default, at most 200, newest first, and
+  `meta` carries `total`, `count`, `limit`, `offset`, `page` and `hasMore`.
+  `?search=` filters before paging. Before, the route ignored both and returned
+  every customer with no `meta`, so the typed client's `customers.page()`
+  reported one page holding the whole list. **An integration that called it
+  without `limit` and expected everyone must now page** with `offset` while
+  `meta.hasMore` is true. The admin Customers screen, data-subject export and
+  erasure, and the WooCommerce importer read the store directly and are
+  unaffected.
+- The MCP `list_customers` tool now returns 50 customers unless given a
+  `limit` (it used to return everyone), and takes `offset` and `search` as well
+  as `limit`; page with `offset` while a call returns a full page.
+- The MCP `list_products` tool sent `featured=false` when asked for
+  `featured: false`. The route reads anything but `true` as "no filter", so it
+  looked like a request for non-featured products and returned all of them. A
+  false flag is now omitted, as the typed client does, and the tool's schema
+  says `false` means no filter.
+
+### Staff can tag orders
+
+Orders can carry up to 10 staff tags ("VIP", "damaged", "needs review"). On
+**Admin → Orders** each order shows its tags as coloured badges with an
+autocomplete box to add more and an × to remove; a bar above the list shows
+each tag with its order count and filters the list when clicked. **Manage
+tags** renames a tag or removes it from every order.
+
+- API: `GET /api/orders?tag=`, `GET /api/orders/tags`,
+  `GET|POST /api/orders/{id}/tags`, `DELETE /api/orders/{id}/tags?tag=`,
+  `PATCH|DELETE /api/orders/tags`. Also in the typed client
+  (`orders.tags()`, `addTags()`, `removeTag()`, `renameTag()`, `deleteTag()`).
+- Tags are staff-only: no email, receipt or public response carries them.
+  Two people tagging one order at once both land on all three drivers.
+  A data-subject erasure clears an order's tags.
+- Global rename and remove are one atomic write per order, not one transaction
+  across the shop; running them again finishes an interrupted run.
+
+### Products show whether they are in stock, low, or out
+
+Every product from `GET /api/products` and `GET /api/products/{ref}` now carries
+a read-only `stock_status`: `in-stock`, `low-stock` or `out-of-stock`, with
+`available_qty`, `threshold_qty`, `backorderable` and `purchasable`. A product
+with variants is judged on its enabled variants, and each variant carries its
+own. `GET /api/products/{ref}/stock-status` returns the same for one product,
+and the client has `products.stockStatus(ref)`.
+
+- **Existing shops will now see "Low stock" at 1 to 5 units** until they change
+  it. **Settings → Shop → Inventory** has a new "Low stock threshold" (default 5;
+  set it to 0 to never show "Low stock"). A product's own **Low-stock threshold**
+  overrides it; leaving that empty now means "use the shop default" instead of
+  "no warning".
+- The storefront starter shows the badge on product cards and product pages,
+  marks low-stock options, and keeps the buy button enabled for a product that
+  takes backorders.
+- Fixed: a product whose every variant had sold out was reported `in_stock: true`
+  by the admin list, the dashboard's out-of-stock count, the product's
+  schema.org availability and automatic collections with an in-stock rule. They
+  now read the variants' counts. The same product also swallowed "tell me when
+  it's back" signups and counted as already back for the restock mail; both now
+  treat it as out of stock.
+- A new test, `tests/stock-status.test.mjs`, covers the rule on all three
+  storage drivers.
+
+### Terms & Conditions checkbox at checkout
+
+Checkout can now record, and optionally require, the buyer's agreement to the
+shop's terms.
+
+- `POST /api/orders` accepts `terms_accepted` and `privacy_accepted` (real
+  booleans). The order stores them, with a server-stamped `terms_accepted_at`.
+  An order with no answer simply has no field: absent means unknown, never
+  "accepted", and older orders are not backfilled.
+- **Off by default**, so no existing storefront is refused. With
+  `checkout_terms_required` on (shop settings, "Terms & Conditions at checkout"), a shopper or API key
+  without `terms_accepted: true` gets `400` `checkout.terms_not_accepted`
+  before anything is priced or reserved. Staff-placed orders are never refused.
+- `checkout_terms_label` and `checkout_terms_url` are public settings for the
+  storefront to render. The orders screen shows "Customer accepted the terms"
+  with the time. `examples/storefront` draws the box.
+- The plan called for "theme settings" and a required boolean on every order.
+  Core has no checkout page, so these are shop settings, and the field is
+  optional for the reasons above.
+
 ### ECWS Billing: invoicing and bookkeeping (your own Lexware)
 
 A new bundled plugin, **ECWS Billing** (E-Commerce Web Services; plugin id
@@ -456,6 +1038,7 @@ storefront saw only "blocked by CORS policy" and never the status or code. They
 all go through one helper now, the CORS preflight is answered before the
 maintenance check (so a storefront can read the 503 and its `Retry-After`), and
 a test fails if a new early return skips the helper.
+
 ### "View site" opens the site your visitors see
 
 The admin header's **View site** button was a hard-coded `/`. On a headless
@@ -893,6 +1476,7 @@ New storage methods (all three drivers): `getRecentOrders`, `getOrderByNumber`,
 `claimIdempotencyKey`, `completeIdempotencyKey`, `releaseIdempotencyKey`. The
 relational driver adds the `idempotency_keys` table and two expression indexes
 on `orders`. See UPGRADE.md U-20.
+
 ### Deploy and ops: the shipped artifacts now do what they say
 
 Every item here was in a file no test read, and each looked fine until it ran.
@@ -958,6 +1542,7 @@ of `deploy.sh` against a scratch tree. Upgrade steps are in UPGRADE.md, U-18.
 - **MAINTENANCE.md**'s nginx snippet served the holding page as **200** (its
   `return 503` came after `rewrite … break`, which stops it running) and
   intercepted the app's own 503s. It now matches the reference vhost.
+
 ### The change feed is bounded, paged and pruned — on every driver
 
 `GET /api/content/changes` is anonymous and public: the headless storefronts
@@ -2503,6 +3088,7 @@ the storage contract every driver implements. The paid boundary moves up to the
 built. The rules any future paid module must follow — the core behaves the same
 without it, and there is never a licence check on the request path — are in
 [LICENSING.md](./LICENSING.md).
+
 ### A `manager` role for shop staff
 
 `manager` joins the Role union: shop staff who run the catalogue, but who
@@ -2533,6 +3119,7 @@ added later is admin-only until someone deliberately opens it.
 Also: the dashboard server-rendered `LocalDB.getUsers()` for every staff role
 just to print a count. It is now fetched only for admins, and the stat is hidden
 rather than shown as "0 authors" — a wrong number is worse than no number.
+
 ### Fixed — from an adversarial review of the two previous commits
 
 - **A deactivated plugin kept POSTing site content to its webhook URL.**

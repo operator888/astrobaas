@@ -298,8 +298,8 @@ export function buildFieldPresentation(
   steps: number,
   earlier: ReadonlySet<string>,
   push: (message: string) => void,
-): { label?: string; step?: number; showIf?: { field: string; equals: string | number | boolean } } | null {
-  const out: { label?: string; step?: number; showIf?: { field: string; equals: string | number | boolean } } = {};
+): { label?: string; step?: number; showIf?: { field: string; equals: string | number | boolean }; private?: boolean } | null {
+  const out: { label?: string; step?: number; showIf?: { field: string; equals: string | number | boolean }; private?: boolean } = {};
 
   if (raw.label !== undefined) {
     if (typeof raw.label !== 'string') {
@@ -351,6 +351,18 @@ export function buildFieldPresentation(
       return null;
     }
     out.showIf = { field: cond.field, equals: v };
+  }
+
+  // `private` — left out of every non-staff read (see ContentTypeField.private).
+  // Copied HERE because both the manifest and the admin builder rebuild a field
+  // from this function's output; a flag validated anywhere else would be the
+  // "schema names it, the copy forgets it" shape.
+  if (raw.private !== undefined) {
+    if (typeof raw.private !== 'boolean') {
+      push(`${where}.private must be true or false`);
+      return null;
+    }
+    if (raw.private) out.private = true;
   }
 
   return out;

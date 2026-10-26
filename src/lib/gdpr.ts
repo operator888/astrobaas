@@ -47,10 +47,16 @@
  */
 import crypto from 'node:crypto';
 import { LocalDB } from './localdb';
+import { scrubOrderTimeline } from './commerce/order-timeline';
 import { getContentTypes } from '../core/content-types';
+import { statusOf } from '../core/moderation';
+import {
+  REVIEWS_TYPE, reviewsByEmail, anonymisedReviewPatch, announceReviewRemoved, type ReviewRow,
+} from './reviews';
 import type { ContactMessage, Customer, EmailLogEntry, Order, Subscriber, User } from '../core/models';
 import { fieldsOfType, valuesAt } from './field-walk';
 import { deletePrivateFile } from './media/private-files';
+import { anonymisedEntitlements } from './commerce/download-entitlements';
 
 /** Everything one email address appears in. */
 export interface SubjectData {
@@ -71,6 +77,17 @@ export interface SubjectData {
   account: Pick<User, 'id' | 'name' | 'email' | 'role' | 'status' | 'avatar' | 'last_login' | 'created_at' | 'updated_at'> | null;
   /** Entries in custom collections whose fields carry this address. */
   submissions: { type: string; label: string; entries: unknown[] }[];
+  /**
+   * Product reviews written from this address (C-35), in every moderation
+   * state.
+   *
+   * Their own key rather than a `submissions` group, and read from storage
+   * whether or not reviews are switched on: the generic sweep walks only
+   * REGISTERED types, and a shop that turned reviews off after collecting
+   * some would otherwise answer an access request with "we hold nothing" while
+   * holding them.
+   */
+  reviews: unknown[];
   /**
    * Emails this install sent to the address.
    *
@@ -94,12 +111,18 @@ export interface EraseReport {
   email: string;
   performed_at: string;
   /** Records removed entirely. */
-  deleted: { customers: number; messages: number; newsletter: number; submissions: number; emails: number; changeFeed: number; webhookDeliveries: number };
+  deleted: { customers: number; messages: number; newsletter: number; submissions: number; reviews: number; emails: number; changeFeed: number; webhookDeliveries: number };
   /**
    * Orders kept, with everything identifying the person replaced. Retained
    * because a shop must be able to produce its accounts.
    */
   ordersAnonymised: number;
+  /**
+   * Published reviews kept as a RATING ONLY — name, email, order number, title
+   * and body removed — so the product's average does not move because a
+   * customer asked to be forgotten. Unpublished ones are deleted (`deleted.reviews`).
+   */
+  reviewsAnonymised: number;
   /**
    * A staff account, if the address has one. NEVER touched automatically —
    * see the note in `eraseSubject`.
@@ -132,6 +155,10 @@ function mentionsEmail(value: unknown, email: string): boolean {
 async function findSubmissions(email: string): Promise<SubjectData['submissions']> {
   const out: SubjectData['submissions'] = [];
   for (const def of getContentTypes()) {
+    // Reviews have their own key and their own erasure rule (anonymise the
+    // published ones) — see SubjectData.reviews. Swept here too, they would
+    // be DELETED by the generic loop before they could be anonymised.
+    if (def.name === REVIEWS_TYPE) continue;
     // fieldsOfType, not a flat filter. An email address inside a repeater item
     // is still that person's address, and a sweep that could not see it would
     // answer a subject-access request with "we hold nothing about you" while
@@ -205,6 +232,7 @@ export async function collectSubjectData(rawEmail: string): Promise<SubjectData>
       updated_at: account.updated_at,
     } : null,
     submissions: await findSubmissions(email),
+    reviews: reviewsByEmail(await LocalDB.getCustomEntities(REVIEWS_TYPE) as ReviewRow[], email),
     emails: ((await LocalDB.getEmailLog(2000)) as EmailLogEntry[])
       .filter((e) => normaliseEmail(e.to) === email),
     operational: {
@@ -277,6 +305,41 @@ export function anonymisedOrderFields(order: Order): Partial<Order> {
     billing_address: undefined,
     // The buyer's free-text note is their words and often their identity.
     note: '',
+    // Staff tags are free text a person typed, and one that says "Mr Papas,
+    // fraud?" is as identifying as the note above. The SHOP'S note is kept (it
+    // is the record of its own handling); labels have no such purpose and
+    // cannot be told apart from a name by a machine, so they go. `undefined`
+    // removes the key on every driver.
+    tags: undefined,
+    // Invoice records keep their FIGURES and lose the buyer. A record is
+    // frozen and never edited — except here, because the snapshot of the
+    // buyer (name, address, email, ΑΦΜ) is exactly the identifying data this
+    // function exists to remove, copied. The lines, the VAT per rate and the
+    // totals stay, like `tax_cents` does: they are the shop's books. The legal
+    // document, if one was issued, lives with the issuer, not here. Only the
+    // country is kept, for the same place-of-supply reason as
+    // `shipping_country` below.
+    //
+    // An order with NO records is given an empty list, deliberately: records
+    // are written by compare-and-set against what was read, and a record
+    // decided just before this erasure (with the buyer in it) would otherwise
+    // still match "absent" and land on the erased order. `[]` is not absent,
+    // so that write loses, re-reads, finds the order erased, and writes nothing.
+    invoice_records: Array.isArray(order.invoice_records)
+      ? order.invoice_records.map((d) => (d && d.kind === 'invoice'
+          ? { ...d, buyer: d.buyer?.country ? { country: d.buyer.country } : {} }
+          : d))
+      : [],
+    // Download entitlements stay as the shop's record of what was delivered —
+    // counts and times — with every IP address removed from the download log,
+    // and every one revoked: an erased order's downloads end with it.
+    entitlements: anonymisedEntitlements(order.entitlements),
+    // Campaign attribution goes whole. An ad click id (gclid, fbclid, msclkid)
+    // is an identifier the ad platform can join back to this person's click,
+    // and the visit times pin the person down further; it has no fiscal
+    // purpose, so nothing justifies keeping it. The Insights report counts the
+    // order as unattributed from now on, which is the honest consequence.
+    attribution: undefined,
     // THE PRESCRIPTION STAYS. This is an owner decision, and it reverses what
     // this function used to do.
     //
@@ -338,8 +401,9 @@ export async function eraseSubject(rawEmail: string): Promise<EraseReport> {
   const report: EraseReport = {
     email,
     performed_at: new Date().toISOString(),
-    deleted: { customers: 0, messages: 0, newsletter: 0, submissions: 0, emails: 0, changeFeed: 0, webhookDeliveries: 0 },
+    deleted: { customers: 0, messages: 0, newsletter: 0, submissions: 0, reviews: 0, emails: 0, changeFeed: 0, webhookDeliveries: 0 },
     ordersAnonymised: 0,
+    reviewsAnonymised: 0,
     staffAccountFound: false,
     notes: [],
   };
@@ -347,10 +411,27 @@ export async function eraseSubject(rawEmail: string): Promise<EraseReport> {
   const data = await collectSubjectData(email);
 
   // Orders FIRST, while the customer record still exists to match against.
+  const erasedOrderIds: string[] = [];
   for (const order of data.orders) {
+    // The order's stored timeline carries free text (notes, comments, tag
+    // names) a person typed. Scrubbed BEFORE the order update: that update
+    // writes a change-feed snapshot of the whole order, and a snapshot taken
+    // with the timeline still intact would hold the text in a row the
+    // email-substring purge below can no longer find (the snapshot is of the
+    // ANONYMISED order, so it does not contain the address). The scrub is a
+    // compare-and-set and writes no feed row.
+    await scrubOrderTimeline(order.id);
     await LocalDB.updateOrder(order.id, anonymisedOrderFields(order));
+    // Again: an entry appended between the two steps is cleared too.
+    await scrubOrderTimeline(order.id);
+    erasedOrderIds.push(order.id);
     report.ordersAnonymised += 1;
   }
+  // Belt and braces: every feed row about an erased order goes, found by the
+  // order's id (always in its snapshot) and not by an address that earlier
+  // snapshots may no longer carry. Counted with the purge below.
+  let orderFeedRows = 0;
+  for (const id of erasedOrderIds) orderFeedRows += await LocalDB.deleteContentChangesFor(id);
   if (report.ordersAnonymised > 0) {
     report.notes.push(
       `${report.ordersAnonymised} order(s) were kept with their identifying fields removed, `
@@ -401,6 +482,33 @@ export async function eraseSubject(rawEmail: string): Promise<EraseReport> {
     report.deleted.newsletter = 1;
   }
 
+  // Product reviews (C-35). BEFORE the change-feed purge below, so the purge
+  // also takes the snapshots these writes leave behind.
+  //
+  // A PUBLISHED review keeps its rating: the shop's average is a fact about
+  // sales, and silently moving it because one customer asked to be forgotten
+  // would make the published number wrong for everyone else. Everything that
+  // identifies or was written by the person goes. An UNPUBLISHED one —
+  // pending, rejected, spam — feeds nothing public and is deleted outright.
+  for (const row of data.reviews as ReviewRow[]) {
+    if (statusOf(row.data) === 'approved') {
+      await LocalDB.updateCustomEntity(REVIEWS_TYPE, row.id, anonymisedReviewPatch(new Date().toISOString()));
+      report.reviewsAnonymised += 1;
+    } else {
+      await LocalDB.deleteCustomEntity(REVIEWS_TYPE, row.id);
+      report.deleted.reviews += 1;
+    }
+    // Either way a media module must drop the photos (the paid seam).
+    announceReviewRemoved(row, 'erased');
+  }
+  if (report.reviewsAnonymised > 0) {
+    report.notes.push(
+      `${report.reviewsAnonymised} published review(s) were kept as a star rating only — the name, `
+      + 'email address, order number, title and text were removed — so the product\'s average '
+      + 'rating stays accurate for everyone else. What remains identifies nobody.',
+    );
+  }
+
   // The send log. Deleted rather than anonymised: unlike an order it is a
   // convenience, not a record anyone is required to keep.
   report.deleted.emails = await LocalDB.deleteEmailLogFor(email);
@@ -410,7 +518,7 @@ export async function eraseSubject(rawEmail: string): Promise<EraseReport> {
   // submission data (name, email, phone, address) and must be purged too, or
   // the erasure leaves a copy of exactly what it just deleted a poll or a
   // webhook-log screen away.
-  report.deleted.changeFeed = await LocalDB.deleteContentChangesFor(email);
+  report.deleted.changeFeed = orderFeedRows + (await LocalDB.deleteContentChangesFor(email));
   report.deleted.webhookDeliveries = await LocalDB.deleteWebhookDeliveriesFor(email);
 
   for (const group of data.submissions) {
@@ -452,6 +560,8 @@ export async function eraseSubject(rawEmail: string): Promise<EraseReport> {
     && report.deleted.messages === 0
     && report.deleted.newsletter === 0
     && report.deleted.submissions === 0
+    && report.deleted.reviews === 0
+    && report.reviewsAnonymised === 0
     && report.deleted.emails === 0
     && report.deleted.changeFeed === 0
     && report.deleted.webhookDeliveries === 0) {

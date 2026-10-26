@@ -212,6 +212,7 @@ const cookieDeclaration = buildCookieDeclaration(
         count(counts, 'Messages', current.messages.length);
         count(counts, 'Form submissions',
           current.submissions.reduce((n: number, g: any) => n + g.entries.length, 0));
+        count(counts, 'Product reviews', (current.reviews ?? []).length);
         count(counts, 'Newsletter', current.newsletter ? 'yes' : 'no');
         $<HTMLElement>('result-subject').textContent =
           `${current.email} — ${current.customer ? 'has a customer record' : 'no customer record'}`
@@ -331,6 +332,8 @@ const cookieDeclaration = buildCookieDeclaration(
         line(`${r.deleted.messages} message(s) deleted`);
         line(`${r.deleted.newsletter} newsletter subscription(s) deleted`);
         line(`${r.deleted.submissions} form submission(s) deleted`);
+        line(`${r.reviewsAnonymised ?? 0} published review(s) kept as a rating only`);
+        line(`${r.deleted.reviews ?? 0} unpublished review(s) deleted`);
         for (const note of r.notes ?? []) line(note);
         $<HTMLElement>('erase-report').classList.remove('hidden');
         $<HTMLInputElement>('erase-confirm').value = '';

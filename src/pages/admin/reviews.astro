@@ -1,0 +1,246 @@
+---
+/**
+ * The product-review moderation queue (C-35).
+ *
+ * Server-rendered from the same functions `GET /api/reviews` uses
+ * (lib/reviews.ts), so the screen and the API cannot filter differently.
+ * Every action goes through `POST /api/reviews/moderate`, which audits it.
+ *
+ * Opens on WAITING reviews, because that is what somebody arrives here to do.
+ */
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { LocalDB } from '../../lib/localdb';
+import { canOpenAdminPage } from '../../lib/admin-access';
+import { settingsMap, settingBool } from '../../lib/settings-map';
+import { REVIEWS_ENABLED_SETTING } from '../../core/builtin-collections';
+import { statusOf } from '../../core/moderation';
+import {
+  REVIEWS_TYPE, parseAdminReviewQuery, adminReviewList, reviewStatusCounts, isErasedReview,
+  type ReviewRow,
+} from '../../lib/reviews';
+
+await LocalDB.init();
+const user = Astro.locals.user;
+// Same rule the middleware enforces, asked the same way.
+if (!canOpenAdminPage('/admin/reviews', user?.role)) {
+  return Astro.redirect('/admin');
+}
+const t = Astro.locals.t;
+
+const settings = settingsMap((await LocalDB.getSettings()) as never);
+const reviewsOn = settingBool(settings[REVIEWS_ENABLED_SETTING], false);
+const rows = await LocalDB.getCustomEntities(REVIEWS_TYPE) as ReviewRow[];
+const sp = Astro.url.searchParams;
+const q = parseAdminReviewQuery(sp);
+const { total, items } = adminReviewList(rows, q);
+const counts = reviewStatusCounts(rows);
+
+const productNames = new Map<string, string>();
+for (const id of new Set(items.map((r) => String(r.data?.product_id ?? '')).filter(Boolean))) {
+  const p = await LocalDB.getProduct(id).catch(() => undefined);
+  if (p) productNames.set(id, p.name);
+}
+
+const TABS = [
+  ['pending', 'admin.reviews.statusPending'],
+  ['approved', 'admin.reviews.statusApproved'],
+  ['rejected', 'admin.reviews.statusRejected'],
+  ['spam', 'admin.reviews.statusSpam'],
+  ['all', 'admin.reviews.statusAll'],
+] as const;
+
+/** A link to this screen with one filter changed and paging reset. */
+function hrefWith(patch: Record<string, string | undefined>): string {
+  const next = new URLSearchParams(sp);
+  next.delete('offset');
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined || v === '') next.delete(k); else next.set(k, v);
+  }
+  const qs = next.toString();
+  return qs ? `/admin/reviews?${qs}` : '/admin/reviews';
+}
+function pageHref(offset: number): string {
+  const next = new URLSearchParams(sp);
+  if (offset > 0) next.set('offset', String(offset)); else next.delete('offset');
+  const qs = next.toString();
+  return qs ? `/admin/reviews?${qs}` : '/admin/reviews';
+}
+
+// Full literals — Tailwind scans source TEXT, so a composed class is absent
+// from the production stylesheet.
+const STATUS_CLASS: Record<string, string> = {
+  pending: 'bg-amber-100 text-amber-800',
+  approved: 'bg-green-100 text-green-800',
+  rejected: 'bg-gray-100 text-gray-600',
+  spam: 'bg-red-100 text-red-700',
+};
+const STATUS_LABEL: Record<string, string> = {
+  pending: 'admin.reviews.statusPending',
+  approved: 'admin.reviews.statusApproved',
+  rejected: 'admin.reviews.statusRejected',
+  spam: 'admin.reviews.statusSpam',
+};
+const stars = (n: number) => '★★★★★'.slice(0, Math.max(0, Math.min(5, n))) + '☆☆☆☆☆'.slice(0, 5 - Math.max(0, Math.min(5, n)));
+const when = (iso: string) => (iso ? iso.slice(0, 16).replace('T', ' ') : '');
+---
+
+<AdminLayout title={t('admin.reviews.title')}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="mb-6">
+      <h1 class="text-3xl font-bold text-gray-900">{t('admin.reviews.title')}</h1>
+      <p class="text-gray-600 mt-2">{t('admin.reviews.subtitle')}</p>
+      {!reviewsOn && (
+        <p class="mt-3 text-sm rounded-lg border border-amber-200 bg-amber-50 text-amber-900 px-3 py-2" data-testid="reviews-off">
+          {t('admin.reviews.off')} <a href="/admin/settings" class="underline">/admin/settings</a>
+        </p>
+      )}
+    </div>
+
+    <nav class="flex flex-wrap gap-2 mb-4" aria-label={t('admin.reviews.title')}>
+      {TABS.map(([id, key]) => (
+        <a
+          href={hrefWith({ status: id === 'pending' ? undefined : id })}
+          class={q.status === id
+            ? 'px-3 py-1.5 rounded-full text-sm font-medium bg-blue-600 text-white'
+            : 'px-3 py-1.5 rounded-full text-sm font-medium bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'}
+          aria-current={q.status === id ? 'page' : undefined}
+          data-status-tab={id}
+        >
+          {t(key)}
+          {id !== 'all' && <span class="ml-1 opacity-80" data-count={id}>({counts[id]})</span>}
+        </a>
+      ))}
+    </nav>
+
+    <form method="get" action="/admin/reviews" class="flex flex-wrap items-end gap-3 mb-4 bg-white border border-gray-200 rounded-lg p-3">
+      {q.status !== 'pending' && <input type="hidden" name="status" value={q.status} />}
+      <label class="text-sm text-gray-700">
+        <span class="block text-xs text-gray-500 mb-1">{t('admin.reviews.filterRating')}</span>
+        <select name="rating" class="px-2 py-1.5 border border-gray-300 rounded text-sm">
+          <option value="">{t('admin.reviews.filterAnyRating')}</option>
+          {[5, 4, 3, 2, 1].map((n) => <option value={String(n)} selected={q.rating === n}>{stars(n)}</option>)}
+        </select>
+      </label>
+      <label class="text-sm text-gray-700">
+        <span class="block text-xs text-gray-500 mb-1">{t('admin.reviews.filterVerified')}</span>
+        <select name="verified" class="px-2 py-1.5 border border-gray-300 rounded text-sm">
+          <option value="">{t('admin.reviews.filterVerifiedAny')}</option>
+          <option value="yes" selected={q.verified === 'yes'}>{t('admin.reviews.filterVerifiedYes')}</option>
+          <option value="no" selected={q.verified === 'no'}>{t('admin.reviews.filterVerifiedNo')}</option>
+        </select>
+      </label>
+      <label class="text-sm text-gray-700 flex-1 min-w-48">
+        <span class="sr-only">{t('admin.reviews.filterSearch')}</span>
+        <input type="search" name="q" value={q.q ?? ''} placeholder={t('admin.reviews.filterSearch')}
+          class="w-full px-3 py-1.5 border border-gray-300 rounded text-sm" />
+      </label>
+      {q.productId && <input type="hidden" name="product_id" value={q.productId} />}
+      <button type="submit" class="px-3 py-1.5 bg-gray-800 text-white rounded text-sm">{t('admin.reviews.filterApply')}</button>
+    </form>
+
+    <div id="rv-bar" class="flex flex-wrap items-center gap-2 mb-3"
+      data-confirm-delete={t('admin.reviews.confirmDelete')}
+      data-nothing-selected={t('admin.reviews.nothingSelected')}
+      data-failed={t('admin.reviews.failed')}>
+      <label class="flex items-center gap-2 text-sm text-gray-700 mr-2">
+        <input type="checkbox" id="rv-all" class="rounded border-gray-300" />
+        {t('admin.reviews.selectAll')}
+      </label>
+      <button type="button" data-bulk="approve" class="px-3 py-1.5 rounded text-sm bg-green-600 text-white hover:bg-green-700">{t('admin.reviews.actionApprove')}</button>
+      <button type="button" data-bulk="reject" class="px-3 py-1.5 rounded text-sm bg-white border border-gray-300 text-gray-800 hover:bg-gray-50">{t('admin.reviews.actionReject')}</button>
+      <button type="button" data-bulk="spam" class="px-3 py-1.5 rounded text-sm bg-white border border-red-200 text-red-700 hover:bg-red-50">{t('admin.reviews.actionSpam')}</button>
+      <button type="button" data-bulk="delete" class="px-3 py-1.5 rounded text-sm bg-white border border-gray-300 text-gray-600 hover:bg-gray-50">{t('admin.reviews.actionDelete')}</button>
+      <span id="rv-notice" class="hidden" role="status"></span>
+    </div>
+
+    {items.length === 0 ? (
+      <div class="bg-white border border-gray-200 rounded-lg p-8 text-center text-gray-500" data-testid="reviews-empty">
+        {t('admin.reviews.empty')}
+      </div>
+    ) : (
+      <ul class="space-y-3" data-testid="reviews-list">
+        {items.map((r) => {
+          const d = r.data ?? {};
+          const s = statusOf(d);
+          const pid = String(d.product_id ?? '');
+          const erased = isErasedReview(r);
+          return (
+            <li class="bg-white border border-gray-200 rounded-lg p-4 flex gap-3" data-review-id={r.id} data-review-status={s}>
+              <input type="checkbox" class="rv-pick mt-1 rounded border-gray-300" value={r.id} aria-label={String(d.title || d.author_name || r.id)} />
+              <div class="flex-1 min-w-0">
+                <div class="flex flex-wrap items-center gap-2 text-sm">
+                  <span class="text-amber-500 tracking-wider" aria-label={`${Number(d.rating)} / 5`}>{stars(Number(d.rating))}</span>
+                  <span class={`px-2 py-0.5 text-xs rounded-full ${STATUS_CLASS[s]}`}>{t(STATUS_LABEL[s])}</span>
+                  {d.verified_buyer === true && (
+                    <span class="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800">{t('admin.reviews.verified')}</span>
+                  )}
+                  {d.spam_flagged === true && (
+                    <span class="px-2 py-0.5 text-xs rounded-full bg-red-50 text-red-700" title={Array.isArray(d.spam_reasons) ? d.spam_reasons.join(', ') : ''}>{t('admin.reviews.flagged')}</span>
+                  )}
+                  {erased && (
+                    <span class="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600">{t('admin.reviews.erased')}</span>
+                  )}
+                  <a href={hrefWith({ product_id: pid })} class="text-gray-700 hover:text-blue-700 font-medium truncate">
+                    {productNames.get(pid) ?? t('admin.reviews.unknownProduct')}
+                  </a>
+                </div>
+                {d.title && <p class="mt-1 font-semibold text-gray-900">{String(d.title)}</p>}
+                {d.body && <p class="mt-1 text-gray-700 whitespace-pre-line break-words">{String(d.body)}</p>}
+                <p class="mt-2 text-xs text-gray-500">
+                  {String(d.author_name ?? '')}
+                  {d.author_email && <span> · {String(d.author_email)}</span>}
+                  {d.locale && <span> · {String(d.locale)}</span>}
+                  <span> · {when(String(d.submitted_at ?? r.created_at ?? ''))}</span>
+                </p>
+              </div>
+              <div class="flex flex-col gap-1 items-end shrink-0">
+                {s !== 'approved' && <button type="button" data-one="approve" data-id={r.id} class="text-sm text-green-700 hover:text-green-900">{t('admin.reviews.actionApprove')}</button>}
+                {s !== 'rejected' && <button type="button" data-one="reject" data-id={r.id} class="text-sm text-amber-700 hover:text-amber-900">{t('admin.reviews.actionReject')}</button>}
+                {s !== 'spam' && <button type="button" data-one="spam" data-id={r.id} class="text-sm text-red-700 hover:text-red-900">{t('admin.reviews.actionSpam')}</button>}
+                {s !== 'pending' && <button type="button" data-one="pending" data-id={r.id} class="text-sm text-gray-600 hover:text-gray-900">{t('admin.reviews.actionPending')}</button>}
+                <button type="button" data-one="delete" data-id={r.id} class="text-sm text-gray-500 hover:text-gray-800">{t('admin.reviews.actionDelete')}</button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    )}
+
+    <div class="flex items-center justify-between mt-4 text-sm text-gray-600">
+      <span>{t('admin.reviews.showing', { count: items.length, total })}</span>
+      <span class="space-x-3">
+        {q.offset > 0 && <a href={pageHref(Math.max(0, q.offset - q.limit))} class="text-blue-700 hover:underline">{t('admin.reviews.prev')}</a>}
+        {q.offset + items.length < total && <a href={pageHref(q.offset + q.limit)} class="text-blue-700 hover:underline">{t('admin.reviews.next')}</a>}
+      </span>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  import { api } from '../../lib/apiClient';
+  import { flash } from '../../lib/admin-ui';
+
+  const bar = document.getElementById('rv-bar') as HTMLElement | null;
+  const notice = document.getElementById('rv-notice');
+  const picks = () => [...document.querySelectorAll<HTMLInputElement>('.rv-pick')];
+
+  document.getElementById('rv-all')?.addEventListener('change', (e) => {
+    const on = (e.target as HTMLInputElement).checked;
+    for (const p of picks()) p.checked = on;
+  });
+
+  async function moderate(ids: string[], action: string) {
+    if (!ids.length) { flash(notice, bar?.dataset.nothingSelected ?? '', 'error'); return; }
+    if (action === 'delete' && !window.confirm(bar?.dataset.confirmDelete ?? '')) return;
+    const r = await api.post('/api/reviews/moderate', { ids, action });
+    if (r.ok) window.location.reload();
+    else flash(notice, `${bar?.dataset.failed ?? ''} ${r.error}`, 'error');
+  }
+
+  for (const b of document.querySelectorAll<HTMLButtonElement>('[data-bulk]')) {
+    b.addEventListener('click', () => moderate(picks().filter((p) => p.checked).map((p) => p.value), b.dataset.bulk ?? ''));
+  }
+  for (const b of document.querySelectorAll<HTMLButtonElement>('[data-one]')) {
+    b.addEventListener('click', () => moderate([b.dataset.id ?? ''], b.dataset.one ?? ''));
+  }
+</script>

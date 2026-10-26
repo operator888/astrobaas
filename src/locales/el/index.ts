@@ -9,6 +9,7 @@ import { customers } from './customers';
 import { dashboard } from './dashboard';
 import { editor } from './editor';
 import { header } from './header';
+import { invoices } from './invoices';
 import { language } from './language';
 import { media } from './media';
 import { messages } from './messages';
@@ -18,6 +19,7 @@ import { orders } from './orders';
 import { plugins } from './plugins';
 import { posts } from './posts';
 import { profile } from './profile';
+import { reviews } from './reviews';
 import { themes } from './themes';
 import { tools } from './tools';
 import { users } from './users';
@@ -36,6 +38,7 @@ export const el: Catalogue = {
   ...dashboard,
   ...editor,
   ...header,
+  ...invoices,
   ...language,
   ...media,
   ...messages,
@@ -45,6 +48,7 @@ export const el: Catalogue = {
   ...plugins,
   ...posts,
   ...profile,
+  ...reviews,
   ...themes,
   ...tools,
   ...users,

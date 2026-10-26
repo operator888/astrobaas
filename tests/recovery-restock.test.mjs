@@ -107,18 +107,36 @@ const order = (o = {}) => ({
   check('a missing product is not back', W.isBackInStock(null) === false
     && W.isBackInStock(undefined) === false);
 
+  // A product with variants sells from its variants. Its own count is null and
+  // its stored flag is true while every variant is sold out.
+  const v = (...stocks) => stocks.map((s, i) => ({ id: `v${i}`, options: { Size: String(i) }, stock: s, in_stock: s > 0, enabled: true }));
+  const shirt = (o = {}) => p({ stock: null, in_stock: true, ...o });
+  check('a variable product with every variant sold out is NOT back, whatever the stored flag says',
+    W.isBackInStock(shirt({ variants: v(0, 0) })) === false);
+  check('...is back once one variant has stock', W.isBackInStock(shirt({ variants: v(0, 2) })) === true);
+  check('...a disabled variant with stock does not count', (() => {
+    const vs = v(0, 9); vs[1].enabled = false;
+    return W.isBackInStock(shirt({ variants: vs })) === false;
+  })());
+
   const products = new Map([
     ['in', p({ id: 'in' })],
     ['out', p({ id: 'out', stock: 0 })],
+    ['shirt-out', shirt({ id: 'shirt-out', variants: v(0, 0) })],
+    ['shirt-back', shirt({ id: 'shirt-back', variants: v(0, 3) })],
   ]);
   const rows = [
     { id: 'r1', product_id: 'in', email: 'a@example.com', created_at: '' },
     { id: 'r2', product_id: 'out', email: 'b@example.com', created_at: '' },
     { id: 'r3', product_id: 'deleted', email: 'c@example.com', created_at: '' },
+    { id: 'r4', product_id: 'shirt-out', email: 'd@example.com', created_at: '' },
+    { id: 'r5', product_id: 'shirt-back', email: 'e@example.com', created_at: '' },
   ];
   const sel = W.selectWaitlistToNotify(rows, products);
   check('only rows whose product is buyable are notified',
-    sel.notify.map((r) => r.id).join() === 'r1');
+    sel.notify.map((r) => r.id).join() === 'r1,r5');
+  check('a sold-out variable product is NOT notified, and its row stays',
+    !sel.notify.some((r) => r.id === 'r4') && !sel.stale.some((r) => r.id === 'r4'));
   check('rows for a DELETED product are collected for cleanup',
     sel.stale.map((r) => r.id).join() === 'r3');
   check('...and a still-out-of-stock row is left waiting',

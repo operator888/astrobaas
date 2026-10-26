@@ -18,8 +18,13 @@ export const prerender = false;
  */
 const COMMERCE_SECTION = `## Commerce (first-class)
 GET    /api/products              List products (public; active only unless staff &all=true).
-                                  Query: ?category= ?brand= ?search= ?on_sale= ?limit= ?offset=
-GET    /api/products/{id}         One product by id or slug (public).
+                                  Query: ?category= ?brand= ?search= ?on_sale= ?featured= ?limit= ?offset=
+                                  ?sort=relevance|price_asc|price_desc|newest|name_asc|name_desc (server-side, over the
+                                  whole result before paging by the response's price_from_cents / newest / name; unknown
+                                  value = 422; echoed in meta.sort). Every product also carries read-only
+                                  price_from_cents / price_to_cents (variable products: cheapest / dearest variant).
+GET    /api/products/{id}         One product by id or slug (public; active only unless staff ?all=true).
+GET    /api/products/{id}/stock-status  Availability: in-stock | low-stock | out-of-stock (public).
 POST   /api/products              Create a product.                        [editor+]
 PUT    /api/products/{id}         Update a product (partial).              [editor+]
 DELETE /api/products/{id}         Delete a product.                        [admin]
@@ -38,10 +43,36 @@ DELETE /api/product-categories/{id}  Delete; 409 while it has subcategories; unt
 POST   /api/orders                Checkout: { email, name?, items:[{product_id,qty}] }.
                                   Anonymous OK (same-origin CSRF or bearer key);
                                   totals computed server-side; stock decremented.
+                                  terms_accepted? (boolean): required true only when
+                                  settings checkout_terms_required is on -> else 400
+                                  checkout.terms_not_accepted.
+                                  attribution? { first?, last? }: utm_* / gclid /
+                                  fbclid / msclkid + at; send ONLY with the
+                                  shopper's marketing consent; strict -> 422.
 GET    /api/orders                List orders.                             [editor+]
 GET    /api/orders/{id}           One order.                               [editor+]
 PUT    /api/orders/{id}           Update status/note.                      [editor+]
+GET    /api/orders?tag=VIP        Only orders carrying a staff tag (any case). [editor+]
+GET    /api/orders/tags           Staff tags in use with order counts.      [editor+]
+GET    /api/orders/attribution    Paid orders + revenue by source/medium/campaign;
+                                  ?from&to (YYYY-MM-DD) &model=first|last &format=csv. [editor+]
+POST   /api/orders/{id}/tags      Add { tag } or { tags:[..] }; max 10.      [editor+]
+DELETE /api/orders/{id}/tags?tag= Remove one tag from an order.             [editor+]
+PATCH  /api/orders/tags           { from, to } rename on every order.       [editor+]
+DELETE /api/orders/tags?tag=      Remove a tag from every order.            [editor+]
+GET    /api/orders/{id}/timeline  Everything that happened to an order; ?filter= status|payments|shipments|notes|other, ?format=csv. [editor+]
+POST   /api/orders/{id}/timeline  Add a staff comment { text } to the timeline. [editor+]
+GET    /api/orders/{id}/invoice-records  Invoice/credit-memo RECORDS (non-fiscal). [editor+]
+POST   /api/orders/{id}/invoice-records  { action: create|finalise|cancel|credit|
+                                  issued_externally|issue, record_id? }.     [admin]  
+GET    /api/invoice-records/{id}/pdf     A record as PDF; staff, or ?token= receipt token.
+GET    /api/orders/{id}/downloads Download entitlements + log for an order.  [editor+]
+POST   /api/orders/{id}/downloads { action: revoke|restore|reset|grant, entitlement_id }. [editor+]
+GET    /api/downloads?receipt=    The buyer's downloads, with signed links (receipt token).
+GET    /api/downloads/{token}     Download a purchased file (signed, expiring, counted link).
+POST   /api/downloads/upload      Store a product file privately → private:pf_<id>. [editor+]
 GET    /api/customers             List customers.                          [editor+]
+                                  ?search= ?limit= (default 50, max 200) ?offset=.
 POST   /api/customers             Create a customer.                       [editor+]
                                   Money is integer cents everywhere. API-key scopes:
                                   products/orders/customers (read|write|*).

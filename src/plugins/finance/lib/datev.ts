@@ -1,7 +1,7 @@
 /**
  * DATEV-Format export: "Buchungsstapel" (EXTF 700, category 21, version 13).
  *
- * This is the file a Steuerberater imports into DATEV Kanzlei-Rechnungswesen.
+ * This is the file a Steuerberater imports into DATEV Rechnungswesen.
  * The 125 column names below are the Formatversion 13 list as published in
  * the MIT-licensed @seamless-engineering/datev-extf package (see
  * THIRD-PARTY-NOTICES.md); DATEV reads columns by POSITION, so every row is

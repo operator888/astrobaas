@@ -12,6 +12,8 @@
   --accent: #0e6b63;      /* 6.36:1 on paper, and white on it */
   --on-accent: #ffffff;
   --danger: #b42318;      /* 6.57:1 on paper */
+  --stock-in: #1a6e35;    /* 6.31:1 on paper, 5.77 on panel */
+  --stock-low: #995100;   /* 5.95:1 on paper, 5.44 on panel */
   --focus: #b45309;
   --radius: 6px;
   --measure: 68ch;
@@ -28,6 +30,8 @@
     --accent: #5fd0c3;      /* 9.68:1 */
     --on-accent: #14171a;
     --danger: #ff8a80;      /* 7.88:1 */
+    --stock-in: #6ee7a0;    /* 11.65:1 on paper, 10.61 on panel */
+    --stock-low: #fbbf24;   /* 10.78:1 on paper, 9.82 on panel */
     --focus: #fbbf24;
   }
 }
@@ -110,7 +114,11 @@ h1 { font-size: clamp(1.7rem, 3vw, 2.3rem); margin: 0 0 1rem; }
 
 .price { font-variant-numeric: tabular-nums; font-weight: 600; }
 .price del { color: var(--muted); font-weight: 400; margin-inline-start: 0.4rem; }
-.stock-out { color: var(--danger); font-size: 0.9rem; }
+/* The words carry the meaning; the colour only reinforces it (WCAG 1.4.1). */
+.stock { font-size: 0.9rem; font-weight: 600; margin: 0; }
+.stock-in { color: var(--stock-in); }
+.stock-low { color: var(--stock-low); }
+.stock-out { color: var(--danger); }
 
 /* Product page */
 .product { display: grid; gap: 2rem; }
@@ -120,6 +128,156 @@ h1 { font-size: clamp(1.7rem, 3vw, 2.3rem); margin: 0 0 1rem; }
 .buy { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; margin-block: 1.25rem; }
 .prose { max-width: var(--measure); }
 .prose img { border-radius: var(--radius); }
+
+/*
+ * Variant selector (components/VariantSelector.astro).
+ *
+ * Every value reads an --ab-variant-* property first and this shop's token
+ * second, so a theme restyles the picker by setting those properties (on
+ * :root or on .ab-variant) without touching these rules. The class names are
+ * the stable hooks; [data-display] on each option group says how its values
+ * are drawn ("buttons" today).
+ *
+ * The radio itself is kept (focusable, announced, arrow keys move within the
+ * group) and drawn as the pill beside it. A disabled value keeps its words
+ * readable at full contrast and is struck through, so "sold out" never relies
+ * on colour alone (WCAG 1.4.1). Targets are at least 44px (WCAG 2.5.5).
+ */
+.ab-variant { flex-basis: 100%; }
+.ab-variant__axis {
+  border: 0; padding: 0; margin: 0 0 var(--ab-variant-gap, 1rem);
+  min-inline-size: 0;
+}
+.ab-variant__legend { font-weight: 700; padding: 0; margin-bottom: 0.4rem; }
+.ab-variant__current { font-weight: 400; }
+.ab-variant__choices { display: flex; flex-wrap: wrap; gap: var(--ab-variant-choice-gap, 0.5rem); }
+.ab-variant__choice { position: relative; display: block; margin: 0; font-weight: 400; }
+.ab-variant__input {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  margin: 0; padding: 0; opacity: 0; cursor: pointer;
+}
+.ab-variant__input:disabled { cursor: not-allowed; }
+.ab-variant__pill {
+  display: flex; flex-direction: column; justify-content: center; align-items: center;
+  min-width: var(--ab-variant-min-target, 44px); min-height: var(--ab-variant-min-target, 44px);
+  padding: 0.35rem 0.9rem; text-align: center; line-height: 1.25;
+  border: var(--ab-variant-border-width, 1px) solid var(--ab-variant-border, var(--muted));
+  border-radius: var(--ab-variant-radius, var(--radius));
+  background: var(--ab-variant-bg, var(--paper)); color: var(--ab-variant-ink, var(--ink));
+}
+.ab-variant__note { font-size: 0.75rem; color: var(--ab-variant-note-ink, var(--muted)); }
+.ab-variant__note:empty { display: none; }
+.ab-variant__input:hover:not(:disabled) + .ab-variant__pill { border-color: var(--ab-variant-hover-border, var(--ink)); }
+.ab-variant__input:checked + .ab-variant__pill {
+  border-color: var(--ab-variant-selected-bg, var(--accent));
+  background: var(--ab-variant-selected-bg, var(--accent)); color: var(--ab-variant-selected-ink, var(--on-accent));
+}
+.ab-variant__input:checked + .ab-variant__pill .ab-variant__note { color: inherit; }
+.ab-variant__input:focus-visible + .ab-variant__pill { outline: 3px solid var(--ab-variant-focus, var(--focus)); outline-offset: 2px; }
+.ab-variant__input:disabled + .ab-variant__pill {
+  border-style: dashed; background: var(--ab-variant-disabled-bg, var(--panel));
+}
+.ab-variant__input:disabled + .ab-variant__pill .ab-variant__value { text-decoration: line-through; }
+/* Windows High Contrast drops backgrounds: mark the chosen value with a
+   thicker border instead. */
+@media (forced-colors: active) {
+  .ab-variant__input:checked + .ab-variant__pill { border-width: 3px; border-color: Highlight; }
+  .ab-variant__input:disabled + .ab-variant__pill { border-color: GrayText; color: GrayText; }
+}
+.ab-variant__hint { color: var(--ab-variant-note-ink, var(--muted)); font-size: 0.9rem; margin: 0 0 0.5rem; }
+.ab-variant__hint:empty { display: none; }
+.ab-variant__sku { color: var(--ab-variant-note-ink, var(--muted)); font-size: 0.9rem; margin: 0; }
+
+/*
+ * Swatches: an option group with [data-display="swatches"].
+ *
+ * The same radio, drawn as a colour or image tile. The colour arrives as
+ * --ab-swatch-color, set by the script through the CSSOM (the CSP refuses
+ * inline styles). Not colour alone, anywhere:
+ * - the value's name is always in the radio's accessible name, and shown as a
+ *   tag above the tile on hover and keyboard focus;
+ * - the chosen tile gets a ring AND a check badge;
+ * - a pale colour gets a dark border, so it still has an edge on a white page;
+ * - a sold-out tile is cross-hatched and struck, and its reason is in words
+ *   under it.
+ */
+.ab-variant__choice--swatch {
+  display: flex; flex-direction: column; align-items: center; gap: 0.3rem;
+  max-width: 6.5rem; text-align: center;
+}
+.ab-variant__swatch {
+  position: relative; display: grid; place-items: center; overflow: hidden;
+  width: var(--ab-variant-swatch-size, 44px); height: var(--ab-variant-swatch-size, 44px);
+  border-radius: var(--ab-variant-swatch-radius, 50%);
+  border: var(--ab-variant-border-width, 1px) solid var(--ab-variant-swatch-border, var(--muted));
+  background-color: var(--ab-swatch-color, var(--ab-variant-bg, var(--paper)));
+}
+.ab-variant__swatch[data-swatch-tone="light"] { border-color: var(--ab-variant-swatch-border-light, var(--ink)); }
+.ab-variant__swatch-img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.ab-variant__swatch-text {
+  font-size: 0.7rem; line-height: 1.1; padding: 0 0.15rem; overflow-wrap: anywhere;
+  color: var(--ab-variant-ink, var(--ink));
+}
+.ab-variant__check {
+  position: absolute; display: none; width: 22px; height: 22px; padding: 3px; border-radius: 50%;
+  background: var(--ab-variant-selected-bg, var(--accent)); color: var(--ab-variant-selected-ink, var(--on-accent));
+  box-shadow: 0 0 0 2px var(--ab-variant-bg, var(--paper));
+}
+.ab-variant__input:hover:not(:disabled) ~ .ab-variant__swatch { border-color: var(--ab-variant-hover-border, var(--ink)); }
+.ab-variant__input:checked ~ .ab-variant__swatch {
+  box-shadow: 0 0 0 2px var(--ab-variant-bg, var(--paper)), 0 0 0 4px var(--ab-variant-swatch-ring, var(--ab-variant-selected-bg, var(--accent)));
+}
+.ab-variant__input:checked ~ .ab-variant__swatch .ab-variant__check { display: block; }
+.ab-variant__input:focus-visible ~ .ab-variant__swatch { outline: 3px solid var(--ab-variant-focus, var(--focus)); outline-offset: 5px; }
+.ab-variant__input:disabled ~ .ab-variant__swatch { border-style: dashed; border-color: var(--ab-variant-swatch-hatch, var(--ink)); }
+.ab-variant__input:disabled ~ .ab-variant__swatch::after {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to top right, transparent calc(50% - 1.5px), var(--ab-variant-swatch-hatch, var(--ink)) calc(50% - 1.5px) calc(50% + 1.5px), transparent calc(50% + 1.5px)),
+    repeating-linear-gradient(45deg, var(--ab-variant-disabled-bg, var(--panel)) 0 3px, transparent 3px 7px);
+}
+/* The name: read by a screen reader always, shown on hover and focus. */
+.ab-variant__choice--swatch .ab-variant__label {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+.ab-variant__choice--swatch:hover .ab-variant__label,
+.ab-variant__input:focus-visible ~ .ab-variant__label {
+  width: auto; height: auto; margin: 0; overflow: visible; clip: auto; clip-path: none;
+  bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); z-index: 2; pointer-events: none;
+  padding: 0.15rem 0.5rem; border-radius: var(--ab-variant-radius, var(--radius)); font-size: 0.85rem;
+  background: var(--ab-variant-ink, var(--ink)); color: var(--ab-variant-bg, var(--paper));
+}
+/*
+ * The name in sight where hover and focus cannot show it: under a sold-out
+ * swatch (a disabled radio takes no focus, so its name would otherwise be
+ * told only by its colour), and under every swatch on a touch screen.
+ */
+.ab-variant__swatch-name { display: none; font-size: 0.8rem; line-height: 1.2; }
+.ab-variant__input:disabled ~ .ab-variant__swatch-name { display: block; }
+@media (hover: none) {
+  .ab-variant__choice--swatch .ab-variant__swatch-name { display: block; }
+}
+@media (forced-colors: active) {
+  /* Keep the merchant's colour (it IS the information; forced-color-adjust
+     also keeps the ring's shadow) and mark the choice with a Highlight
+     outline. Focus is a dashed outline instead, declared later, so a focused
+     value always shows focus; its ring and check still say it is chosen. */
+  .ab-variant__swatch, .ab-variant__swatch[data-swatch-tone] { forced-color-adjust: none; border-color: CanvasText; }
+  .ab-variant__input:checked ~ .ab-variant__swatch { outline: 3px solid Highlight; outline-offset: 3px; }
+  .ab-variant__input:focus-visible ~ .ab-variant__swatch { outline: 3px dashed CanvasText; outline-offset: 6px; }
+  .ab-variant__check { forced-color-adjust: auto; }
+}
+/* Grouped product: one row per member, image | details | quantity. A grid,
+   not a table, so it stacks cleanly at phone width. */
+.group-items { list-style: none; margin: 1.25rem 0; padding: 0; }
+.group-item { display: grid; grid-template-columns: 4.5rem 1fr auto; gap: 0.75rem 1rem; align-items: center; padding-block: 0.85rem; border-bottom: 1px solid var(--line); }
+.group-img { aspect-ratio: 1; background: var(--panel); border-radius: var(--radius); overflow: hidden; }
+.group-img img { width: 100%; height: 100%; object-fit: cover; }
+.group-info { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+.group-info a { color: var(--ink); }
+.group-qty label { font-size: 0.85rem; }
+@media (max-width: 30rem) { .group-item { grid-template-columns: 3.5rem 1fr; } .group-qty { grid-column: 2; } }
 
 /* Forms */
 label { display: block; font-weight: 600; font-size: 0.95rem; margin-bottom: 0.25rem; }

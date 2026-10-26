@@ -24,11 +24,41 @@
  */
 import type {
   Post, PostStatus, CustomEntity, Role, User,
-  Product, Order, Customer, MediaFile,
+  Product, Order, Customer, MediaFile, StockStatusInfo,
 } from '../core/models';
 // Coupons live with the pricing rules that judge them, not in the core models.
 import type { Coupon } from '../lib/commerce/coupons';
+import type { OrderAttribution, AttributionReport } from '../lib/commerce/attribution';
 import type { ApiResponse } from '../lib/api-response';
+import type { SortValue } from '../lib/commerce/product-sort';
+
+/** Every `sort` value `GET /api/products` accepts. See `SORT_VALUES` in the CMS. */
+export type ProductSort = SortValue;
+
+/** One line of an order's timeline (`orders.timeline()`). Staff only. */
+export interface OrderTimelineItem {
+  id: string;
+  at: string;
+  /** Dotted code, e.g. `status.changed`, `payment.captured`, `refund.issued`, `note.comment`, `bulk.<action>`. */
+  event: string;
+  category: 'status' | 'payments' | 'shipments' | 'notes' | 'other';
+  /** A user id, `provider`, `system[:job]`, `customer`, or null when not recorded. */
+  actor: string | null;
+  actor_kind: 'staff' | 'system' | 'provider' | 'customer' | 'unknown';
+  actor_name: string | null;
+  from?: string;
+  to?: string;
+  /** Minor units of `currency`; positive. The event says which way the money went. */
+  amount_cents?: number;
+  currency?: string;
+  /** Free text: render as text. */
+  text?: string;
+  added?: string[];
+  removed?: string[];
+  ref?: string;
+  count?: number;
+  derived: boolean;
+}
 
 export interface ClientOptions {
   /** Bearer API key (abk_…). Sent as `Authorization: Bearer <key>` on every request. */
@@ -123,6 +153,18 @@ export interface ListProductsOptions {
   brand?: string;
   featured?: boolean;
   on_sale?: boolean;
+  /**
+   * Result order. The default, `relevance`, is the ranked order for a `search`
+   * and the shop's own merchandising order otherwise. `price_asc`/`price_desc`
+   * order by what a buyer is charged (a variable product by its cheapest
+   * variant), `newest` by creation date, `name_asc`/`name_desc` by name in
+   * `locale`. Sorting happens on the server over the whole matching set, so it
+   * composes with `limit`/`offset`; an unknown value is a 422, not ignored.
+   * The order applied is echoed in the page's `meta.sort`.
+   */
+  sort?: ProductSort;
+  /** Language for translated names and for `name_asc`/`name_desc` collation. */
+  locale?: string;
   limit?: number;
   offset?: number;
   /**
@@ -137,6 +179,8 @@ export interface ListProductsOptions {
 /** Filters `GET /api/orders` accepts. Staff only — orders are never public. */
 export interface ListOrdersOptions {
   status?: Order['status'];
+  /** Only orders carrying this staff tag (any casing). */
+  tag?: string;
   limit?: number;
   offset?: number;
 }
@@ -196,6 +240,27 @@ export interface CheckoutInput {
    * INTEGRATION.md → "Checkout from a storefront".
    */
   pow_token?: string;
+  /**
+   * The buyer's answer to "I agree to the Terms & Conditions". A real boolean.
+   *
+   * REQUIRED to be `true` only when the shop has switched
+   * `checkout_terms_required` on — read it, with `checkout_terms_label` and
+   * `checkout_terms_url`, from `GET /api/settings/get` (`cms.request('GET', '/api/settings/get')`). Refused
+   * otherwise with code `checkout.terms_not_accepted`. Optional and stored as
+   * sent while the requirement is off. The server stamps the time.
+   */
+  terms_accepted?: boolean;
+  /** Optional privacy-policy consent, stored as sent. Never required. */
+  privacy_accepted?: boolean;
+  /**
+   * Which campaign brought the shopper: first and last touch, each with the
+   * time of the visit. Send it ONLY when the shopper granted marketing consent
+   * on your storefront — the CMS cannot see your banner and trusts you on this.
+   * Known keys only (utm_source, utm_medium, utm_campaign, utm_term,
+   * utm_content, gclid, fbclid, msclkid, at); anything else is a 422.
+   * See INTEGRATION.md → "Campaign attribution".
+   */
+  attribution?: { first?: OrderAttribution['first']; last?: OrderAttribution['last'] };
 }
 
 export interface PageMeta {
@@ -558,9 +623,11 @@ export class AstroBaasClient {
    * send a parameter the route ignores, which reads as a filter that does not
    * work.
    *
-   * Booleans are sent only when TRUE. `featured=false` is not a filter the
-   * route understands — it would be read as the string "false" and match
-   * nothing, so the honest wire form is to omit it.
+   * Booleans are sent only when TRUE, as `1`. The routes read every boolean
+   * flag through `queryFlag` (src/lib/http/query-flags.ts), which accepts `1`
+   * and `true` and nothing else. A false flag is omitted rather than sent as
+   * `false`: "not filtered" is what the caller means, and leaving it out says
+   * that to every server version, including ones older than `queryFlag`.
    */
   private commerceQuery(opts: object): string {
     const q = new URLSearchParams();
@@ -618,9 +685,24 @@ export class AstroBaasClient {
     /** Walk every page until exhausted. */
     listAll: (opts: Omit<ListProductsOptions, 'offset'> = {}): Promise<Product[]> =>
       this.collectPages((offset, size) => this.products.page({ ...opts, limit: size, offset })),
-    /** One product by id or slug. */
-    get: (ref: string): Promise<Product> =>
-      this.request<Product>('GET', `/api/products/${encodeURIComponent(ref)}`),
+    /**
+     * One product by id or slug. Active products only, unless `all: true` is
+     * passed by catalogue staff — the same rule as `list({ all: true })`.
+     */
+    get: (ref: string, opts: { all?: boolean } = {}): Promise<Product> =>
+      this.request<Product>('GET', `/api/products/${encodeURIComponent(ref)}${opts.all ? '?all=true' : ''}`),
+    /**
+     * One product's availability: `in-stock`, `low-stock` or `out-of-stock`,
+     * plus whether it can still be ordered. Products already carry the same
+     * answer as `stock_status`; this is for refreshing it on its own.
+     * A product with variants also lists each enabled variant; a grouped
+     * product lists each member a shopper can see.
+     */
+    stockStatus: (ref: string): Promise<StockStatusInfo & {
+      product_id: string;
+      variants?: (StockStatusInfo & { id: string; options: Record<string, string> })[];
+      members?: (StockStatusInfo & { id: string })[];
+    }> => this.request('GET', `/api/products/${encodeURIComponent(ref)}/stock-status`),
     /** Create one (staff). */
     create: (input: Partial<Product>): Promise<Product> =>
       this.request<Product>('POST', '/api/products', input),
@@ -693,6 +775,49 @@ export class AstroBaasClient {
     ship: (id: string, input: { tracking_number?: string; tracking_carrier?: string; tracking_url?: string }):
       Promise<{ id: string; notified: boolean }> =>
       this.request('POST', `/api/orders/${encodeURIComponent(id)}/ship`, input),
+    /** The staff tags in use, with how many orders carry each (staff). */
+    tags: (): Promise<Array<{ tag: string; count: number; color: string }>> =>
+      this.request('GET', '/api/orders/tags'),
+    /** Add staff tags to an order — at most 10 per order (staff). */
+    addTags: (id: string, tags: string | string[]): Promise<{ id: string; tags: Array<{ tag: string; color: string }>; max: number }> =>
+      this.request('POST', `/api/orders/${encodeURIComponent(id)}/tags`, Array.isArray(tags) ? { tags } : { tag: tags }),
+    /** Remove one staff tag from an order (staff). */
+    removeTag: (id: string, tag: string): Promise<{ id: string; tags: Array<{ tag: string; color: string }>; max: number }> =>
+      this.request('DELETE', `/api/orders/${encodeURIComponent(id)}/tags?tag=${encodeURIComponent(tag)}`),
+    /** Rename a staff tag on every order that has it (staff). */
+    renameTag: (from: string, to: string): Promise<{ tag: string; changed: number; failed: number }> =>
+      this.request('PATCH', '/api/orders/tags', { from, to }),
+    /** Remove a staff tag from every order that has it (staff). */
+    deleteTag: (tag: string): Promise<{ changed: number; failed: number }> =>
+      this.request('DELETE', `/api/orders/tags?tag=${encodeURIComponent(tag)}`),
+    /**
+     * Everything that happened to one order, newest first (staff). `filter` is
+     * `status`, `payments`, `shipments`, `notes` or `other`. Part is derived
+     * from the order's own fields (`derived: true`), part is stored.
+     */
+    timeline: (id: string, query: { filter?: string; limit?: number; offset?: number } = {}): Promise<OrderTimelineItem[]> => {
+      const q = new URLSearchParams();
+      if (query.filter) q.set('filter', query.filter);
+      if (query.limit !== undefined) q.set('limit', String(query.limit));
+      if (query.offset !== undefined) q.set('offset', String(query.offset));
+      const qs = q.toString();
+      return this.request('GET', `/api/orders/${encodeURIComponent(id)}/timeline${qs ? `?${qs}` : ''}`);
+    },
+    /** Add a staff comment to an order's timeline (staff). At most 1000 characters. */
+    addTimelineComment: (id: string, text: string): Promise<OrderTimelineItem> =>
+      this.request('POST', `/api/orders/${encodeURIComponent(id)}/timeline`, { text }),
+    /**
+     * Paid orders and revenue by campaign source, medium and campaign over a
+     * date range (staff). `from`/`to` are inclusive `YYYY-MM-DD` UTC days.
+     */
+    attribution: (opts: { from?: string; to?: string; model?: 'first' | 'last' } = {}): Promise<AttributionReport> => {
+      const q = new URLSearchParams();
+      if (opts.from) q.set('from', opts.from);
+      if (opts.to) q.set('to', opts.to);
+      if (opts.model) q.set('model', opts.model);
+      const qs = q.toString();
+      return this.request('GET', `/api/orders/attribution${qs ? `?${qs}` : ''}`);
+    },
     /** Refund some or all of an order (staff). */
     refund: (id: string, input: { amount_cents?: number; reason?: string }): Promise<unknown> =>
       this.request('POST', `/api/orders/${encodeURIComponent(id)}/refund`, input),
@@ -945,3 +1070,20 @@ export async function verifyWebhookSignature(
   for (let i = 0; i < expected.length; i++) diff |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
   return diff === 0;
 }
+
+/*
+ * Choosing a variant, option by option — the availability rule every
+ * storefront's picker needs: which values can be chosen given the choices
+ * before them, and which variant a full choice names. Pure and
+ * dependency-free, so it runs in a browser bundle; the storefront starter's
+ * VariantSelector is the worked example.
+ */
+export {
+  toSelectable, selectableVariants, variantAxes, axisStates, optionStates, reconcileSelection,
+  matchVariant, selectionFor, initialSelection, missingAxes, selectionLabel, blockedText, droppedChoices,
+  swatchAxes, swatchOf, swatchColor, swatchImage, isLightColor,
+} from '../lib/commerce/variant-selection';
+export type {
+  SelectableVariant, VariantAxis, OptionBlock, OptionState, VariantSelection, VariantLike,
+  Swatch, SwatchAttributeLike,
+} from '../lib/commerce/variant-selection';

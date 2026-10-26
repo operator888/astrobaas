@@ -234,6 +234,13 @@ export function planBulkEdit(
       changes.push(`tags → ${nextTags.join(', ') || '(none)'}`);
     }
 
+    // A grouped product has no price, sale or stock of its own — saveProduct
+    // forces them to nothing — so these would preview as changes that never land.
+    if (p.type === 'grouped' && (ops.price || ops.sale || ops.stock !== undefined)) {
+      out.skipped = 'it is a grouped product, with no price or stock of its own. Change the products in it instead.';
+      return out;
+    }
+
     const variants = p.variants ?? [];
     const pricedVariants = variants.filter((v) => variantRegular(v) !== null);
 
