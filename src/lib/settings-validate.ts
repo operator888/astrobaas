@@ -17,12 +17,16 @@
  */
 
 import { validateSuggestSetting } from './search/suggest-settings';
+import { validateInvoiceSetting } from './commerce/invoice-records-rules';
 import { normaliseOrigin } from './site-url';
 import { validateRobotsBody } from './robots-txt';
 import { validateSynonyms } from './search/expander';
 import { validate } from './validate';
 import { settingRuleFor, type SettingGroup } from '../core/setting-groups';
 import { SHOP_CURRENCY_KEY } from './commerce-settings';
+import {
+  CHECKOUT_TERMS_KEYS, MAX_TERMS_LABEL_LENGTH, isTermsUrl,
+} from './commerce/checkout-terms';
 import { NAVIGATION_SETTING, validateNavigation, normaliseNavigation } from './navigation';
 
 export interface SettingProblem {
@@ -89,6 +93,15 @@ const BOOLEAN_KEYS: ReadonlySet<string> = new Set([
   'orders_recovery_enabled',
   // The opt-in risk hold (hardening step 4): a stored "false" must read as off.
   'orders_risk_hold_enabled',
+  // Checkout consent. OFF unless the merchant turns it on, and a stored
+  // "false" must read as off — the box on the storefront is what it gates.
+  'checkout_terms_required',
+  // Publishing a verified buyer's review unmoderated (C-35). A stored "false"
+  // read with `!!` would publish every verified review unseen.
+  'reviews_auto_approve_verified',
+  // Campaign attribution. ON unless switched off, so a stored "false" must
+  // really read as off — it is a privacy switch.
+  'attribution_enabled',
   'popup_enabled',
   // Every reader of this one uses `!!value`, so the STRING "false" would be
   // truthy: an operator turning the toggle off through the API would take
@@ -152,6 +165,12 @@ export function validateSetting(
     const r = validateSuggestSetting(key, value);
     if (r !== undefined) return r;
   }
+  // Settings → Invoices: when records are made, the internal reference's
+  // format, and which issuer. A typo here would otherwise read as the default.
+  {
+    const r = validateInvoiceSetting(key, value);
+    if (r !== undefined) return r;
+  }
 
   if (key === 'captcha_surfaces') {
     if (value === null || value === undefined || value === '') return null;
@@ -170,6 +189,21 @@ export function validateSetting(
     return /^[A-Za-z]{3}$/.test(value.trim())
       ? null
       : 'must be a three-letter ISO 4217 code, for example EUR, GBP or JPY';
+  }
+  // The checkbox text a storefront shows next to the box. Plain text: it is
+  // rendered into a page, so a stored value that could carry markup is refused
+  // here rather than relied on every storefront to escape.
+  if (key === CHECKOUT_TERMS_KEYS.label) {
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value !== 'string') return 'must be text';
+    if (value.length > MAX_TERMS_LABEL_LENGTH) return `must be at most ${MAX_TERMS_LABEL_LENGTH} characters`;
+    if (/[<>]/.test(value)) return 'must be plain text, without HTML';
+    return null;
+  }
+  if (key === CHECKOUT_TERMS_KEYS.url) {
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value === 'string' && isTermsUrl(value)) return null;
+    return 'must be a page on this site (starting with /) or an https:// address';
   }
   if (BOOLEAN_KEYS.has(key)) {
     if (value === null || value === undefined || value === '') return null;

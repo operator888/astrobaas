@@ -98,6 +98,14 @@ const isCurrent = (href: string) => {
     <script>
       import { readCart, cartCount, browserStorage } from '../lib/cart';
       import { mountSearchBox } from '../scripts/search-box';
+      import { captureAttribution } from '../lib/attribution';
+      // Campaign attribution: kept only with the shopper's MARKETING consent,
+      // deleted without it. See lib/attribution.ts for how to wire your banner.
+      // After `load`, so a consent script loaded with `defer` has defined its
+      // API first. Call it again from your banner's "saved" callback so a
+      // shopper who consents on the landing page is captured on that page.
+      const capture = () => { try { captureAttribution(browserStorage(), location.search); } catch { /* never break a page over it */ } };
+      if (document.readyState === 'complete') capture(); else window.addEventListener('load', capture, { once: true });
       const search = document.querySelector<HTMLElement>('[data-search]');
       if (search) mountSearchBox(search, search.dataset.currency || 'EUR');
       // The header badge. Kept in step across tabs by the `storage` event.

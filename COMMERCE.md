@@ -50,7 +50,23 @@ The order of those two scripts matters, and so does `--apply`:
 See `/llms.txt` and `/openapi.json` on a running instance. Highlights:
 
 - `GET /api/products` (public; `?category= ?brand= ?search= ?on_sale=` + pagination).
+  `?sort=` orders the whole result before it is paged: `relevance` (default),
+  `price_asc`, `price_desc`, `newest`, `name_asc`, `name_desc`. Price is what a
+  buyer is charged — the sale price while a sale is live, a variable product's
+  cheapest enabled variant. That figure is on every product response as
+  `price_from_cents` (with `price_to_cents`, the dearest), so a client can show
+  "from €X" and verify the order from the response itself. Ties keep relevance order,
+  so paging is stable. An unknown value is a 422, and the order applied comes
+  back in `meta.sort`. Typo tolerance and facets are the paid search module's;
+  sorting works the same with or without it.
   `?category=clothing` includes every subcategory beneath Clothing.
+- `GET /api/products/{ref}` (public; id or slug) — active products only.
+  Catalogue staff (admin, editor, manager, or an API key with such a role whose
+  scopes, if it has any, include `products`) get draft and archived products
+  too when they add `?all=true`, here and on `GET /api/products?all=true`.
+  Everyone else, and staff without `?all=true`, gets 404 for those, so a
+  staff client must pass it (`products.get(ref, { all: true })`). Staff
+  responses are `private, no-store`.
 - `GET /api/product-categories` (public) — each category with `parent_slug`,
   `product_count` (tagged directly) and `product_count_total` (with every
   subcategory). `POST` creates, `PUT /api/product-categories/{id}` renames,
@@ -80,7 +96,10 @@ See `/llms.txt` and `/openapi.json` on a running instance. Highlights:
   and `hidden` do not).
 - `POST /api/orders` — checkout; anonymous same-origin (CSRF) or bearer key;
   prices/totals computed server-side, stock decremented, customer auto-created
-- Staff-only (PII): `GET /api/orders`, `GET /api/customers`
+  Optional `terms_accepted` / `privacy_accepted` booleans are recorded on the
+  order; see "Terms & Conditions at checkout".
+- Staff-only (PII): `GET /api/orders` (`?tag=` filters by staff tag; see *Order tags*), `GET /api/customers`
+  (`?search=`; paged like orders: `?limit=` default 50, max 200, `?offset=`)
 - API-key scopes: `posts|content|media|products|orders|customers|messages : read|write|*`
   (`SCOPED_RESOURCES` in `src/lib/api-key-scopes.ts`; a key with no scopes is
   governed by its role alone)
@@ -136,6 +155,38 @@ decrementing as separate awaits is a TOCTOU race: it oversells, and it did.)
 The smoke suite asserts all of this against **all three storage drivers**,
 including firing six concurrent orders at a stock-of-one product and requiring
 exactly one to win.
+
+## Stock status (the "In stock / Low stock / Out of stock" badge)
+
+Every product the public API returns carries a read-only `stock_status`, and
+`GET /api/products/{ref}/stock-status` returns the same object for one product:
+
+```json
+{ "status": "low-stock", "tracked": true, "available_qty": 3,
+  "threshold_qty": 5, "backorderable": false, "purchasable": true }
+```
+
+- `status` is `out-of-stock` at a count of 0 or less (whatever the threshold),
+  `low-stock` when `0 < count <= threshold_qty`, and `in-stock` above it. A
+  product with no count (`stock: null`) is always `in-stock`.
+- `threshold_qty` is the product's own **Low-stock threshold** when it has one,
+  otherwise the shop-wide default — **Settings → Shop → Inventory**, setting
+  key `inventory_low_stock_threshold_qty`, default **5**. A threshold of `0`
+  means "never show low stock".
+- `purchasable` is the checkout's own answer for one unit, so a product that is
+  out of stock but takes backorders reports `out-of-stock` with
+  `backorderable: true, purchasable: true` — show "Out of stock – backorder
+  available" rather than hiding the buy button.
+- A product **with variants** is judged on its enabled variants: their counts are
+  summed (and the product is untracked if any variant is), it is purchasable when
+  any variant is, and each `variants[]` entry carries its own `stock_status`. The
+  stored `in_stock` flag is **not** reliable for such products, because it follows
+  the product's own count, which a variable product does not sell from.
+- `available_qty` is the number the product already publishes as `stock`; the
+  status adds no disclosure.
+- Derived on every read, never stored. Pull-based: anonymous responses share the
+  public read cache (30 s by default), and nothing is reserved, so the answer can
+  be stale by the time a shopper clicks. Checkout re-checks atomically either way.
 
 ## Order limits
 
@@ -231,6 +282,15 @@ Core does not call VIES, does not keep the evidence an audit asks for years
 later, and does not pretend to: zero-rating on shape alone is a policy an
 operator turns on deliberately.
 
+The VAT id checkout and `POST /api/orders/quote` read is `billing_address.tax_id`,
+falling back to the delivery address's. Greece's VAT prefix `EL` is read as its
+ISO code `GR` everywhere a country is compared (the number, the EU list, the
+origin, the destination, the rate rows). A plugin can verify the number through
+`PLUGIN_HOOKS.TAX_ID_VERDICT` (for example against VIES): `verified` allows
+reverse charge, `invalid` and `unverified` charge VAT, and an `unverified` number
+never turns a sale into a refusal — see "Tax-id verdicts" in
+`PLUGIN_DEVELOPMENT.md`.
+
 **The real gap is the rate tables, not the engine.** Core ships **zero** foreign
 rates. A member state's numbers change continuously and getting one wrong is the
 merchant's liability, so maintained tables are a rate pack's job and what core
@@ -240,6 +300,17 @@ owns is the resolution. A destination with no rate for a class on file is
 add. It never falls back: 0% under-charges the buyer's own tax authority and the
 origin rate charges a German buyer Greek VAT, and both look entirely plausible
 on the invoice.
+
+A rate pack plugs in through `PLUGIN_HOOKS.TAX_RATES` (see "Tax rates from a
+plugin" in `PLUGIN_DEVELOPMENT.md`). The operator's own rows always win over a
+pack's, and the quote, the order and a manual tax override all price with the
+same merged table. Foreign rows never reach a domestic sale: the domestic rate,
+its fallback to the default class and the override's class check read only the
+shop's own country's rows. When `shop_country` is set and those rows have
+neither a product's class nor the default class, the sale is refused with the
+same 409, naming the shop's own country. A manual override to a tax class is
+refused on lines taxed as destination, reverse charge or export; `exempt`
+still applies to any line.
 
 ### How a total is actually computed
 
@@ -570,6 +641,208 @@ bad coupon, …) releases the key, so fixing the cause and retrying works. The
 same key with a different body is **422** `IDEMPOTENCY_KEY_REUSED`. See
 INTEGRATION.md.
 
+## Order tags
+
+Staff can label orders ("VIP", "damaged", "needs review") to group them without
+touching any order field.
+
+- **Where it lives.** `Order.tags`, a list of strings on the order itself; an
+  order with none has no `tags` key at all. Written only through
+  `src/lib/commerce/order-tags.ts` — the order timeline and bulk actions are
+  meant to call that module, not re-spell its rules.
+- **What a tag is.** Trimmed, whitespace collapsed, hidden and bidi-override
+  characters removed, at most 40 characters, `<` and `>` refused. "VIP",
+  "vip" and " Vip " are one tag (the first spelling stays). An order holds at
+  most 10; the limit is enforced by the server, not the screen.
+- **Colour** is derived from the tag (a fixed palette), so there is no colour
+  field to validate and a tag looks the same everywhere.
+- **Staff only.** No receipt, email, public lookup or checkout response carries
+  a tag. A data-subject **erasure clears them** (a tag is free text and may be a
+  name); the shop's own `staff_note` is kept.
+- **Concurrency.** Adding and removing are decided against the list as it is
+  when written, on all three drivers, so two people tagging one order both
+  land. There is deliberately no "replace the whole list" call.
+- **API** (staff; `orders` API-key scope): `GET /api/orders?tag=`,
+  `GET /api/orders/tags`, `GET|POST /api/orders/{id}/tags`,
+  `DELETE /api/orders/{id}/tags?tag=`, `PATCH|DELETE /api/orders/tags`.
+- **Global rename / remove** rewrite every order that carries the tag, one
+  atomic write per order. They are **not one transaction**: if interrupted,
+  some orders are renamed and some are not, and running it again finishes.
+- **Cost.** The tag list and counts read every order, like the admin Orders
+  page already does; on a very large shop expect them to be as slow as that
+  page. There is no index on tags.
+## Order timeline
+
+One chronological answer to "what happened to this order?" — placed, status
+changes, payments and refunds with amounts, shipping with tracking, staff notes
+and comments, tag edits, tax overrides. On **Admin → Orders**, open **Timeline**
+on an order.
+
+- **Derived where it can be.** What an order's own fields already say (placed,
+  shipped, each refund, tax overrides, abandoned, a declined payment, consent) is
+  computed from those fields every time the timeline is read, so it cannot
+  disagree with them and an order placed before this existed still has it.
+- **Stored only where nothing else records it.** `Order.timeline` holds status
+  changes (who, from, to), a provider's payment verdict with when, staff note
+  edits and comments, tag edits, shipments with the staff member, and any
+  `bulk.<action>` a later feature records. At most 100 per order, newest kept.
+  Written only through `src/lib/commerce/order-timeline.ts`
+  (`appendOrderTimeline` / the never-throwing `recordOrderEvent`); bulk order
+  actions are meant to call that, with an event code `bulk.<action>`.
+- **No back-fill.** Status and payment history starts at the release that added
+  this. An older order shows what its own fields say (placed, shipped, refunds)
+  but not the status moves it made before. The audit log has some of those, but
+  it is capped on the document drivers and not indexed by order, so it is not
+  folded in.
+- **Staff only.** The order endpoints (`GET /api/orders`, `GET|PUT
+  /api/orders/{id}`) strip `timeline`; the only reader is
+  `GET /api/orders/{id}/timeline`. No email, receipt, public lookup, checkout
+  response or webhook payload carries it. A data-subject **erasure clears the
+  free text** (note and comment text, tag names) and keeps the fact that
+  something happened, by whom and when. The data-subject **export**
+  (`/api/privacy/subject`) is the person's own record and includes their
+  orders whole, stored timeline included — as it already includes tags and
+  `staff_note`. That is a decision for the shop owner: say if staff notes and
+  comments should be left out of a subject export.
+- **Actors.** A status move made by a payment webhook or a sweep has no user
+  behind it and shows as `system` (or `system:<job>`); a provider verdict shows
+  as the payment provider.
+- **A full list evicts context first.** At 100 stored entries the oldest
+  comments, note edits, tag edits and bulk lines go before any status move or
+  payment verdict.
+- **Erasure and the change feed.** An erasure scrubs the timeline before it
+  touches the order and then deletes every change-feed row about that order.
+- **Concurrency.** An append is a compare-and-set on all three drivers
+  (`compareAndSetOrderTimeline`); two requests appending at once both land
+  (an append gives up only after ten lost rounds in a row — a comment then
+  answers 409, and an automatic event retries a few more times with a short
+  pause and, if it still cannot, logs `LOST <event> on order <id>`). An
+  append is bookkeeping, not an edit of the order as the API presents it: it
+  writes no change-feed row and does not bump `updated_at`.
+  A status change is recorded by the request that won the move, just after it:
+  if the process dies in that gap the status has changed and the entry is missing.
+- **API** (staff; `orders` API-key scope): `GET /api/orders/{id}/timeline`
+  (`?filter=status|payments|shipments|notes|other`, `?limit=`, `?offset=`,
+  `?format=csv`), `POST /api/orders/{id}/timeline` `{ text }`.
+- **Cost.** The timeline is built from the one order; nothing scans other
+  orders or the audit log. The admin screen loads it when a row is opened, 20 at
+  a time.
+## Downloadable products
+
+A product with **Downloadable** ticked and at least one entry in **Downloads**
+sells files. Code: `src/lib/commerce/download-entitlements.ts`.
+
+- **Where a file lives.** A download's `url` is `private:pf_<id>` (uploaded with
+  *Upload a private file…* / `POST /api/downloads/upload`, kept in the private
+  uploads directory, streamed by the CMS — its location is never sent),
+  `https://…` (hosted elsewhere: the buyer is **redirected** there after the
+  checks pass, so they do see that URL), or `/…` (this site's public media:
+  anyone with the path can fetch it — use a private file instead). The public
+  catalogue lists only the names; staff see the URLs.
+- **Entitlements.** One per order line of a downloadable product, on the order
+  (`Order.entitlements`). Granted when the order reaches `processing` or
+  `completed` (an online payment moves it there; for bank transfer, staff do),
+  revoked when it is cancelled or refunded in full, lifted again if staff
+  reopen it. A staff revocation sticks. `on-hold` grants nothing.
+- **Checked live.** A link works only while the order is in a granting status,
+  so a status written by some other path still fails closed.
+- **Limit and expiry.** Shop defaults in **Settings → Shop → Downloads**
+  (`downloads_limit_default`, 0 = unlimited, the default;
+  `downloads_expiry_days_default`, 90; `downloads_link_ttl_hours`, 24); each
+  product can override the first two (`download_limit`,
+  `download_expiry_days`; blank = default, 0 = unlimited / never). The limit
+  is PER FILE: a limit of 3 lets the buyer fetch each file 3 times. Changing a default or an
+  override affects new entitlements only. An order paid BEFORE this feature,
+  or imported, is granted the first time its buyer (or staff) looks, and its
+  expiry counts from then.
+- **Counting.** A download is counted when it is granted, before any byte is
+  sent, with a compare-and-set on the order — two at once never both take the
+  last one. An interrupted transfer uses a download; staff can **Reset count**.
+  A private file that has gone from disk is refused before it is counted.
+  There is no HTTP Range support, so a download manager that resumes makes a
+  new, counted request.
+- **Links.** `/api/downloads/{token}`: HMAC-signed (`AUTH_SECRET`), naming the
+  order, entitlement and file, never stored. The receipt page mints fresh ones
+  on every view. HEAD checks a link without counting.
+- **Emails.** When downloads are granted the buyer is emailed the file names and
+  a link to their receipt's downloads section — never a counted link, because
+  mail scanners fetch every link in a message. The same customer-email switch
+  as the confirmation (`order_confirmation_enabled`) and a 5-per-hour
+  per-address budget apply.
+- **Files are resolved by name.** A download uses the product's current file of
+  the same name (so fixing a broken URL reaches existing buyers) and falls back
+  to the copy taken at purchase (so a deleted product's buyers keep theirs).
+  Renaming a file therefore points existing buyers at the old copy.
+- **Not covered:** partial refunds do not revoke (revoke by hand); deleting a
+  private file's bytes from disk breaks existing entitlements (`404
+  downloads.file_missing`); no licence keys, DRM or streaming.
+- **GDPR.** Exported with the order. Erasure removes the IPs from the log and
+  revokes; counts and times stay.
+
+## Terms & Conditions at checkout
+
+Core stores the buyer's answer; the storefront draws the box. (Core has no
+checkout page: checkout is headless, so there is no theme-owned markup to
+configure. The label and the link are shop settings, read by the storefront.)
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `checkout_terms_required` | **off** | When on, `POST /api/orders` from a shopper or an API key without `terms_accepted: true` is **`400`** with `reason: checkout.terms_not_accepted`, before anything is priced or reserved. |
+| `checkout_terms_label` | empty (storefronts show "I agree to the Terms & Conditions") | The checkbox text. Plain text, at most 200 characters, no `<` or `>`; a storefront must render it as text. |
+| `checkout_terms_url` | empty | Where the full terms live: a path starting with `/`, or an `https://` address. Nothing else is accepted. |
+
+All three are under "Terms & Conditions at checkout" in the shop settings form, and the storefront reads them from the
+public `GET /api/settings/get`.
+
+**Why it is off by default.** The requirement could not be on by default
+without refusing every checkout of every storefront that has never heard of the
+field. Switch it on once your storefront shows the box and sends the answer. The
+starter in `examples/storefront` already does, so on a shop that publishes a
+terms link or requires the box, it appears with no code change.
+
+**What is recorded on the order** (frozen, never retro-fitted):
+
+| Field | Meaning |
+| --- | --- |
+| `terms_accepted` | What the buyer sent, as a real boolean. `true` accepted. `false` is an explicit "no", which can only be stored while the requirement is off. **Absent means unknown** (an order from before this, a Woo import, a staff-placed order, a storefront with no box) and is never read as accepted. |
+| `terms_accepted_at` | The server's clock when it recorded an acceptance. Only with `terms_accepted: true`. Never read from the request. |
+| `privacy_accepted`, `privacy_accepted_at` | The same for an optional privacy-policy box. Never required. |
+
+A value that is not a boolean (`"true"`, `1`) is a `422` on that field, whether
+or not the requirement is on. Staff placing an order are never refused for it.
+The `201` response carries `terms_accepted` and `terms_accepted_at` when they
+were recorded. GDPR erasure keeps them: they identify nobody, and they are the
+evidence the shop holds the order for.
+
+**What it does not do.** It records *that* terms were accepted and *when*, not
+which version of the text. Keep the terms page's own history if you need that.
+
+## Campaign attribution
+
+`order.attribution` records which campaign brought the customer: the first
+and the last campaign visit (`utm_*` tags and Google/Meta/Microsoft ad click
+ids), each with its time. Code: `src/lib/commerce/attribution.ts`.
+
+- **Marketing consent or nothing.** The CMS's `/consent.js` keeps the tags in
+  the first-party cookie `astrobaas_attribution` only after the visitor granted
+  `marketing`, and deletes it otherwise. The checkout route re-checks the
+  consent cookie before reading it. A headless storefront sends `attribution`
+  in the order body and is responsible for its own banner (INTEGRATION.md).
+- **Absent means nothing was kept** — no consent, no campaign, an older order,
+  a staff-placed order, or the switch (`attribution_enabled`) is off. Never `{}`.
+- **Report:** Insights → *Where paid orders came from*, and
+  `GET /api/orders/attribution` (JSON or `format=csv`). Paid orders only,
+  revenue in the base currency, first- or last-touch.
+- **GDPR:** exported with the order; an erasure removes it (the order's figures
+  stay). It is part of the order, so it also reaches `order.created` webhooks.
+
+**What it does not do.** No referrer or landing URL is stored, no custom
+parameters, no split credit across several visits (multi-touch), no
+cross-device matching, and nothing is sent back to the ad platforms. It does
+not fire a purchase conversion into Google Ads or the Meta Pixel either: the
+tags load after consent and count page views, but the conversion event on the
+receipt page is a follow-up.
+
 ## The order confirmation email
 
 The buyer gets one, and it is **on by default** (`order_confirmation_enabled`;
@@ -614,6 +887,51 @@ transmits to AADE. Record its document number against the order in
 
 If you later want automated transmission, do it through an accredited
 e-invoicing provider (πάροχος) rather than hand-rolling the AADE API.
+
+### Invoice and credit-memo records
+
+What core does keep is the **record** every issuer needs: per order a frozen
+invoice record (lines, VAT per rate including shipping, seller, buyer with
+`tax_id`, currency; `draft` → `final`, immutable once final), and per refund in
+the ledger a credit memo against it. A partial refund is credited across the
+record's lines in proportion, to the cent; the last refund credits exactly what
+is left, so a record and its memos net to what the customer kept.
+
+- Created by itself on payment (default; completion counts, for bank transfer
+  and cash on delivery), on shipping, or only by hand — **Settings → Invoices**
+  (`invoice_record_on`).
+- Issued by an **issuer plugin** (`INVOICE_ISSUERS`, see PLUGIN_DEVELOPMENT.md),
+  called once per record. Without one the PDF says it is not a tax document and
+  shows no invoice number; the optional internal reference
+  (`invoice_internal_reference_format`) is labelled as not an invoice number.
+- An order with `external_receipt_no` gets its record marked `issued_externally`
+  and is never sent to an issuer; staff can mark any record that way.
+- A correction is "credit in full" plus a new record, never an edit.
+- A refund made in the provider's dashboard never reaches the refund ledger;
+  when the provider's webhook marks the payment refunded, a memo is made for
+  whatever the ledger does not cover (`refund_id: "provider-refund"`).
+- A credit memo is issued where its sale was: against a record issued
+  elsewhere it is issued elsewhere too, and against a record this issuer never
+  issued it is not sent (the memo says why).
+- Issuer calls from the payment, refund, shipping and status paths run after
+  those paths return, so a slow issuer never holds up a webhook or a checkout.
+- An issuer may **decline** a record ("not mine"). That is not a failure: with
+  a chosen issuer (`invoice_issuer`) the next active one is asked, and a record
+  every issuer declines is treated as with no issuer (internal reference).
+- A failure the issuer marks **retryable**, a timeout, or a claim left by a
+  crash is retried by the scheduler's sweep, by the same issuer and under the
+  same key (`astrobaas:<record id>`), backing off from 2 minutes to 6 hours, 10
+  calls at most. A success that lands after the timeout is accepted only while
+  the record is still unissued and still that issuer's.
+- Each record line carries its **tax treatment**, frozen at finalise:
+  `standard`, `reverse-charge`, `export` or `exempt` (a staff override). It is
+  absent when the order cannot say (a 0 % line the engine stamped nothing on).
+- Creating, finalising or crediting records by hand is admin-only, like refunds.
+- An imported order that was already complete gets no record until something
+  happens to it; create one by hand.
+
+Code: `src/lib/commerce/invoice-records.ts` (write path, issuers),
+`invoice-records-rules.ts` (the arithmetic), `invoice-pdf.ts` (the PDF).
 
 ## Known limits (not yet solved)
 - **Multi-currency is presentation, not settlement.** The shop has a base

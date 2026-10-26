@@ -172,13 +172,32 @@ async function rewriteReferences(map: Record<string, string>): Promise<{ posts: 
       nextI18n = outMap;
     }
 
+    // A colour swatch's image (`attributes[].swatches[value].image`) is a
+    // media reference as well; missed, the swatch shows an empty tile once
+    // the old file is unlinked below.
+    let attributesChanged = false;
+    const nextAttributes = prod.attributes?.map((a) => {
+      if (!a?.swatches) return a;
+      let touched = false;
+      const swatches: NonNullable<typeof a.swatches> = {};
+      for (const [value, sw] of Object.entries(a.swatches)) {
+        const image = typeof sw?.image === 'string' && sw.image ? rewriteUrls(sw.image, map) : sw?.image;
+        if (image !== sw?.image) touched = true;
+        swatches[value] = image !== sw?.image ? { ...sw, image } : sw;
+      }
+      if (!touched) return a;
+      attributesChanged = true;
+      return { ...a, swatches };
+    });
+
     const changed = nextImages.some((img, i) => img !== images[i])
-      || nextDesc !== desc || variantsChanged || i18nChanged;
+      || nextDesc !== desc || variantsChanged || i18nChanged || attributesChanged;
     if (!changed) continue;
     await LocalDB.updateProduct(prod.id, {
       images: nextImages,
       ...(nextDesc !== desc ? { description: nextDesc } : {}),
       ...(variantsChanged ? { variants: nextVariants } : {}),
+      ...(attributesChanged ? { attributes: nextAttributes } : {}),
       ...(i18nChanged ? { i18n: nextI18n } : {}),
     } as Partial<Product>);
     counts.products += 1;

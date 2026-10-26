@@ -283,6 +283,25 @@ export default function ({ definePlugin, PLUGIN_HOOKS }) {
           { name: 'plugin_note', rule: { type: 'string', optional: true, max: 50 } },
           { name: 'sku', rule: { type: 'string', optional: true } },
         ],
+        // Priced per-line add-ons (PLUGIN_HOOKS.ORDER_LINE_ADDONS), the seam
+        // the optical module's lens options use, on its own namespace so no
+        // other smoke order is touched. Registered only when the host has it.
+        ...(PLUGIN_HOOKS.ORDER_LINE_ADDONS
+          ? {
+            [PLUGIN_HOOKS.ORDER_LINE_ADDONS]: (current, ctx) => {
+              if (!current || !current.ok) return current;
+              const sel = ctx?.line?.addons?.['fixture-gift'];
+              if (!Array.isArray(sel) || sel.length === 0) return current;
+              if (sel.some((s) => s !== 'wrap')) {
+                return { ok: false, message: 'Unknown gift option', code: 'fixture.gift_unknown', params: { option: String(sel.find((s) => s !== 'wrap')) } };
+              }
+              return {
+                ok: true,
+                addons: [...current.addons, { id: 'wrap', label: 'Gift wrap', unit_price_cents: 350, source: 'test-second-module', namespace: 'fixture-gift' }],
+              };
+            },
+          }
+          : {}),
       },
     }),
     // NOT force-activated, so smoke can switch it on AFTER a merchant already

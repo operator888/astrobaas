@@ -1,9 +1,11 @@
 import type { APIRoute } from 'astro';
 import { LocalDB } from '../../../lib/localdb';
 import { ApiResponseBuilder } from '../../../lib/api-response';
-import { priceBasket } from '../../../lib/commerce/pricing-service';
+import { priceBasket, buyerTaxId } from '../../../lib/commerce/pricing-service';
+import { normalizeAddress, isEmptyAddress } from '../../../lib/commerce/address';
+import type { Address } from '../../../core/models';
 import { getOrderLimits, resolvePresentment } from '../../../lib/commerce-service';
-import { convertTotals, offeredCurrencies } from '../../../lib/commerce/currency-rates';
+import { convertTotals, convertMinorUnits, offeredCurrencies } from '../../../lib/commerce/currency-rates';
 import { publicCouponRejection } from '../../../lib/commerce/coupons';
 import { canReadCommerce } from '../../../lib/auth';
 
@@ -49,6 +51,12 @@ export const POST: APIRoute = async ({ request, locals }) => {
         variant_id: typeof i.variant_id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(i.variant_id)
           ? i.variant_id : undefined,
         qty: Number(i.qty),
+        // The same two per-line fields checkout takes, so a quote prices what
+        // the order will: add-ons (refused here exactly as there when the
+        // shape is wrong or nothing handles them), and the prescription the
+        // add-on filter may price by. Not validated here — checkout does.
+        ...(i.addons !== undefined ? { addons: i.addons } : {}),
+        ...(i.prescription !== undefined ? { prescription: i.prescription } : {}),
       }));
     if (!items.length) return ApiResponseBuilder.badRequest('No valid items');
     for (const i of items) {
@@ -57,18 +65,47 @@ export const POST: APIRoute = async ({ request, locals }) => {
       }
     }
 
+    /*
+     * The addresses, read the way `placeOrder` reads them, so a quote and the
+     * order that follows it are priced on the same facts.
+     *
+     * The buyer's VAT id lives on `billing_address.tax_id` (delivery address as
+     * fallback) — the SAME helper placeOrder uses. Without it a B2B buyer was
+     * quoted VAT that reverse charge should have removed. And the destination
+     * falls back to `shipping_address`, as an order's does.
+     *
+     * Lenient on purpose: a malformed address is ignored here rather than
+     * refused. The order will refuse it with the reason; a cart page asking for
+     * totals mid-typing should still get totals.
+     */
+    const addr = (raw: unknown): Address | undefined => {
+      if (raw === undefined || raw === null) return undefined;
+      const parsed = normalizeAddress(raw);
+      return parsed.ok && !isEmptyAddress(parsed.value) ? parsed.value : undefined;
+    };
+    const shippingAddress = addr((body as any)?.shipping_address);
+    const billingAddress = addr((body as any)?.billing_address);
+
     const priced = await priceBasket({
       items,
       destination: {
-        country: typeof (body as any)?.shipping_country === 'string' ? (body as any).shipping_country : undefined,
-        postcode: typeof (body as any)?.shipping_postcode === 'string' ? (body as any).shipping_postcode : undefined,
+        country: typeof (body as any)?.shipping_country === 'string' ? (body as any).shipping_country : shippingAddress?.country,
+        postcode: typeof (body as any)?.shipping_postcode === 'string' ? (body as any).shipping_postcode : shippingAddress?.postcode,
       },
+      ...buyerTaxId(billingAddress, shippingAddress),
       shipping_method_id: typeof (body as any)?.shipping_method_id === 'string' ? (body as any).shipping_method_id : null,
       coupon_code: typeof (body as any)?.coupon_code === 'string' ? (body as any).coupon_code : null,
       email: typeof (body as any)?.email === 'string' ? (body as any).email : null,
     });
 
-    if (!priced.ok) return ApiResponseBuilder.error(priced.status, priced.message);
+    // The code travels with the message, as checkout's does, so a storefront
+    // can translate a refusal it got from the quote the same way.
+    if (!priced.ok) {
+      return ApiResponseBuilder.error(priced.status, priced.message, undefined, {
+        ...(priced.code ? { code: priced.code } : {}),
+        ...(priced.params ? { params: priced.params } : {}),
+      });
+    }
 
     /*
      * Who may learn WHY a code was refused. Staff previewing a basket in the
@@ -130,7 +167,17 @@ export const POST: APIRoute = async ({ request, locals }) => {
       prices_include_tax: t.prices_include_tax,
       requires_shipping: t.requires_shipping,
       weight_grams: t.weight_grams,
-      lines: t.lines,
+      // Each line with the add-ons priced into it (PLUGIN_HOOKS.ORDER_LINE_ADDONS),
+      // in the quote's currency, so a cart can show what the line includes.
+      // Their prices are already inside `unit_price_cents`; never add them again.
+      lines: t.lines.map((l, i) => {
+        const addons = priced.addons[i] ?? [];
+        if (!addons.length) return l;
+        const fx = (n: number) => presentment.rate
+          ? convertMinorUnits(n, presentment.settings.base, presentment.currency, presentment.rate.rate_ppm)
+          : n;
+        return { ...l, addons: addons.map((a) => ({ ...a, unit_price_cents: fx(a.unit_price_cents) })) };
+      }),
       /** Render these as the customer's choices. */
       available_shipping_methods: priced.availableShipping,
       selected_shipping_method: priced.shipping,

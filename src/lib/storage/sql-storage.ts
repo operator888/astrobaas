@@ -45,10 +45,17 @@ import type {
   PaymentEventClaim,
   PaymentEventClaimOptions,
   RefundAppend,
+  OrderTagsWrite,
+  OrderTimelineWrite,
+  OrderInvoiceRecordsWrite,
+  OrderFieldWrite,
+  OrderCasField,
   IdempotencyClaim,
 } from '../../core/storage';
+import { ORDER_CAS_FIELDS } from '../../core/storage';
 import { SlugTakenError } from './slug-taken';
 import type {
+  InvoiceDocument,
   ShippingMethodRecord,
   CouponRecord,
   Post,
@@ -1313,6 +1320,137 @@ export class SqlStorage implements Storage, LocalSqliteHolder {
     const updated = JSON.parse(String(row.data)) as Order;
     await this.recordChange('order', id, 'update', updated);
     return { outcome: 'appended', order: updated };
+  }
+
+  /**
+   * Storage.compareAndSetOrderTags as one conditional UPDATE.
+   *
+   * The WHERE clause carries what the caller read, so of two writers that read
+   * the same list exactly one matches a row; the other gets nothing back and
+   * re-reads. Three shapes of "what was read":
+   *
+   *  - absent  → `json_type(...) IS NULL`
+   *  - a list  → it is an array AND its text equals the minified JSON of what
+   *              was read. Both sides are rendered by SQLite (`json(?)`), so
+   *              the comparison does not depend on how JS escaped a string.
+   *  - junk    → anything stored that is not an array (a hand edit, a bad
+   *              import): "still not a list". Good enough to let the one
+   *              writer that saw it repair it.
+   *
+   * Only `tags` and `updated_at` are written (patchExpr), so a payment that
+   * lands between the read and this statement is untouched.
+   */
+  async compareAndSetOrderTags(id: string, expected: unknown, next: readonly string[]): Promise<OrderTagsWrite> {
+    return this.compareAndSetOrderArray(id, 'tags', expected, next);
+  }
+
+  /**
+   * Storage.compareAndSetOrderInvoiceRecords — the same conditional UPDATE as
+   * the tags above. The records are arrays of objects; both sides of the
+   * comparison are rendered by SQLite's json() from JSON text that was itself
+   * parsed from the row, so key order and number spelling agree.
+   */
+  async compareAndSetOrderInvoiceRecords(
+    id: string, expected: unknown, next: readonly InvoiceDocument[],
+  ): Promise<OrderInvoiceRecordsWrite> {
+    return this.compareAndSetOrderArray(id, 'invoice_records', expected, next);
+  }
+
+  /** The shared conditional UPDATE behind the two compare-and-set methods above. */
+  private async compareAndSetOrderArray(
+    id: string, field: 'tags' | 'invoice_records', expected: unknown, next: readonly unknown[],
+  ): Promise<OrderTagsWrite> {
+    await this.ensureReady();
+    const args: InValue[] = [];
+    const expr = this.patchExpr('data', { [field]: next.length ? [...next] : undefined, updated_at: nowIso() }, args);
+    const where: string[] = ['id = ?'];
+    const at = `$.${field}`;
+    args.push(id);
+    if (expected === undefined) {
+      where.push(`json_type(data, '${at}') IS NULL`);
+    } else if (Array.isArray(expected)) {
+      where.push(`json_type(data, '${at}') = 'array'`);
+      where.push(`json_extract(data, '${at}') = json(?)`);
+      args.push(JSON.stringify(expected));
+    } else {
+      where.push(`json_type(data, '${at}') IS NOT NULL`);
+      where.push(`json_type(data, '${at}') <> 'array'`);
+    }
+    const res = await this.exec(`UPDATE orders SET data = ${expr} WHERE ${where.join(' AND ')} RETURNING data`, args);
+    const row = res.rows[0];
+    if (!row) {
+      return (await this.byId<Order>('orders', id)) ? { outcome: 'changed' } : { outcome: 'missing' };
+    }
+    const updated = JSON.parse(String(row.data)) as Order;
+    await this.recordChange('order', id, 'update', updated, [field]);
+    return { outcome: 'applied', order: updated };
+  }
+
+  /**
+   * Storage.compareAndSetOrderField: the conditional UPDATE above, for any
+   * field on the closed list. The field name is checked against that list
+   * before it becomes part of a JSON path, so no caller can steer the SQL.
+   */
+  async compareAndSetOrderField(id: string, field: OrderCasField, expected: unknown, next: unknown): Promise<OrderFieldWrite> {
+    if (!(ORDER_CAS_FIELDS as readonly string[]).includes(field)) {
+      throw new TypeError(`compareAndSetOrderField: ${String(field)} is not a compare-and-set field`);
+    }
+    await this.ensureReady();
+    const args: InValue[] = [];
+    const expr = this.patchExpr('data', { [field]: next, updated_at: nowIso() }, args);
+    const path = `'$.${field}'`;
+    const where: string[] = ['id = ?'];
+    const at = `$.${field}`;
+    args.push(id);
+    if (expected === undefined) {
+      where.push(`json_type(data, ${path}) IS NULL`);
+    } else if (Array.isArray(expected)) {
+      where.push(`json_type(data, ${path}) = 'array'`);
+      where.push(`json_extract(data, ${path}) = json(?)`);
+      args.push(JSON.stringify(expected));
+    } else {
+      where.push(`json_type(data, ${path}) IS NOT NULL`);
+      where.push(`json_type(data, ${path}) <> 'array'`);
+    }
+    const res = await this.exec(`UPDATE orders SET data = ${expr} WHERE ${where.join(' AND ')} RETURNING data`, args);
+    const row = res.rows[0];
+    if (!row) {
+      return (await this.byId<Order>('orders', id)) ? { outcome: 'changed' } : { outcome: 'missing' };
+    }
+    const updated = JSON.parse(String(row.data)) as Order;
+    await this.recordChange('order', id, 'update', updated, [field]);
+    return { outcome: 'applied', order: updated };
+  }
+
+  /**
+   * Storage.compareAndSetOrderTimeline as one conditional UPDATE — the same
+   * three shapes of "what was read" as compareAndSetOrderTags (absent / a list
+   * compared as SQLite-rendered JSON / junk that is not a list), over the
+   * `timeline` field. Only `timeline` is written: not `updated_at`, and no
+   * change-feed row — it is not an edit of the order as the API presents it.
+   */
+  async compareAndSetOrderTimeline(id: string, expected: unknown, next: readonly unknown[]): Promise<OrderTimelineWrite> {
+    await this.ensureReady();
+    const args: InValue[] = [];
+    const expr = this.patchExpr('data', { timeline: next.length ? [...next] : undefined }, args);
+    const where: string[] = ['id = ?'];
+    args.push(id);
+    if (expected === undefined) {
+      where.push(`json_type(data, '$.timeline') IS NULL`);
+    } else if (Array.isArray(expected)) {
+      where.push(`json_type(data, '$.timeline') = 'array'`);
+      where.push(`json_extract(data, '$.timeline') = json(?)`);
+      args.push(JSON.stringify(expected));
+    } else {
+      where.push(`json_type(data, '$.timeline') IS NOT NULL`);
+      where.push(`json_type(data, '$.timeline') <> 'array'`);
+    }
+    const res = await this.exec(`UPDATE orders SET data = ${expr} WHERE ${where.join(' AND ')} RETURNING data`, args);
+    const row = res.rows[0];
+    if (!row) {
+      return (await this.byId<Order>('orders', id)) ? { outcome: 'changed' } : { outcome: 'missing' };
+    }
+    return { outcome: 'applied', order: JSON.parse(String(row.data)) as Order };
   }
 
   /**

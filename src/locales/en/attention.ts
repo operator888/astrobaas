@@ -34,6 +34,10 @@ export const attention = {
   'admin.attention.flagged-orders.body': 'The risk signals never refuse an order — they only ask for a human. These are still open.',
   'admin.attention.flagged-orders.action': 'Review them',
 
+  'admin.attention.pending-reviews.title': '{count} reviews are waiting for approval',
+  'admin.attention.pending-reviews.body': 'Shoppers cannot see a review until somebody approves it, and the person who wrote it is waiting to see it go up.',
+  'admin.attention.pending-reviews.action': 'Moderate them',
+
   'admin.attention.active-out-of-stock.title': '{count} products are listed but out of stock',
   'admin.attention.active-out-of-stock.body': 'Shoppers can reach them and cannot buy them. Deliberate if you take backorders; otherwise they are dead ends in the catalogue.',
   'admin.attention.active-out-of-stock.action': 'Open the catalogue',

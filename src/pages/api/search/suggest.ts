@@ -13,6 +13,7 @@ import { countProductsByCategory } from '../../../lib/commerce/category-counts';
 import { resolveSuggestSettings } from '../../../lib/search/suggest-settings';
 import { popularFor } from '../../../lib/search/popular';
 import { popularEntries } from '../../../lib/search/popular-store';
+import { withGroupPrices } from '../../../lib/commerce/grouped';
 
 /**
  * GET /api/search/suggest?q=&types=&limit=&locale= — public.
@@ -80,7 +81,9 @@ export const GET: APIRoute = async ({ url, request, locals }) => {
       types,
       limit,
       posts: locale ? filterByLocale(posts, locale) : posts,
-      products,
+      // A grouped product's stored price is 0; the suggestion shows its "from"
+      // price, from the same catalogue already loaded here.
+      products: withGroupPrices(products),
       categories,
       categoryCounts: counts,
       expand: expand ?? undefined,

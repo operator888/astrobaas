@@ -44,6 +44,11 @@ const product = (over = {}) => ({
   check('a LIST field matches when any member is in the list',
     holds('tags', 'in', ['new', 'clearance']) === true);
   check('a boolean is', holds('in_stock', 'is', true) === true);
+  check('in_stock reads the VARIANTS: every one sold out is not in stock, whatever the stored flag',
+    C.conditionHolds(product({ stock: null, in_stock: true,
+      variants: [{ id: 'a', options: { S: '1' }, stock: 0, enabled: true }] }), { field: 'in_stock', op: 'is', value: false }, NOW) === true);
+  check('...and one with stock is', C.conditionHolds(product({ stock: null, in_stock: false,
+      variants: [{ id: 'a', options: { S: '1' }, stock: 0, enabled: true }, { id: 'b', options: { S: '2' }, stock: 2, enabled: true }] }), { field: 'in_stock', op: 'is', value: true }, NOW) === true);
   check('...and its false side', holds('on_sale', 'is', true) === false);
   check('stock gte', holds('stock', 'gte', 5) === true);
   check('created within days', holds('created_at', 'within-days', 30) === true);

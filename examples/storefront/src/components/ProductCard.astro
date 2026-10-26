@@ -2,11 +2,14 @@
 import type { Product } from '../lib/cms';
 import { priceOf } from '../lib/cms';
 import { formatMoney } from '../lib/money';
+import { stockBadge } from '../lib/stock';
+import { isGroup } from '../lib/group';
 
 interface Props { product: Product; currency: string }
 const { product, currency } = Astro.props;
-const { now, was } = priceOf(product);
+const { now, was, from } = priceOf(product);
 const image = product.images?.find((i) => (i.kind ?? 'image') === 'image');
+const stock = stockBadge(product);
 ---
 <li class="card">
   <a href={`/product/${product.slug}/`}>
@@ -18,9 +21,10 @@ const image = product.images?.find((i) => (i.kind ?? 'image') === 'image');
     <span class="card-name">{product.name}</span>
   </a>
   <span class="price">
+    {isGroup(product) && 'From '}
     {was !== null && <span class="visually-hidden">Sale price </span>}
-    {formatMoney(now, currency)}
+    {from && <span>From </span>}{formatMoney(now, currency)}
     {was !== null && <del><span class="visually-hidden">Was </span>{formatMoney(was, currency)}</del>}
   </span>
-  {!product.in_stock && <span class="stock-out">Sold out</span>}
+  <span class={`stock stock-${stock.tone}`}>{stock.label}</span>
 </li>

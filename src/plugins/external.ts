@@ -48,6 +48,12 @@ import type { Plugin } from '../lib/plugin-system';
 import { definePlugin, PLUGIN_HOOKS } from '../core/index';
 import { foldForSearch, transliterate } from '../lib/text-search';
 import { apiRangeSatisfied, MANIFEST_API_VERSION } from '../core/manifest';
+import {
+  createPluginStore, isValidPluginId,
+  type PluginDataBackend, type PluginStore,
+} from '../lib/plugin-platform/store';
+import { createPluginCatalog, type PluginCatalog } from '../lib/plugin-platform/catalog';
+import { currencyExponent } from '../lib/money-format';
 
 /**
  * What a factory-style external plugin is handed.
@@ -94,6 +100,75 @@ export interface PluginHost {
    * who changes a setting does not restart the site.
    */
   getPluginSettings: (pluginId: string) => Promise<Record<string, unknown>>;
+  /**
+   * Your plugin's namespaced store, usable OUTSIDE a route handler — from a
+   * filter, an action, a timer. The same records `ctx.store` and your
+   * migrations see (`createPluginStore(id, LocalDB)`), so all paths agree.
+   *
+   * Pass your own id, for the same reason as `getPluginSettings`. It must be a
+   * valid plugin id (letters, digits, `-`, `_`; no `@` or `/`), and an invalid
+   * one throws HERE, at the call, rather than on the first read.
+   *
+   * Synchronous: it returns the store at once and opens storage lazily on the
+   * first call, so a factory may build it before the database is ready.
+   */
+  createStore: (pluginId: string) => PluginStore;
+  /**
+   * Read-only product and brand reads. Every product in every status, as
+   * COPIES, with `stock_status` derived and staff-only custom fields removed.
+   * See `src/lib/plugin-platform/catalog.ts` for each rule and its reason.
+   */
+  catalog: PluginCatalog;
+  /** The core's money rules, so a module cannot format a price differently. */
+  money: {
+    /** Decimal places for an ISO 4217 code: 0 (JPY), 3 (KWD) or 2. */
+    currencyExponent: (currency: string) => number;
+  };
+}
+
+/**
+ * The host object every factory-style external plugin receives.
+ *
+ * Built in one place so the loader and the tests hand plugins the same thing.
+ */
+export function buildPluginHost(): PluginHost {
+  return {
+    definePlugin,
+    PLUGIN_HOOKS,
+    text: { fold: foldForSearch, transliterate },
+    getPluginSettings: async (pluginId: string) => {
+      const { getPluginSettings } = await import('../lib/plugin-platform/settings');
+      return getPluginSettings(pluginId);
+    },
+    getSettings: async () => {
+      const { LocalDB } = await import('../lib/localdb');
+      const rows = await LocalDB.getSettings();
+      const map: Record<string, unknown> = Object.create(null);
+      for (const r of rows) map[r.key] = r.value;
+      return map;
+    },
+    createStore: (pluginId: string) => {
+      if (!isValidPluginId(pluginId)) {
+        throw new Error(
+          `createStore: invalid plugin id "${String(pluginId)}" — letters, digits, dash and underscore, `
+          + 'starting with a letter or digit (a package name such as "@acme/x" is not a plugin id)',
+        );
+      }
+      // LocalDB is imported lazily, as getSettings does: the factory runs while
+      // plugins load, and this module must not pull storage in at import time.
+      const db = () => import('../lib/localdb').then((m) => m.LocalDB);
+      const backend: PluginDataBackend = {
+        getPluginData: async (ns) => (await db()).getPluginData(ns),
+        getPluginDataRecord: async (ns, id) => (await db()).getPluginDataRecord(ns, id),
+        putPluginData: async (ns, id, data) => (await db()).putPluginData(ns, id, data),
+        deletePluginDataRecord: async (ns, id) => (await db()).deletePluginDataRecord(ns, id),
+        deletePluginData: async (ns) => (await db()).deletePluginData(ns),
+      };
+      return createPluginStore(pluginId, backend);
+    },
+    catalog: createPluginCatalog(),
+    money: { currencyExponent },
+  };
 }
 
 export interface ExternalLoadResult {
@@ -151,22 +226,7 @@ export async function loadExternalPlugins(
       const entry = (mod as { default?: unknown })?.default ?? mod;
 
       const resolved = typeof entry === 'function'
-        ? (entry as (host: PluginHost) => unknown)({
-          definePlugin,
-          PLUGIN_HOOKS,
-          text: { fold: foldForSearch, transliterate },
-          getPluginSettings: async (pluginId: string) => {
-            const { getPluginSettings } = await import('../lib/plugin-platform/settings');
-            return getPluginSettings(pluginId);
-          },
-          getSettings: async () => {
-            const { LocalDB } = await import('../lib/localdb');
-            const rows = await LocalDB.getSettings();
-            const map: Record<string, unknown> = Object.create(null);
-            for (const r of rows) map[r.key] = r.value;
-            return map;
-          },
-        })
+        ? (entry as (host: PluginHost) => unknown)(buildPluginHost())
         : entry;
 
       // One module may carry SEVERAL plugins. That is what lets a customer who

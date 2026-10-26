@@ -59,9 +59,10 @@ import type {
 } from '../core/models'
 import type {
   Storage, UpdateProductOptions, OrderTransitionGuard, RecentOrdersQuery,
-  PaymentEventClaim, PaymentEventClaimOptions, RefundAppend, IdempotencyClaim,
+  PaymentEventClaim, PaymentEventClaimOptions, RefundAppend, OrderTagsWrite, OrderTimelineWrite, IdempotencyClaim, OrderInvoiceRecordsWrite, OrderFieldWrite, OrderCasField,
 } from '../core/storage'
-import type { RefundRecord } from '../core/models'
+import type { RefundRecord, InvoiceDocument } from '../core/models'
+import { ORDER_CAS_FIELDS } from '../core/storage'
 import { span } from './request-profile'
 
 // Collision-resistant, unguessable identifiers. (Previously Date.now()+Math.random(),
@@ -195,6 +196,36 @@ function appendChange(
   data.contentChanges.push(contentChange)
   trimChangeRing(data)
   return contentChange
+}
+
+/**
+ * The lowdb and doc-blob compare-and-set for one array field of an order
+ * (`tags`, `invoice_records`): the comparison and the write in one locked()
+ * hold. Single-process, like every lowdb guarantee. An empty `next` removes
+ * the field, so an order never carries `[]`.
+ */
+function compareAndSetOrderArray(
+  id: string, field: 'tags' | 'invoice_records', expected: unknown, next: readonly unknown[],
+): Promise<OrderTagsWrite> {
+  return locked(async () => {
+    await db.read()
+    const rows = ((db.data as any)?.orders ?? []) as Order[]
+    const idx = rows.findIndex(o => o.id === id)
+    if (idx < 0) return { outcome: 'missing' } as const
+    const stored = rows[idx]
+    // JSON text, so absent compares equal to absent and a list compares by
+    // content, exactly as the SQL driver's json comparison does.
+    if (JSON.stringify((stored as any)[field]) !== JSON.stringify(expected)) return { outcome: 'changed' } as const
+    const updated: Order = { ...stored, updated_at: new Date().toISOString() }
+    // A deep copy: the caller keeps its own objects, and a later mutation of
+    // them must not reach into the stored document.
+    if (next.length) (updated as any)[field] = JSON.parse(JSON.stringify(next))
+    else delete (updated as any)[field]
+    rows[idx] = updated
+    appendChange(db.data!, 'order', id, 'update', updated, [field])
+    await db.write()
+    return { outcome: 'applied', order: updated } as const
+  })
 }
 
 /**
@@ -1131,6 +1162,80 @@ export class LocalDB {
       appendChange(db.data!, 'order', id, 'update', next)
       await db.write()
       return { outcome: 'appended', order: next } as const
+    })
+  }
+
+  /**
+   * The lowdb and doc-blob half of Storage.compareAndSetOrderTags: the
+   * comparison and the write in one locked() hold. Single-process, like every
+   * lowdb guarantee.
+   */
+  static async compareAndSetOrderTags(id: string, expected: unknown, next: readonly string[]): Promise<OrderTagsWrite> {
+    if (sqlBackend) return sqlBackend.compareAndSetOrderTags(id, expected, next)
+    return compareAndSetOrderArray(id, 'tags', expected, next)
+  }
+
+  /**
+   * The lowdb and doc-blob half of Storage.compareAndSetOrderInvoiceRecords —
+   * the same one-hold comparison and write as the tags above.
+   */
+  static async compareAndSetOrderInvoiceRecords(
+    id: string, expected: unknown, next: readonly InvoiceDocument[],
+  ): Promise<OrderInvoiceRecordsWrite> {
+    if (sqlBackend) return sqlBackend.compareAndSetOrderInvoiceRecords(id, expected, next)
+    return compareAndSetOrderArray(id, 'invoice_records', expected, next)
+  }
+
+  /** The lowdb and doc-blob half of Storage.compareAndSetOrderTimeline: one locked() hold. */
+  static async compareAndSetOrderTimeline(id: string, expected: unknown, next: readonly unknown[]): Promise<OrderTimelineWrite> {
+    if (sqlBackend) return sqlBackend.compareAndSetOrderTimeline(id, expected, next)
+    return locked(async () => {
+      await db.read()
+      const rows = ((db.data as any)?.orders ?? []) as Order[]
+      const idx = rows.findIndex(o => o.id === id)
+      if (idx < 0) return { outcome: 'missing' } as const
+      const stored = rows[idx]
+      if (JSON.stringify((stored as any).timeline) !== JSON.stringify(expected)) return { outcome: 'changed' } as const
+      // Not an edit of the order as the API presents it (the order endpoints
+      // strip `timeline`): no `updated_at` bump and no feed row, so a status
+      // change is still exactly one change-feed entry.
+      const updated: Order = { ...stored }
+      if (next.length) updated.timeline = [...next] as Order['timeline']
+      else delete updated.timeline
+      rows[idx] = updated
+      await db.write()
+      return { outcome: 'applied', order: updated } as const
+    })
+  }
+
+  /**
+   * Storage.compareAndSetOrderField on lowdb and doc-blob. The tags write is
+   * this with `field = 'tags'`; the download count is this with
+   * `entitlements`.
+   */
+  static async compareAndSetOrderField(id: string, field: OrderCasField, expected: unknown, next: unknown): Promise<OrderFieldWrite> {
+    if (sqlBackend) return sqlBackend.compareAndSetOrderField(id, field, expected, next)
+    if (!(ORDER_CAS_FIELDS as readonly string[]).includes(field)) {
+      throw new TypeError(`compareAndSetOrderField: ${String(field)} is not a compare-and-set field`)
+    }
+    return locked(async () => {
+      await db.read()
+      const rows = ((db.data as any)?.orders ?? []) as Order[]
+      const idx = rows.findIndex(o => o.id === id)
+      if (idx < 0) return { outcome: 'missing' } as const
+      const stored = rows[idx]
+      // JSON text, so absent compares equal to absent and a list compares by
+      // content, exactly as the SQL driver's json comparison does.
+      if (JSON.stringify((stored as any)[field]) !== JSON.stringify(expected)) return { outcome: 'changed' } as const
+      const updated: Order = { ...stored, updated_at: new Date().toISOString() }
+      // A deep copy: the caller keeps its `next`, and a later change to it
+      // must not reach into the stored document.
+      if (next === undefined) delete (updated as any)[field]
+      else (updated as any)[field] = JSON.parse(JSON.stringify(next))
+      rows[idx] = updated
+      appendChange(db.data!, 'order', id, 'update', updated, [field])
+      await db.write()
+      return { outcome: 'applied', order: updated } as const
     })
   }
 

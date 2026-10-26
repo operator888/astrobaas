@@ -67,7 +67,7 @@ export const LEGAL_TEMPLATES: readonly LegalTemplate[] = [
 <li><strong>Contact form.</strong> The name, email address and message you send us, kept for as long as handling your request takes (legal basis: our legitimate interest in answering you).</li>
 <li><strong>Newsletter.</strong> Your email address, only after you subscribe. You can unsubscribe at any time (legal basis: consent).</li>
 <li><strong>Analytics and marketing.</strong> Only with your consent, given through the cookie banner, and withdrawable at any time from “Cookie settings”. Without consent, no analytics or marketing scripts load at all.</li>
-<li><strong>Orders</strong> (if this site sells products). Name, address, email and order details, processed to fulfil the contract and kept as long as tax law requires.</li>
+<li><strong>Orders</strong> (if this site sells products). Name, address, email and order details, processed to fulfil the contract and kept as long as tax law requires. If you allowed marketing cookies, the order also records which campaign link or ad brought you here (campaign tags and the ad click id); without that consent it records none.</li>
 </ul>
 <h2>Recipients</h2>
 <p>Data stays on our systems, except where named services are needed to deliver it (for example an email delivery provider for transactional mail, or a payment provider during checkout — payment card data never touches this site).</p>
@@ -88,7 +88,7 @@ export const LEGAL_TEMPLATES: readonly LegalTemplate[] = [
 <li><strong>Φόρμα επικοινωνίας.</strong> Το όνομα, η διεύθυνση email και το μήνυμά σας, για όσο διαρκεί η διεκπεραίωση του αιτήματός σας (νομική βάση: το έννομο συμφέρον μας να σας απαντήσουμε).</li>
 <li><strong>Newsletter.</strong> Η διεύθυνση email σας, μόνο μετά την εγγραφή σας. Μπορείτε να διαγραφείτε οποτεδήποτε (νομική βάση: συγκατάθεση).</li>
 <li><strong>Στατιστικά και μάρκετινγκ.</strong> Μόνο με τη συγκατάθεσή σας μέσω του banner cookies, ανακλητή οποτεδήποτε από τις «Ρυθμίσεις cookies». Χωρίς συγκατάθεση, κανένα σχετικό script δεν φορτώνεται.</li>
-<li><strong>Παραγγελίες</strong> (εφόσον το site πωλεί προϊόντα). Όνομα, διεύθυνση, email και στοιχεία παραγγελίας, για την εκτέλεση της σύμβασης και για όσο απαιτεί η φορολογική νομοθεσία.</li>
+<li><strong>Παραγγελίες</strong> (εφόσον το site πωλεί προϊόντα). Όνομα, διεύθυνση, email και στοιχεία παραγγελίας, για την εκτέλεση της σύμβασης και για όσο απαιτεί η φορολογική νομοθεσία. Αν επιτρέψατε τα cookies διαφήμισης, η παραγγελία καταγράφει και ποια καμπάνια ή διαφήμιση σας έφερε εδώ (ετικέτες καμπάνιας και το αναγνωριστικό κλικ της διαφήμισης)· χωρίς αυτή τη συγκατάθεση δεν καταγράφει τίποτα.</li>
 </ul>
 <h2>Αποδέκτες</h2>
 <p>Τα δεδομένα παραμένουν στα συστήματά μας, εκτός από συγκεκριμένες υπηρεσίες απαραίτητες για την παροχή τους (π.χ. πάροχος αποστολής email για λειτουργικά μηνύματα, ή πάροχος πληρωμών κατά την ολοκλήρωση αγοράς — τα στοιχεία κάρτας δεν αγγίζουν ποτέ αυτό το site).</p>
@@ -109,7 +109,7 @@ export const LEGAL_TEMPLATES: readonly LegalTemplate[] = [
 <li><strong>Kontaktformular.</strong> Name, E-Mail-Adresse und Ihre Nachricht, gespeichert solange die Bearbeitung Ihres Anliegens dauert (Rechtsgrundlage: unser berechtigtes Interesse, Ihnen zu antworten).</li>
 <li><strong>Newsletter.</strong> Ihre E-Mail-Adresse, nur nach Ihrer Anmeldung. Sie können sich jederzeit abmelden (Rechtsgrundlage: Einwilligung).</li>
 <li><strong>Analyse und Marketing.</strong> Nur mit Ihrer Einwilligung über das Cookie-Banner, jederzeit widerrufbar unter „Cookie-Einstellungen“. Ohne Einwilligung werden keine entsprechenden Skripte geladen.</li>
-<li><strong>Bestellungen</strong> (sofern diese Website Produkte verkauft). Name, Anschrift, E-Mail und Bestelldaten zur Vertragserfüllung, aufbewahrt solange steuerrechtliche Pflichten es verlangen.</li>
+<li><strong>Bestellungen</strong> (sofern diese Website Produkte verkauft). Name, Anschrift, E-Mail und Bestelldaten zur Vertragserfüllung, aufbewahrt solange steuerrechtliche Pflichten es verlangen. Wenn Sie Marketing-Cookies erlaubt haben, hält die Bestellung zusätzlich fest, welche Kampagne oder Anzeige Sie hergeführt hat (Kampagnen-Parameter und die Klick-ID der Anzeige); ohne diese Einwilligung nichts davon.</li>
 </ul>
 <h2>Empfänger</h2>
 <p>Daten verbleiben auf unseren Systemen, außer wo benannte Dienste zur Erbringung nötig sind (etwa ein E-Mail-Versanddienst für Transaktionsmails oder ein Zahlungsdienstleister beim Checkout — Kartendaten berühren diese Website nie).</p>

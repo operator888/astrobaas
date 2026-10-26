@@ -47,7 +47,31 @@ import { LocalDB } from './localdb';
 // send the token (INTEGRATION.md), so switching them on is the operator's
 // call, made once their storefront does.
 export const CAPTCHA_SURFACES = ['contact', 'newsletter', 'login', 'forgot', 'forms', 'checkout', 'magic-link'] as const;
-export type CaptchaSurface = (typeof CAPTCHA_SURFACES)[number];
+
+/**
+ * Surfaces whose check is ALWAYS on — no setting reaches them, and they are not
+ * in `CAPTCHA_SURFACES`, which is the operator's tick-list.
+ *
+ * `reviews`: a product review is published under the shop's name and feeds the
+ * star rating search engines show, so it is the one public form where a spam
+ * run does lasting damage rather than filling an inbox. Its only door is new
+ * (`POST /api/products/{ref}/reviews`), so requiring the proof from day one
+ * breaks no storefront that already works — the opposite of the reason every
+ * other surface defaults off.
+ */
+export const ALWAYS_ON_CAPTCHA_SURFACES = ['reviews'] as const;
+
+export type CaptchaSurface =
+  | (typeof CAPTCHA_SURFACES)[number]
+  | (typeof ALWAYS_ON_CAPTCHA_SURFACES)[number];
+
+/** Is this an id the challenge endpoint may mint for? */
+export function isCaptchaSurface(value: unknown): value is CaptchaSurface {
+  return typeof value === 'string' && (
+    (CAPTCHA_SURFACES as readonly string[]).includes(value)
+    || (ALWAYS_ON_CAPTCHA_SURFACES as readonly string[]).includes(value)
+  );
+}
 
 export const CAPTCHA_SETTING_KEY = 'captcha_surfaces';
 
@@ -92,6 +116,7 @@ async function enabledSurfaces(): Promise<Set<CaptchaSurface>> {
 }
 
 export async function captchaEnabledFor(surface: CaptchaSurface): Promise<boolean> {
+  if ((ALWAYS_ON_CAPTCHA_SURFACES as readonly string[]).includes(surface)) return true;
   return (await enabledSurfaces()).has(surface);
 }
 

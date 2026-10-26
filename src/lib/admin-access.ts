@@ -121,6 +121,11 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
 const EXTRA_RULES: readonly Pick<AdminNavItem, 'prefix' | 'roles'>[] = [
   // The profile screen is every staff member's own account.
   { prefix: '/admin/profile', roles: STAFF },
+  // The product-review queue (C-35). Reached from the collection link the
+  // sidebar shows while reviews are on (admin-nav `contentTypeNavFor`), so it
+  // has no NAV row. Same roles as the `manage_catalog` capability that guards
+  // its API (/api/reviews), so the screen and its endpoints agree.
+  { prefix: '/admin/reviews', roles: ['admin', 'editor', 'manager'] },
 ];
 
 /**

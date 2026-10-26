@@ -20,6 +20,7 @@ export type ActionFn = (...args: any[]) => void | Promise<void>;
 import type { PluginRoute } from './plugin-platform/routes';
 import type { PluginAdminPage } from './plugin-platform/admin-pages';
 import type { PluginMigration } from './plugin-platform/store';
+import type { OrderLineAddon } from '../core/models';
 export type { PluginRoute, PluginAdminPage, PluginMigration };
 
 export interface Plugin {
@@ -313,7 +314,157 @@ export const PLUGIN_HOOKS = {
    * through on save), and stop being published on the next read.
    */
   PRODUCT_FIELD_DEFS: 'product_field_defs',
+  /**
+   * filter(media: ReviewMedia[], ctx: { review: PublicReview; productId: string })
+   *   -> ReviewMedia[]
+   *
+   * THE SEAM for photo and video reviews, which are the paid part of product
+   * reviews. Core stores TEXT reviews only and implements no upload, storage,
+   * transcoding or media moderation. It calls this filter once per APPROVED
+   * review it is about to publish (`GET /api/products/{ref}/reviews`), with an
+   * initial value of `[]`, and attaches the result as `media` only when it is
+   * non-empty — so an install without a media module serves exactly what it
+   * served before the hook existed.
+   *
+   * A media module keeps its OWN storage keyed by the review id (never in the
+   * review record: the key `media` on a review is reserved and is not a
+   * declared field, so nothing a submitter posts can land there), and must
+   * listen to AFTER_REVIEW_DELETE so an erased review takes its photos with it.
+   * Core passes each item through `sanitiseReviewMedia` (lib/reviews.ts), so a
+   * filter returning a `javascript:` URL or an unknown kind publishes nothing.
+   */
+  REVIEW_MEDIA: 'review_media',
+  /**
+   * action(review: { id: string; product_id: string }, ctx: { reason: 'deleted' | 'erased' })
+   *
+   * A review was deleted by a moderator, or deleted/anonymised by a GDPR
+   * erasure. The other half of REVIEW_MEDIA: whatever a module stored against
+   * this review id must go too, or the erasure leaves the person's photographs
+   * behind.
+   */
+  AFTER_REVIEW_DELETE: 'after_review_delete',
+  /**
+   * filter(verdict: TaxIdVerdict, ctx: { taxId, country?, destination?, settings }) -> TaxIdVerdict
+   *
+   * SYNCHRONOUS. A verifier (VIES, a national registry) says what it knows
+   * about a buyer's tax id: `{ status: 'unchecked' | 'verified' | 'invalid' |
+   * 'unverified', country?, … }`. See `TaxIdVerdict` in lib/commerce/tax.ts.
+   *
+   * Asked from `priceBasket` — so by the quote AND the order — and ONLY where
+   * the answer could change the tax: reverse charge switched on, an EU
+   * destination other than the shop's country, and a non-empty tax id.
+   *
+   *   initial `{ status: 'unchecked' }`  no opinion: the shape check decides,
+   *                                       exactly as with no plugin.
+   *   `verified`    reverse charge if the shop's rules allow, using
+   *                 `verdict.country` (ISO, `GR`) over the typed prefix.
+   *   `invalid`     no reverse charge; taxed like a consumer.
+   *   `unverified`  no reverse charge where a destination rate is on file. It
+   *                 NEVER blocks an order: with no rate on file the shape-only
+   *                 reverse charge applies instead of a 409.
+   *
+   * No verdict is itself a refusal: the core captures the tax id and never
+   * validates it (see `Address.tax_id`). The only 409 reachable is the one a
+   * consumer gets — `invalid` to a destination with no rate on file. A
+   * filter must be a cache read — a checkout must not wait on a government
+   * web service. `ctx.settings` is every setting, read by the async call site
+   * and passed in. Return the incoming value unchanged when it is already
+   * `invalid`: a refusal from one verifier must survive the next.
+   */
+  TAX_ID_VERDICT: 'tax_id_verdict',
+  /**
+   * filter(rates: TaxRate[], ctx: { settings }) -> TaxRate[]
+   *
+   * SYNCHRONOUS. Supply tax rate rows — a maintained EU table, a regional
+   * pack. Handed a copy of the operator's normalised rows; return them plus
+   * your own. Applied by `resolveTaxSettingsWithPlugins`
+   * (lib/commerce/tax-plugins.ts), so the quote, the order and the tax
+   * override all price with the same table.
+   *
+   *   - The operator's rows always win: a returned row with the same country,
+   *     class and postcodes as one of theirs is dropped, and theirs are kept
+   *     even if the filter leaves them out.
+   *   - Fail closed: if any filter throws, or the result is not an array, the
+   *     operator's rows are used alone.
+   *   - Returned rows go through the core's normaliser (not the operator's
+   *     50-row cap); every row the core does not use is logged.
+   *   - A foreign row is never a domestic rate: domestic lookups read only the
+   *     shop's own country.
+   *   - Not called with tax off or no `shop_country`.
+   *
+   * `ctx.settings` is every setting, read by the call site and passed in.
+   */
+  TAX_RATES: 'tax_rates',
+  /**
+   * filter(result: LineAddonsResult, ctx: { line, product, variant, qty, name, settings }) -> LineAddonsResult
+   *
+   * PRICED per-line add-ons — a lens coating, an engraving, gift wrap. Called
+   * once per line inside `priceBasket`, so the quote and the order price the
+   * same add-ons, starting from `{ ok: true, addons: [] }`.
+   *
+   *   - `ctx.line` is the request line as posted (`addons`, and `prescription`
+   *     in display units), never a stored-units copy.
+   *   - `ctx.settings` is every setting, read by the call site: filters are
+   *     synchronous.
+   *   - The add-ons' `unit_price_cents` are added to the line's unit price
+   *     BEFORE coupons, the free-shipping threshold and tax, and the stored
+   *     line freezes them as `OrderItem.addons`.
+   *   - `{ ok: false, message, code?, params? }` refuses the quote and the
+   *     order with a 400. Return an incoming refusal unchanged.
+   *   - Fail closed: a filter that throws, returns a Promise or returns a
+   *     malformed result refuses the line; so does a selection under
+   *     `line.addons` that no filter priced. Never charged without the add-on.
+   *
+   * See `src/lib/commerce/line-addons.ts` and PLUGIN_DEVELOPMENT.md.
+   */
+  ORDER_LINE_ADDONS: 'order_line_addons',
+  /**
+   * filter(issuers: InvoiceIssuer[], ctx: { settings }) -> InvoiceIssuer[]
+   *
+   * A plugin registers an invoice ISSUER — the myDATA provider pack, a Peppol
+   * pack, a bridge to the shop's own ΦΗΜ. Core keeps a frozen, non-fiscal
+   * invoice record per order and a credit-memo record per refund
+   * (`lib/commerce/invoice-records.ts`); when one becomes final, the chosen
+   * issuer's `issue(doc, { order, invoice?, settings, key, attempt,
+   * reportLateSuccess })` is called ONCE and what it returns — `{ ok: true,
+   * number?, identifiers? }`, `{ ok: false, error, retryable? }` or
+   * `{ ok: false, declined: true, reason }` ("not mine": the next issuer is
+   * asked, or the record is treated as with no issuer) — is stored on the
+   * record. The number it returns is the only document number a record ever
+   * carries: core is not a fiscal device.
+   *
+   * `ctx.settings` is every setting, read by the CALL SITE and passed in:
+   * the filter is synchronous, so an issuer leaves itself off the list while
+   * its own switch is off without caching it.
+   *
+   * Exists because every issuer needs the same frozen record (lines, VAT per
+   * rate, both parties with the buyer's tax id) and would otherwise rebuild it
+   * from the order, each slightly differently.
+   *
+   * Asked at each use, from active plugins. A record marked
+   * `issued_externally` is never sent; with more than one issuer active the
+   * shop must choose one (`invoice_issuer`), which is asked first; the others
+   * follow in hook order, each only after the one before DECLINED. A failure
+   * is never passed on, so a record is never reported twice. `issue()` must
+   * be idempotent on `ctx.key` (`astrobaas:<record id>`): a person, or the
+   * background sweep after a `retryable` failure or a timeout, retries under
+   * it, and only the issuer can know whether the first call landed.
+   * Initial value `[]`; append to what you are handed.
+   */
+  INVOICE_ISSUERS: 'invoice_issuers',
 } as const;
+
+/**
+ * One priced add-on on an order line — the SAME type that is stored as
+ * `OrderItem.addons`, so what a plugin returns and what an order freezes
+ * cannot drift apart.
+ */
+export type LineAddon = OrderLineAddon;
+
+/** Return shape of the {@link PLUGIN_HOOKS.ORDER_LINE_ADDONS} filter. */
+export type LineAddonsResult =
+  | { ok: true; addons: LineAddon[] }
+  | { ok: false; message: string; code?: string; params?: Record<string, string | number> };
 
 /** Return shape of the {@link PLUGIN_HOOKS.ORDER_LINE_EXTRAS} filter. */
 export type OrderLineExtras =
@@ -419,6 +570,30 @@ export class PluginManager {
         return acc;
       }
     }, value);
+  }
+
+  /**
+   * `applyFilters`, and whether any filter THREW.
+   *
+   * `applyFilters` isolates a throwing filter by carrying on with the value it
+   * was handed — which is the value a filter may already have mutated in place
+   * before throwing. A caller that must fail closed (money) needs to know a
+   * filter failed so it can discard the result instead.
+   */
+  applyFiltersReporting(hookName: string, value: any, ...args: any[]): { value: any; threw: boolean } {
+    const fns = this.filters.get(hookName);
+    if (!fns || !fns.length) return { value, threw: false };
+    let threw = false;
+    const out = fns.reduce((acc, fn) => {
+      try {
+        return fn(acc, ...args);
+      } catch (err) {
+        threw = true;
+        console.error(`Error in filter "${hookName}":`, err);
+        return acc;
+      }
+    }, value);
+    return { value: out, threw };
   }
 
   /**

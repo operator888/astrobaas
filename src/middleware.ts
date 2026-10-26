@@ -254,7 +254,7 @@ function loginRateCheck(ip: string, email: string): Promise<boolean> {
  * "why is your shop endpoint reachable on non-shops?".
  */
 const COMMERCE_API =
-  /^\/api\/(products|product-categories|product-bulk|brands|coupons|customers|orders|shipping-methods|payments|commerce)(\/|$)/;
+  /^\/api\/(products|product-categories|product-bulk|brands|coupons|customers|orders|shipping-methods|payments|commerce|invoice-records)(\/|$)/;
 
 /** Paths the public can read without a session. */
 const PUBLIC_API_GET = [
@@ -315,9 +315,21 @@ const PUBLIC_API_GET = [
   // Commerce catalog is public read; orders/customers are staff-only (PII).
   /^\/api\/products\/?$/,
   /^\/api\/products\/[^/]+$/,
+  // One product's availability. Public for the same reason the product is: the
+  // quantity it reports is the `stock` the product route already publishes.
+  /^\/api\/products\/[^/]+\/stock-status\/?$/,
+  // A product's APPROVED reviews and their aggregate (C-35). Public like the
+  // product itself; the route returns an allow-listed projection with no
+  // email, and 404s for an inactive product exactly as the product route does.
+  /^\/api\/products\/[^/]+\/reviews\/?$/,
   /^\/api\/brands\/?$/,
   /^\/api\/product-categories\/?$/,
   /^\/api\/payments\/?$/, // which payment methods this install offers
+  // A purchased file, for whoever holds the signed, expiring link: the token IS
+  // the credential (lib/commerce/download-entitlements.ts), as for a magic link.
+  // And the buyer's list of downloads, authorised by their receipt token.
+  /^\/api\/downloads\/?$/,
+  /^\/api\/downloads\/[^/]+$/,
   // A storefront must render shipping choices before checkout.
   /^\/api\/shipping-methods\/?$/,
   // The EU withdrawal notice is information a trader is REQUIRED to publish,
@@ -362,6 +374,13 @@ const PUBLIC_API_GET = [
   // everyone else. Without this a deploy script holding a valid HEALTH_TOKEN
   // would be refused by the middleware before its token was ever looked at.
   /^\/api\/health\/deep\/?$/,
+
+  // One invoice/credit-memo record as a PDF. Allow-listed so the BUYER can
+  // knock with the receipt token from their confirmation email, exactly as
+  // /receipt.pdf does; the handler admits staff or a token naming that
+  // record's order, and answers the same 404 to everything else. Exact shape,
+  // so nothing else under /api/invoice-records/ becomes public by accident.
+  /^\/api\/invoice-records\/[^/]+\/pdf$/,
 ];
 
 const AUTH_API = /^\/api\/auth\//;
@@ -389,6 +408,9 @@ const AUTH_API = /^\/api\/auth\//;
  */
 
 function isPublicApi(method: string, pathname: string): boolean {
+  // HEAD on a download link checks the link without counting a download
+  // (src/pages/api/downloads/[token].ts); link checkers send one first.
+  if (method === 'HEAD' && /^\/api\/downloads\/[^/]+$/.test(pathname)) return true;
   if (method !== 'GET') return false;
   if (PUBLIC_API_GET.some(rx => rx.test(pathname))) return true;
   // A plugin route that declared itself public. Consulted AFTER the core list,
@@ -411,6 +433,9 @@ const PUBLIC_API_WRITE = [
   // "Tell me when it's back" — the storefront's button on a sold-out product.
   // Public and rate-limited through the same gate as the newsletter box.
   /^\/api\/products\/[^/]+\/notify-me\/?$/,
+  // A product review (C-35). Through the same public gate, plus a proof of
+  // work that is ALWAYS required on this surface; lands pending.
+  /^\/api\/products\/[^/]+\/reviews\/?$/,
   // RFC 8058 one-click unsubscribe. The caller is Gmail's or Outlook's mail
   // infrastructure pressing the button shown at the top of a campaign message,
   // which has no session and no cookie. Authorised by the signed,
@@ -552,6 +577,10 @@ const CROSS_ORIGIN_PUBLIC_WRITE = [
   /^\/api\/contact\/?$/,
   /^\/api\/newsletter\/?$/,
   /^\/api\/products\/[^/]+\/notify-me\/?$/,
+  // The review form on a headless product page is the same cookie-less
+  // cross-origin POST. Leaving it off this list would ship a review endpoint
+  // that only same-origin pages can reach — the checkout defect again.
+  /^\/api\/products\/[^/]+\/reviews\/?$/,
   // ...and the form builder's own forms, which were the sibling left behind:
   // a `writable: 'public'` type posted from a headless site (a table request,
   // an RSVP, an enquiry) got `403 CSRF_FAILED`, and its file field with it.

@@ -85,9 +85,33 @@ check('both are PUBLIC to read and MODERATED to write', () => {
   // publishes spam on arrival; moderated and staff-only is a form nobody reads.
   for (const def of [B.COMMENT_TYPE, B.REVIEW_TYPE]) {
     eq(def.visibility, 'public', def.name);
-    eq(def.writable, 'public', def.name);
     eq(def.moderated, true, def.name);
   }
+  // Comments are posted through the generic content door. Reviews are NOT:
+  // their one public door is POST /api/products/{ref}/reviews, which knows the
+  // review belongs to a product (exists, takes reviews, proof of work, one per
+  // address). Leaving the generic door open beside it would make every one of
+  // those rules optional.
+  eq(B.COMMENT_TYPE.writable, 'public', 'comment');
+  eq(B.REVIEW_TYPE.writable, 'staff', 'review');
+});
+
+check('the email on a comment or a review is PRIVATE — never in a public read', () => {
+  for (const def of [B.COMMENT_TYPE, B.REVIEW_TYPE]) {
+    const f = def.fields.find((x) => x.name === 'author_email');
+    eq(f?.private, true, def.name);
+    const row = { id: 'x', data: { author_name: 'A', author_email: 'a@example.com', body: 'Hi there' } };
+    const anon = C.projectEntityForReader(def, row, false);
+    if ('author_email' in anon.data) throw new Error(`${def.name}: email in a public read`);
+    if (row.data.author_email !== 'a@example.com') throw new Error('the stored row was mutated');
+    const staff = C.projectEntityForReader(def, row, true);
+    eq(staff.data.author_email, 'a@example.com', 'staff still see it');
+  }
+  eq(C.canReadPrivateFields('admin'), true);
+  eq(C.canReadPrivateFields('editor'), true);
+  eq(C.canReadPrivateFields('author'), false);
+  eq(C.canReadPrivateFields('viewer'), false);
+  eq(C.canReadPrivateFields(undefined), false);
 });
 
 check('AN ERASED ORDER PROVES NOTHING — no lookup, no verified stamp', () => {
@@ -103,7 +127,7 @@ check('AN ERASED ORDER PROVES NOTHING — no lookup, no verified stamp', () => {
   // erased order is unreachable whatever address is offered.
   const erased = {
     number: 'A-1', email: 'erased+deadbeefdeadbeef@invalid', erased_at: '2026-09-02',
-    payment_status: 'paid', items: [{ product_id: 'p1' }],
+    payment_status: 'paid', status: 'completed', items: [{ product_id: 'p1' }],
   };
   if (L.findOrderForEmail([erased], 'A-1', erased.email)) throw new Error('its own token opened it');
   if (L.findOrderForEmail([erased], 'A-1', 'erased@erased.invalid')) throw new Error('the old constant opened it');
@@ -114,7 +138,7 @@ check('...while a real order is unaffected', () => {
   // The gate must not cost a genuine buyer their lookup or their stamp.
   const live = {
     number: 'A-2', email: 'maria@example.com',
-    payment_status: 'paid', items: [{ product_id: 'p1' }],
+    payment_status: 'paid', status: 'completed', items: [{ product_id: 'p1' }],
   };
   if (!L.findOrderForEmail([live], 'A-2', 'maria@example.com')) throw new Error('a real lookup broke');
   if (!L.boughtProduct([live], 'maria@example.com', 'p1')) throw new Error('a real buyer lost their stamp');
@@ -251,7 +275,7 @@ check('THE PRODUCT NODE emits a rating only when there is one', () => {
 // ───────────────────────────────────────────────── proving a purchase
 
 const ORDERS = [
-  { number: '1042', email: 'Anna@Example.GR', payment_status: 'paid', items: [{ product_id: 'p1' }] },
+  { number: '1042', email: 'Anna@Example.GR', payment_status: 'paid', status: 'processing', items: [{ product_id: 'p1' }] },
   { number: '1043', email: 'bo@example.gr', payment_status: 'unpaid', items: [{ product_id: 'p2' }] },
 ];
 

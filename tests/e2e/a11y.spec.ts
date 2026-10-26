@@ -23,32 +23,18 @@
  * so the gate is one a contributor can actually keep green.
  */
 import { test, expect, type Page } from '@playwright/test';
+import { adminLogin } from './lib/session';
 import AxeBuilder from '@axe-core/playwright';
 
-/** Must match ADMIN_PASSWORD in playwright.config.ts (see cms.spec.ts for why). */
-const ADMIN_PASSWORD = 'e2e-admin-not-the-default';
 const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
 
 /*
  * One real login, cookies reused: the login throttle allows ten sign-ins per
  * address per fifteen minutes, and one per test would trip it — correctly —
- * halfway through the admin pages.
+ * halfway through the admin pages. The session is the suite's shared one
+ * (lib/session.ts), so this file costs no sign-in of its own.
  */
-let cachedCookies: Awaited<ReturnType<ReturnType<Page['context']>['cookies']>> | null = null;
-async function login(page: Page) {
-  if (cachedCookies) {
-    await page.context().addCookies(cachedCookies);
-    await page.goto('/admin');
-    if (!page.url().includes('/login')) return;
-    cachedCookies = null;
-  }
-  await page.goto('/login');
-  await page.fill('input[name="email"]', 'admin@local');
-  await page.fill('input[name="password"]', ADMIN_PASSWORD);
-  await page.click('button[type="submit"]');
-  await page.waitForURL('**/admin');
-  cachedCookies = await page.context().cookies();
-}
+const login = (page: Page) => adminLogin(page);
 
 type Violation = Awaited<ReturnType<AxeBuilder['analyze']>>['violations'][number];
 

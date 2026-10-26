@@ -40,6 +40,7 @@ import type { Order } from '../../core/models';
 import { formatMoney } from './sale-notify';
 import { escapeHtml as esc } from '../escape-html';
 import { settingBool } from '../settings-map';
+import { lineAddonsForDisplay } from './line-addons-display';
 
 /** Settings keys, exported so the admin form and the reader cannot drift. */
 export const ORDER_EMAIL_KEYS = {
@@ -116,6 +117,14 @@ export interface ConfirmationOptions {
    * no link.
    */
   receiptLink?: string;
+  /**
+   * The order includes files to download. The email then says where they
+   * will be: on the receipt (`receiptLink#downloads`), once payment is
+   * confirmed. Never a download link itself — mail scanners fetch every link
+   * in a message, and a counted link would be spent before the buyer opened
+   * it (see lib/commerce/download-entitlements.ts).
+   */
+  hasDownloads?: boolean;
 }
 
 /**
@@ -146,7 +155,10 @@ export function buildOrderConfirmation(
     // A line total is preferred over a unit price: it is the number the customer
     // can add up and check against the total they were charged.
     const cents = Number(raw.total_cents ?? (Number(raw.price_cents ?? 0) * qty)) || 0;
-    return { qty, name, money: formatMoney(cents, currency) };
+    // Priced add-ons, already inside the line total; listed so the customer
+    // sees what they chose. The same reader as the receipt.
+    const addons = lineAddonsForDisplay(i as { addons?: unknown; qty?: unknown }, (c) => formatMoney(c, currency));
+    return { qty, name, money: formatMoney(cents, currency), addons };
   });
 
   /* ---- plain text ---- */
@@ -155,7 +167,10 @@ export function buildOrderConfirmation(
     ``,
     `Order ${number}`,
     ``,
-    ...items.map((i) => `  ${i.qty} × ${i.name} — ${i.money}`),
+    ...items.flatMap((i) => [
+      `  ${i.qty} × ${i.name} — ${i.money}`,
+      ...i.addons.map((a) => `      + ${a.label} — ${a.amount}`),
+    ]),
     ``,
     `Total: ${total}`,
     ``,
@@ -163,6 +178,10 @@ export function buildOrderConfirmation(
   ];
   if (instructions) {
     lines.push(``, `Payment details`, instructions, ``, `Reference: ${number}`);
+  }
+  const downloadsLine = 'Your downloads will be on your receipt page as soon as your payment is confirmed.';
+  if (opts.hasDownloads && opts.receiptLink) {
+    lines.push(``, downloadsLine, `Downloads: ${opts.receiptLink}#downloads`);
   }
   if (opts.receiptLink) {
     lines.push(``, `Your receipt: ${opts.receiptLink}`);
@@ -172,7 +191,9 @@ export function buildOrderConfirmation(
 
   /* ---- html ---- */
   const rows = items
-    .map((i) => `<tr><td>${esc(i.qty)} × ${esc(i.name)}</td><td align="right">${esc(i.money)}</td></tr>`)
+    .map((i) => `<tr><td>${esc(i.qty)} × ${esc(i.name)}`
+      + i.addons.map((a) => `<br><small>+ ${esc(a.label)} (${esc(a.amount)})</small>`).join('')
+      + `</td><td align="right">${esc(i.money)}</td></tr>`)
     .join('');
   const html = [
     `<p>Thank you for your order.</p>`,
@@ -193,6 +214,9 @@ export function buildOrderConfirmation(
       : '',
     // The token is already URL-encoded by `receiptUrl`; `esc` here is the HTML
     // escape on top of that, which is the correct pair for an href.
+    opts.hasDownloads && opts.receiptLink
+      ? `<p>${esc(downloadsLine)} <a href="${esc(`${opts.receiptLink}#downloads`)}">Your downloads</a></p>`
+      : '',
     opts.receiptLink ? `<p><a href="${esc(opts.receiptLink)}">View or print your receipt</a></p>` : '',
     opts.siteUrl ? `<p><a href="${esc(opts.siteUrl.replace(/\/$/, ''))}">${esc(shop)}</a></p>` : `<p>${esc(shop)}</p>`,
   ].join('\n');
@@ -238,6 +262,8 @@ export interface ConfirmationDeps {
    * means no budget, which is what the pure tests use.
    */
   allowSend?: (to: string) => Promise<boolean>;
+  /** Does the order include downloadable products? Absent = no. */
+  hasDownloads?: (order: Order) => Promise<boolean>;
 }
 
 /**
@@ -291,6 +317,7 @@ export async function sendOrderConfirmation(
         : undefined,
       instructions: deps.instructionsFor(String(order.payment_method ?? '')),
       subject: rendered?.subject,
+      hasDownloads: deps.hasDownloads ? await deps.hasDownloads(order).catch(() => false) : false,
     });
     if (!msg) return;
 

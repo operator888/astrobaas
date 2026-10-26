@@ -1,17 +1,25 @@
 ---
 import { resolveSuggestSettings } from '../../../lib/search/suggest-settings';
 import AdminLayout from '../../../layouts/AdminLayout.astro';
+import InvoiceSettings from '../../../components/admin/InvoiceSettings.astro';
 import { jsonForScript } from '../../../lib/json-in-html';
 import { LocalDB } from '../../../lib/localdb';
 import { emailChannelLabel } from '../../../lib/email';
 import { pagesOnly } from '../../../lib/post-kind';
 import { KNOWN_CRAWLERS_SEED } from '../../../lib/robots-txt';
 import { resolveOrderLimits, resolveCommerceEnabled, resolveShopCurrency, ORDER_LIMIT_BOUNDS } from '../../../lib/commerce-settings';
+import { resolveLowStockThreshold, LOW_STOCK_THRESHOLD_DEFAULT, LOW_STOCK_THRESHOLD_MAX } from '../../../lib/commerce/stock-status';
+import {
+  resolveDownloadSettings, DEFAULT_DOWNLOAD_EXPIRY_DAYS, DEFAULT_LINK_TTL_HOURS, MAX_LINK_TTL_HOURS,
+} from '../../../lib/commerce/download-entitlements';
+import { DOWNLOAD_LIMIT_MAX, DOWNLOAD_EXPIRY_DAYS_MAX } from '../../../lib/product-fields';
 import { resolveAbandonmentSettings, resolveRecoverySettings } from '../../../lib/commerce/abandonment';
 import {
   resolvePaymentHoldSettings, MIN_HOLD_MINUTES, MAX_HOLD_MINUTES, MAX_MAX_UNPAID,
 } from '../../../lib/commerce/payment-hold';
+import { resolveCheckoutTermsSettings, MAX_TERMS_LABEL_LENGTH, DEFAULT_TERMS_LABEL } from '../../../lib/commerce/checkout-terms';
 import { resolveCaptchaSurfaces } from '../../../lib/captcha';
+import { REVIEW_AUTO_APPROVE_SETTING } from '../../../lib/reviews';
 import {
   resolveSaleNotifySettings, SALE_NOTIFY_KEYS, MAX_SALE_RECIPIENTS,
 } from '../../../lib/commerce/sale-notify';
@@ -20,6 +28,7 @@ import { paymentConfigReport } from '../../../lib/payments/registry';
 import { returnUrlVerdict } from '../../../lib/payments/return-url-check';
 import { ANALYTICS_PROVIDERS, analyticsSettingKey, validateAnalyticsId } from '../../../lib/analytics';
 import { enabledAnalyticsIds } from '../../../lib/csp-config';
+import { ATTRIBUTION_SETTING, ATTRIBUTION_MAX_AGE_DAYS } from '../../../lib/commerce/attribution';
 import { isStagingEnv } from '../../../lib/indexing';
 import { PRINT_BUTTON_SETTING, printButtonEnabled } from '../../../lib/print-view';
 import { POPUP_KEYS, POPUP_TRIGGERS, resolvePopup } from '../../../lib/popups';
@@ -54,6 +63,8 @@ const values = {
   default_body_post: map.default_body_post ?? '',
   comments_enabled: settingBool(map.comments_enabled, false),
   reviews_enabled: settingBool(map.reviews_enabled, false),
+  // The key comes from lib/reviews.ts, which is what the review route reads.
+  reviews_auto_approve_verified: settingBool(map[REVIEW_AUTO_APPROVE_SETTING], false),
   editorial_review_required: settingBool(map.editorial_review_required, false),
   author_archives_enabled: settingBool(map.author_archives_enabled, false),
   default_body_page: map.default_body_page ?? '',
@@ -70,6 +81,14 @@ const values = {
   // that will actually be used — including the recovery delay, which is clamped
   // below the cancellation deadline and would otherwise display a value the
   // scheduler quietly ignores.
+  // Through the resolver the badge uses, so the box shows the level shoppers
+  // are actually told about.
+  inventory_low_stock_threshold_qty: resolveLowStockThreshold(map),
+  // Through the resolver the grant uses, so the boxes show what a new
+  // entitlement will actually get.
+  downloads_limit_default: resolveDownloadSettings(map).limit,
+  downloads_expiry_days_default: resolveDownloadSettings(map).expiryDays,
+  downloads_link_ttl_hours: resolveDownloadSettings(map).linkTtlHours,
   orders_abandon_enabled: map.orders_abandon_enabled,
   orders_abandon_after_days: resolveAbandonmentSettings(map).days,
   orders_recovery_enabled: map.orders_recovery_enabled,
@@ -80,6 +99,13 @@ const values = {
   orders_max_unpaid_per_buyer: resolvePaymentHoldSettings(map).maxUnpaidPerBuyer,
   orders_risk_hold_enabled: resolvePaymentHoldSettings(map).riskHold.enabled,
   orders_risk_hold_score: resolvePaymentHoldSettings(map).riskHold.score,
+  // Through the resolver the checkout route reads, so the form shows what a
+  // storefront will be told — including the default label.
+  checkout_terms_required: resolveCheckoutTermsSettings(map).required,
+  // The STORED text, not the resolved one: saving the form must not freeze the
+  // English default into a shop whose storefront is not English.
+  checkout_terms_label: typeof map.checkout_terms_label === 'string' ? map.checkout_terms_label : '',
+  checkout_terms_url: resolveCheckoutTermsSettings(map).url ?? '',
   payment_instructions_bank_transfer: map.payment_instructions_bank_transfer ?? '',
   payment_instructions_cod: map.payment_instructions_cod ?? '',
   posts_per_page: map.posts_per_page ?? 10,
@@ -164,6 +190,10 @@ const analyticsRows = ANALYTICS_PROVIDERS.map((p) => {
     allowedByCsp: cspAnalyticsIds.includes(p.id),
   };
 });
+
+// Campaign attribution: the merchant's switch, read the way checkout reads it
+// (ON unless switched off). Each visitor's marketing consent still decides.
+const attributionOn = settingBool(map[ATTRIBUTION_SETTING], true);
 
 const withdrawal = resolveWithdrawalPolicy(map);
 const withdrawalMissing = missingTraderFields(withdrawal);
@@ -263,6 +293,7 @@ const emailTransport = emailChannelLabel();
             <li><a href="#set-shop" class="text-sm text-gray-600 hover:text-blue-700">Selling</a></li>
             <li><a href="#set-orderlimits" class="text-sm text-gray-600 hover:text-blue-700">Order limits</a></li>
             <li><a href="#set-payments" class="text-sm text-gray-600 hover:text-blue-700">Payment providers</a></li>
+            <li><a href="#set-invoices" class="text-sm text-gray-600 hover:text-blue-700">Invoices</a></li>
             <li><a href="#set-salenotify" class="text-sm text-gray-600 hover:text-blue-700">New-sale notifications</a></li>
             <li><a href="#set-withdrawal" class="text-sm text-gray-600 hover:text-blue-700">Right of withdrawal (EU)</a></li>
           </ul>
@@ -546,6 +577,17 @@ const emailTransport = emailChannelLabel();
           <p class="mt-1 ml-6 text-xs text-gray-500">
             Also moderated. A review by somebody who actually paid for that product is marked as a
             verified purchase — that mark is set by the server and cannot be sent by the reviewer.
+            Moderate them under <a href="/admin/reviews" class="text-blue-700 hover:underline">Reviews</a>.
+          </p>
+          <label class="flex items-center gap-2 text-sm text-gray-700 mt-3 ml-6">
+            <input type="checkbox" id="reviews_auto_approve_verified" name="reviews_auto_approve_verified"
+              checked={values.reviews_auto_approve_verified === true} class="rounded border-gray-300" />
+            Publish a verified buyer's review without waiting for approval
+          </label>
+          <p class="mt-1 ml-6 text-xs text-gray-500">
+            Off by default. “Verified” means the email address typed into the form has a paid order
+            for the product — not that the person typing owns that address. A review the spam check
+            flags is held either way.
           </p>
         </div>
         <div>
@@ -1117,6 +1159,47 @@ const emailTransport = emailChannelLabel();
       </div>
 
       <div>
+        <h2 class="text-lg font-semibold text-gray-900">Terms &amp; Conditions at checkout</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          Record that the customer agreed to your terms before the order was placed. The box itself
+          is drawn by your storefront or theme; the shop stores the answer and the time it was given
+          on the order.
+        </p>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <div class="sm:col-span-2">
+          <label class="flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" name="checkout_terms_required" value="true"
+              checked={values.checkout_terms_required}
+              class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+            <span class="text-sm font-medium text-gray-700">Refuse orders where the customer has not agreed to the terms</span>
+          </label>
+          <p class="text-xs text-gray-500 mt-1 ml-7">
+            Off by default. Switch it on only once your storefront shows the box and sends
+            <code>terms_accepted</code> &mdash; until then every checkout would be refused. Orders you
+            place yourself from the admin are never refused.
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="checkout_terms_label">Checkbox text</label>
+          <input id="checkout_terms_label" name="checkout_terms_label" type="text"
+            maxlength={MAX_TERMS_LABEL_LENGTH}
+            placeholder={DEFAULT_TERMS_LABEL}
+            value={values.checkout_terms_label}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          <p class="text-xs text-gray-500 mt-1">Plain text, no HTML. Left empty, storefronts show &ldquo;{DEFAULT_TERMS_LABEL}&rdquo;.</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" for="checkout_terms_url">Link to the full terms</label>
+          <input id="checkout_terms_url" name="checkout_terms_url" type="text"
+            placeholder="/terms-and-conditions"
+            value={values.checkout_terms_url}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg" />
+          <p class="text-xs text-gray-500 mt-1">A page on this site (starting with /) or an https:// address.</p>
+        </div>
+      </div>
+
+      <div>
         <h2 class="text-lg font-semibold text-gray-900">Order limits</h2>
         <p class="text-sm text-gray-500 mt-1">
           Checkout is public, so these caps bound what a single anonymous request can
@@ -1159,6 +1242,62 @@ const emailTransport = emailChannelLabel();
             Distinct products in one order. Default 50
             (allowed {ORDER_LIMIT_BOUNDS.maxItemsPerOrder.min}–{ORDER_LIMIT_BOUNDS.maxItemsPerOrder.max}).
           </p>
+        </div>
+      </div>
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Inventory</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          Shoppers see "In stock", "Low stock" or "Out of stock" on every product.
+        </p>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <div>
+          <label for="inventory_low_stock_threshold_qty" class="block text-sm font-medium text-gray-700 mb-1">
+            Low stock threshold (units)
+          </label>
+          <input
+            id="inventory_low_stock_threshold_qty"
+            name="inventory_low_stock_threshold_qty"
+            type="number"
+            min="0"
+            max={LOW_STOCK_THRESHOLD_MAX}
+            value={values.inventory_low_stock_threshold_qty}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <p class="text-xs text-gray-500 mt-1">
+            A product with this many units or fewer reads "Low stock". Default {LOW_STOCK_THRESHOLD_DEFAULT};
+            0 never shows it. A product can set its own level in its editor.
+          </p>
+        </div>
+      </div>
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Downloads</h2>
+        <p class="text-sm text-gray-500 mt-1">
+          Buyers of downloadable products get signed, expiring links on their receipt once the order is paid.
+          A product can override the limit and the expiry in its editor.
+        </p>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-6">
+        <div>
+          <label for="downloads_limit_default" class="block text-sm font-medium text-gray-700 mb-1">Downloads per file</label>
+          <input id="downloads_limit_default" name="downloads_limit_default" type="number" min="0" max={DOWNLOAD_LIMIT_MAX}
+            value={values.downloads_limit_default}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          <p class="text-xs text-gray-500 mt-1">How often a buyer may download EACH file. 0 = unlimited (the default).</p>
+        </div>
+        <div>
+          <label for="downloads_expiry_days_default" class="block text-sm font-medium text-gray-700 mb-1">Access lasts (days)</label>
+          <input id="downloads_expiry_days_default" name="downloads_expiry_days_default" type="number" min="0" max={DOWNLOAD_EXPIRY_DAYS_MAX}
+            value={values.downloads_expiry_days_default}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          <p class="text-xs text-gray-500 mt-1">From payment. Default {DEFAULT_DOWNLOAD_EXPIRY_DAYS}; 0 = never expires.</p>
+        </div>
+        <div>
+          <label for="downloads_link_ttl_hours" class="block text-sm font-medium text-gray-700 mb-1">Each link works for (hours)</label>
+          <input id="downloads_link_ttl_hours" name="downloads_link_ttl_hours" type="number" min="1" max={MAX_LINK_TTL_HOURS}
+            value={values.downloads_link_ttl_hours}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          <p class="text-xs text-gray-500 mt-1">Default {DEFAULT_LINK_TTL_HOURS}. The receipt mints fresh links each time it is opened.</p>
         </div>
       </div>
       <div class="flex justify-end">
@@ -1218,6 +1357,8 @@ const emailTransport = emailChannelLabel();
       </p>
     </section>
     </div>
+
+    <InvoiceSettings settings={map} />
 
     <div id="set-salenotify" class="scroll-mt-20">
     <!-- New-sale notifications -->
@@ -1423,6 +1564,21 @@ const emailTransport = emailChannelLabel();
             </p>
           </div>
         ))}
+      </div>
+
+      <div class="border-t border-gray-100 pt-5">
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="checkbox" name={ATTRIBUTION_SETTING} value="true" checked={attributionOn}
+            class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+          <span class="text-sm font-medium text-gray-700">Credit orders to the campaign that brought the customer</span>
+          <span class="text-xs px-2 py-0.5 rounded-full bg-orange-100 text-orange-800">marketing consent</span>
+        </label>
+        <p class="text-xs text-gray-500 mt-1 ml-7">
+          Keeps the <code>utm_*</code> tags and ad click ids (gclid, fbclid, msclkid) of a visitor's landing
+          page in a first-party cookie for {ATTRIBUTION_MAX_AGE_DAYS} days and puts them on the order — only for
+          visitors who allowed marketing cookies. Nothing is sent to an ad platform (it is part of the order, so it appears in exports and order webhooks). See Insights → Where paid orders
+          came from. Needs the shop to be on.
+        </p>
       </div>
 
       <div class="flex justify-end">
@@ -2001,6 +2157,8 @@ const emailTransport = emailChannelLabel();
     // provider catalogue here — adding a connector must not require editing
     // two places that can silently disagree.
     const keys = [...e.target.querySelectorAll('input[name^="analytics_"]')].map((el) => el.name);
+    // The one control on this form that is not a connector id.
+    keys.push('attribution_enabled');
     save(e.target, keys);
   });
   document.getElementById('shop-toggle-form')?.addEventListener('submit', (e) => {
@@ -2360,10 +2518,13 @@ const emailTransport = emailChannelLabel();
   document.getElementById('commerce-form')?.addEventListener('submit', (e) => {
     e.preventDefault();
     save(e.target, ['shop_currency', 'order_max_qty_per_product', 'order_max_items_per_order',
+      'inventory_low_stock_threshold_qty',
+      'downloads_limit_default', 'downloads_expiry_days_default', 'downloads_link_ttl_hours',
       'orders_abandon_enabled', 'orders_abandon_after_days',
       'orders_recovery_enabled', 'orders_recovery_after_hours',
       'orders_payment_hold_minutes', 'orders_max_unpaid_per_buyer',
-      'orders_risk_hold_enabled', 'orders_risk_hold_score']);
+      'orders_risk_hold_enabled', 'orders_risk_hold_score',
+      'checkout_terms_required', 'checkout_terms_label', 'checkout_terms_url']);
   });
   document.getElementById('captcha-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -2383,6 +2544,6 @@ const emailTransport = emailChannelLabel();
   });
   document.getElementById('reading-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    save(e.target, ['posts_per_page', 'feed_items', 'feed_format', 'discourage_indexing', 'toc_min_headings', 'related_posts_count', 'robots_txt', 'link_check_external', 'search_synonyms', 'search_suggestions_enabled', 'search_suggestions_limit', 'search_popular_enabled', 'search_popular_min_count', 'search_popular_blocklist', 'default_body_post', 'default_body_page', 'comments_enabled', 'reviews_enabled', 'editorial_review_required', 'author_archives_enabled', 'print_button', 'popup_enabled', 'popup_title', 'popup_text', 'popup_button_label', 'popup_button_url', 'popup_trigger', 'popup_delay_seconds', 'popup_scroll_percent', 'popup_frequency_days']);
+    save(e.target, ['posts_per_page', 'feed_items', 'feed_format', 'discourage_indexing', 'toc_min_headings', 'related_posts_count', 'robots_txt', 'link_check_external', 'search_synonyms', 'search_suggestions_enabled', 'search_suggestions_limit', 'search_popular_enabled', 'search_popular_min_count', 'search_popular_blocklist', 'default_body_post', 'default_body_page', 'comments_enabled', 'reviews_enabled', 'reviews_auto_approve_verified', 'editorial_review_required', 'author_archives_enabled', 'print_button', 'popup_enabled', 'popup_title', 'popup_text', 'popup_button_label', 'popup_button_url', 'popup_trigger', 'popup_delay_seconds', 'popup_scroll_percent', 'popup_frequency_days']);
   });
 </script>

@@ -21,7 +21,7 @@
  *
  * Run with:  node tests/capabilities.test.mjs
  */
-import { loadTs } from './lib/load.mjs';
+import { loadTs, readRepo } from './lib/load.mjs';
 
 const C = await loadTs('src/lib/capabilities.ts');
 const A = await loadTs('src/lib/auth.ts');
@@ -92,6 +92,55 @@ check('the two deliberate oddities survived the extraction', () => {
   // it rewrites site-wide redirects, and nobody can un-import a site.
   eq(C.hasCapability('editor', 'import_content'), false);
 });
+
+check('canSeeUnpublishedProducts: the staff view of the catalogue is manage_catalog, nothing else', () => {
+  // Drafts/archived on GET /api/products(?all=true) and GET /api/products/{ref}.
+  for (const role of ROLES) {
+    eq(A.canSeeUnpublishedProducts({ id: 'u', role }), C.hasCapability(role, 'manage_catalog'), `canSeeUnpublishedProducts(${role})`);
+  }
+  // A bearer key carries its own role in the same shape.
+  eq(A.canSeeUnpublishedProducts({ id: 'apikey:k', role: 'editor' }), true);
+  eq(A.canSeeUnpublishedProducts({ id: 'apikey:k', role: 'viewer' }), false);
+  // Anonymous, or a scoped key the middleware downgraded to anonymous.
+  eq(A.canSeeUnpublishedProducts(null), false);
+  eq(A.canSeeUnpublishedProducts(undefined), false);
+});
+
+check('includesUnpublishedProducts: staff AND an explicit ?all=true', () => {
+  const ed = { id: 'apikey:k', role: 'editor' };
+  const P = (q) => new URLSearchParams(q);
+  eq(A.includesUnpublishedProducts(ed, P('all=true')), true);
+  eq(A.includesUnpublishedProducts(ed, P('all=1')), true, 'the typed client sends booleans as 1');
+  // A storefront calling with a staff-role key and no opt-in gets the public view.
+  eq(A.includesUnpublishedProducts(ed, P('')), false);
+  eq(A.includesUnpublishedProducts(ed, P('all=false')), false);
+  eq(A.includesUnpublishedProducts({ id: 'u', role: 'viewer' }, P('all=true')), false);
+  eq(A.includesUnpublishedProducts(null, P('all=true')), false);
+});
+
+// Both product read routes must ask the SAME helpers. The single-product route
+// used to have its own `status !== 'active'` 404 that ignored staff, so the
+// admin editor could not open a draft that the list showed it.
+{
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  for (const rel of ['src/pages/api/products/index.ts', 'src/pages/api/products/[id].ts']) {
+    const src = strip(await readRepo(rel));
+    check(`${rel} decides the staff view through the shared helpers`, () => {
+      eq(/const isStaff = canSeeUnpublishedProducts\(locals\.user\);/.test(src), true);
+      eq(/includesUnpublishedProducts\(locals\.user, /.test(src), true);
+      eq(/canManageCatalog\(locals\.user/.test(src), false, 'a second inline definition');
+      eq(/get\('all'\)/.test(src), false, 'a second reading of ?all');
+    });
+  }
+  const one = strip(await readRepo('src/pages/api/products/[id].ts'));
+  check('GET /api/products/{ref} 404s a non-active product unless staff opted in', () => {
+    eq(/if \(!product \|\| \(product\.status !== 'active' && !includesUnpublishedProducts\(locals\.user, url\.searchParams\)\)\)/.test(one), true);
+  });
+  const editor = await readRepo('src/pages/admin/products.astro');
+  check('the admin editor opts in when it loads a product', () => {
+    eq(/api\.get\(`\/api\/products\/\$\{edit\.dataset\.id\}\?all=true`\)/.test(editor), true);
+  });
+}
 
 check('an unknown role has nothing', () => {
   for (const cap of C.CAPABILITIES) eq(C.hasCapability('superuser', cap), false);

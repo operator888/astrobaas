@@ -21,6 +21,8 @@
  */
 import type { Product, ProductCategory } from '../../core/models';
 import { brandMatches, type BrandDirectory } from './brand';
+import { isVariable } from './variants';
+import { productStockStatus } from './stock-status';
 
 /**
  * How a rule's brand VALUE is resolved: the directory `GET /api/brands` and
@@ -76,6 +78,17 @@ function readField(product: Product, field: string): unknown {
     // rather than special-casing each one is what lets a shop segment on
     // "material = titanium" without anybody adding a column.
     return (product.custom ?? {})[field.slice('custom.'.length)];
+  }
+  // A grouped product's stored price and stock are forced to nothing (its
+  // "from" price is derived on read from members this rule cannot see), so a
+  // price or stock rule has no value to compare: unusable, which reads false —
+  // otherwise "under €50" would collect every group at its stored €0.
+  if (product.type === 'grouped' && NUMERIC_FIELDS.has(field)) return undefined;
+  // `in_stock` is a stored flag that follows the product's OWN count, which a
+  // product with variants does not sell from. Read the counts instead.
+  if (field === 'in_stock') {
+    if (isVariable(product)) return productStockStatus(product, 0).status !== 'out-of-stock';
+    if (typeof product.stock === 'number') return product.stock > 0;
   }
   return (product as unknown as Record<string, unknown>)[field];
 }

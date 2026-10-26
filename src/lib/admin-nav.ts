@@ -27,6 +27,7 @@
 
 import { canOpenAdminPage } from './admin-access';
 import { getContentTypes } from '../core/content-types';
+import { REVIEWS_TYPE } from '../core/builtin-collections';
 import type { Role } from '../core/models';
 
 export interface NavItem {
@@ -131,14 +132,22 @@ export function navFor(role: Role | undefined): NavGroup[] {
  * shown to someone who would be bounced for clicking it.
  */
 export function contentTypeNavFor(role: Role | undefined): { href: string; label: string }[] {
-  if (!canOpenAdminPage('/admin/content', role)) return [];
   return getContentTypes()
     .map((def) => ({
-      href: `/admin/content/${encodeURIComponent(def.name)}`,
+      // Product reviews have their own queue (product names, stars, verified
+      // badges, bulk moderation), so their link goes there rather than to the
+      // generic table — which still works, and is one click from it.
+      href: def.name === REVIEWS_TYPE ? REVIEW_QUEUE_HREF : `/admin/content/${encodeURIComponent(def.name)}`,
       label: def.labelPlural || `${def.label}s`,
     }))
+    // Per LINK, through the same rule the middleware enforces: the review
+    // queue is open to a manager, the generic content screens are not.
+    .filter((item) => canOpenAdminPage(item.href, role))
     .sort((a, b) => a.label.localeCompare(b.label));
 }
+
+/** Where the review collection's sidebar link goes. */
+export const REVIEW_QUEUE_HREF = '/admin/reviews';
 
 /**
  * Longest-prefix match for the active link, with `/admin` matched EXACTLY.
