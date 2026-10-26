@@ -74,6 +74,8 @@ export const AUDIT = {
   MEDIA_REPLACE: 'media.replace',
   PRIVACY_EXPORT: 'privacy.subject.export',
   PRIVACY_ERASE: 'privacy.subject.erase',
+  /** An administrator withdrew a person's consent from the consent ledger screen. */
+  CONSENT_WITHDRAW: 'privacy.consent.withdraw',
   CONTENT_IMPORT: 'content.import',
   POST_CREATE: 'post.create',
   POST_DUPLICATE: 'post.duplicate',

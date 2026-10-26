@@ -45,7 +45,8 @@ import {
   isRoutableClientIp, ipWindowMs,
 } from './commerce/payment-hold'
 import { resolveAbandonmentSettings } from './commerce/abandonment'
-import { normalizeCouponCode } from './commerce/coupons'
+import { normalizeCouponCode, refusalCodeFor } from './commerce/coupons'
+import { claimOptionsFor, couponEmailKey } from './commerce/coupon-service'
 import { resolvePurchasable, explainResolveFailure, variantAvailability, isVariable } from './commerce/variants'
 import { groupsContaining, isGrouped, memberIdsOf, readGroup, validateGroupMembers } from './commerce/grouped'
 import {
@@ -115,6 +116,8 @@ const err = (
 function couponRefusal(message: string, reason: string, shortfall?: number): ServiceErr {
   return err(400, message, undefined, 'checkout.coupon_invalid', {
     reason,
+    // The contract's stable code for the same reason, as the quote reports it.
+    refusal: refusalCodeFor(reason),
     ...(typeof shortfall === 'number' ? { shortfall_cents: shortfall } : {}),
   })
 }
@@ -1399,17 +1402,18 @@ export async function placeOrder(input: {
 
   // Stock already taken, so it can be handed back if a later line fails.
   const reserved: Array<{ product_id: string; qty: number; variant_id?: string }> = []
-  // A coupon use already counted (claimCouponUse), handed back the same way.
-  let couponClaimed: string | null = null
+  // A coupon use already counted (claimCouponUse), handed back the same way —
+  // with the buyer's per-email count when that was counted too.
+  let couponClaimed: { id: string; emailKey?: string } | null = null
   const rollback = async () => {
     for (const r of reserved) {
       await LocalDB.releaseStock(r.product_id, r.qty, { variantId: r.variant_id ?? null }).catch(() => {})
     }
     reserved.length = 0
     if (couponClaimed) {
-      const id = couponClaimed
+      const held = couponClaimed
       couponClaimed = null
-      await LocalDB.releaseCouponUse(id).catch(() => {})
+      await LocalDB.releaseCouponUse(held.id, held.emailKey ? { emailKey: held.emailKey } : {}).catch(() => {})
     }
   }
 
@@ -1638,8 +1642,11 @@ export async function placeOrder(input: {
     }
 
     // One priced line per item, in order — checked before anything is frozen.
-    if (priced.totals.lines.length !== pending.length
-      || priced.totals.lines.some((l, i) => l.product_id !== pending[i].product_id)) {
+    // A gift_product coupon adds ONE more, always last (giftLineIndex).
+    const giftIndex = priced.giftLineIndex
+    if (priced.totals.lines.length !== pending.length + (giftIndex === null ? 0 : 1)
+      || (giftIndex !== null && giftIndex !== pending.length)
+      || pending.some((p, i) => priced.totals.lines[i].product_id !== p.product_id)) {
       await rollback()
       return err(500, 'Pricing did not return one line per item')
     }
@@ -1655,6 +1662,32 @@ export async function placeOrder(input: {
     if (priced.coupon && !priced.coupon.ok) {
       await rollback()
       return couponRefusal(priced.coupon.message, priced.coupon.reason, priced.coupon.shortfall_cents)
+    }
+
+    /*
+     * The GIFT's unit, taken by the same atomic reserve as every other line
+     * and handed back by the same rollback. Pricing saw a unit free; the
+     * reserve is what makes it true. No backorder: a gift the shop does not
+     * have is refused as the coupon's own refusal, never shipped "later".
+     */
+    // A coupon lost between pricing and placing. A code the buyer TYPED is
+    // their refusal to read; an AUTOMATIC rule they never typed means the
+    // total they were quoted no longer exists — a conflict to re-quote, not
+    // their error.
+    const couponLost = (message: string, reason: string): ServiceErr =>
+      normalizeCouponCode(input.coupon_code)
+        ? couponRefusal(message, reason)
+        : err(409, 'A promotion in your basket is no longer available. Please review the total and try again.',
+          undefined, 'checkout.promotion_unavailable')
+
+    if (giftIndex !== null) {
+      const g = priced.totals.lines[giftIndex]
+      if (!(await LocalDB.reserveStock(g.product_id, 1, { variantId: null }))) {
+        await rollback()
+        return couponLost('The gift that comes with this code is not available right now.', 'gift-unavailable')
+      }
+      reserved.push({ product_id: g.product_id, qty: 1 })
+      pending.push({ product_id: g.product_id, name: g.name, qty: 1, coupon_gift: true })
     }
 
     /*
@@ -1782,6 +1815,10 @@ export async function placeOrder(input: {
     // Invoice records are written only by invoice-records.ts, from the order
     // as charged. A new order has none, whatever a filter put on it.
     delete (draft as Partial<Order>).invoice_records
+    // Likewise the coupon use it holds: only the claim below records one. A
+    // filter-supplied one would let a cancellation hand back a use this order
+    // never took.
+    delete (draft as Partial<Order>).coupon_redemption
 
     // Guard the invariant a filter might have broken. NOT a plain line-sum any
     // more: the total legitimately includes shipping and tax, so it is checked
@@ -1856,17 +1893,31 @@ export async function placeOrder(input: {
      */
     if (priced.coupon?.ok) {
       const c = priced.coupon.coupon
-      if (!(await LocalDB.claimCouponUse(c.id))) {
+      // The per-email count rides in the SAME atomic claim when the coupon
+      // limits uses per email (claimOptionsFor), so one buyer's two
+      // concurrent checkouts cannot both pass a one-per-customer code.
+      // Only for a TYPED code: pricing does not judge per-customer limits for
+      // an automatic rule (it would scan orders on every cart change), and a
+      // claim that enforced one the quote never checked would refuse a
+      // buyer's second checkout forever while every re-quote still offered it.
+      const claim: { emailKey?: string; perEmailLimit?: number } =
+        normalizeCouponCode(input.coupon_code) ? claimOptionsFor(c, input.email) : {}
+      if (!(await LocalDB.claimCouponUse(c.id, claim))) {
         await rollback()
-        if (normalizeCouponCode(input.coupon_code)) {
-          return couponRefusal('That code has reached its usage limit.', 'usage-limit-reached')
-        }
-        // An AUTOMATIC rule the buyer never typed: the total they were quoted
-        // no longer exists, which is a conflict to re-quote, not their error.
-        return err(409, 'A promotion in your basket is no longer available. Please review the total and try again.',
-          undefined, 'checkout.promotion_unavailable')
+        // Which limit was hit, for the buyer's sentence: their own (or a code
+        // only they could use), or everyone's.
+        const now = (await LocalDB.getCoupons()).find((x) => x.id === c.id)
+        const mine = claim.emailKey ? Number(now?.redemptions_by_email?.[claim.emailKey]) || 0 : 0
+        const own = !!c.email || (claim.perEmailLimit != null && mine >= claim.perEmailLimit)
+        return own
+          ? couponLost('You have already used that code.', 'customer-limit-reached')
+          : couponLost('That code has reached its usage limit.', 'usage-limit-reached')
       }
-      couponClaimed = c.id
+      couponClaimed = { id: c.id, ...(claim.emailKey ? { emailKey: claim.emailKey } : {}) }
+      // Recorded on the order in the same write that creates it, so a
+      // cancellation before payment can hand back exactly this use (and this
+      // buyer's count) — see releaseOrderCoupon.
+      draft.coupon_redemption = { coupon_id: c.id, ...(claim.emailKey ? { email_key: claim.emailKey } : {}) }
     }
 
     // Attach/create the customer record.
@@ -1901,6 +1952,17 @@ export async function placeOrder(input: {
 
     pluginManager.doAction(PLUGIN_HOOKS.AFTER_ORDER_CREATE, order)
     fireEvent('order.created', order).catch(() => {})
+    if (order.coupon_redemption && order.coupon_code) {
+      // The buyer as a HASH (couponEmailKey), never the address: a webhook
+      // receiver that knows the address can match it, and one that does not
+      // learns nothing it should not.
+      fireEvent('coupon.redeemed', {
+        code: order.coupon_code,
+        coupon_id: order.coupon_redemption.coupon_id,
+        order_id: order.id,
+        email_hash: couponEmailKey(order.email),
+      }).catch(() => {})
+    }
     // Tell the owner. Fire-and-forget for the same reason as the line above:
     // the order is already committed, and a mail server having a bad afternoon
     // must not turn a completed sale into a 500.
@@ -1926,6 +1988,29 @@ export const STOCK_RELEASED_STATUSES: OrderStatus[] = ['cancelled', 'refunded']
 
 export function releasesStock(status: OrderStatus): boolean {
   return STOCK_RELEASED_STATUSES.includes(status)
+}
+
+/**
+ * What a status move does to the coupon use an order holds.
+ *
+ * `release`: entering `cancelled` while the order is NOT paid (payment status
+ * anything but `paid`/`refunded`) — the buyer never had the discount, so the
+ * use goes back and a one-use code works again. A refund, or a cancellation
+ * after payment, keeps the use: the discount was had.
+ *
+ * `recount`: leaving cancelled/refunded when an earlier cancellation released
+ * the use — the order is live again with its discount, so it is counted again.
+ *
+ * The rule is stated in ONE place so the docs, the tests and both branches of
+ * setOrderStatus ask the same question.
+ */
+export function couponMove(order: Pick<Order, 'status' | 'payment_status' | 'coupon_redemption'>, next: OrderStatus): 'release' | 'recount' | null {
+  const r = order.coupon_redemption
+  if (!r || typeof r.coupon_id !== 'string' || !r.coupon_id) return null
+  const paid = order.payment_status === 'paid' || order.payment_status === 'refunded'
+  if (next === 'cancelled' && !releasesStock(order.status) && !r.released_at && !paid) return 'release'
+  if (releasesStock(order.status) && !releasesStock(next) && r.released_at) return 'recount'
+  return null
 }
 
 export interface SetOrderStatusOptions {
@@ -2042,11 +2127,26 @@ export async function setOrderStatus(
     const previous = existing.status
     if (previous === status) return { ok: true, value: existing }
 
-    const guard = opts.when ? { paymentStatus: existing.payment_status ?? null } : undefined
+    // The coupon use this order holds goes back only on a cancellation BEFORE
+    // PAYMENT, and comes back (counted again) when that cancellation is undone.
+    // See couponMove below and the rule in commerce/coupon-service.ts.
+    const coupon = couponMove(existing, status)
+    // A release depends on the order being unpaid, so the payment status it
+    // was decided on is pinned in the write: a payment landing in between
+    // makes this request lose and decide again, rather than hand back the use
+    // of a code a paid order took.
+    const guard = opts.when || coupon === 'release' ? { paymentStatus: existing.payment_status ?? null } : undefined
     // See SetOrderStatusOptions.cancelledReason. Leaving cancelled/refunded
     // removes the reason; entering them sets this move's own, or none.
     const set: Partial<Order> | undefined = releasesStock(previous) !== releasesStock(status)
-      ? { cancelled_reason: releasesStock(status) ? opts.cancelledReason : undefined }
+      ? {
+          cancelled_reason: releasesStock(status) ? opts.cancelledReason : undefined,
+          ...(coupon === 'release'
+            ? { coupon_redemption: { ...existing.coupon_redemption!, released_at: new Date().toISOString() } }
+            : coupon === 'recount'
+              ? { coupon_redemption: { coupon_id: existing.coupon_redemption!.coupon_id, ...(existing.coupon_redemption!.email_key ? { email_key: existing.coupon_redemption!.email_key } : {}) } }
+              : {}),
+        }
       : undefined
 
     // Every stock call carries the line's variant, so stock returns to (and is
@@ -2089,6 +2189,12 @@ export async function setOrderStatus(
         await giveBack()
         continue
       }
+      if (coupon === 'recount') {
+        // Counted again WITHOUT a limit check: the order exists with its
+        // discount whatever happened to the code since it was handed back.
+        const r = existing.coupon_redemption!
+        await LocalDB.claimCouponUse(r.coupon_id, { force: true, ...(r.email_key ? { emailKey: r.email_key } : {}) }).catch(() => {})
+      }
       return await statusChanged(updated, previous, actor)
     }
 
@@ -2103,6 +2209,12 @@ export async function setOrderStatus(
         await LocalDB.releaseStock(line.product_id, line.qty, {
           variantId: line.variant_id ?? null,
         }).catch(() => {})
+      }
+      // And the coupon use, once, by the same winner: `released_at` landed in
+      // the same write as the status, so no later request can release it again.
+      if (coupon === 'release') {
+        const r = existing.coupon_redemption!
+        await LocalDB.releaseCouponUse(r.coupon_id, r.email_key ? { emailKey: r.email_key } : {}).catch(() => {})
       }
     }
     return await statusChanged(updated, previous, actor)

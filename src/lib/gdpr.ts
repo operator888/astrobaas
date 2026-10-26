@@ -53,7 +53,8 @@ import { statusOf } from '../core/moderation';
 import {
   REVIEWS_TYPE, reviewsByEmail, anonymisedReviewPatch, announceReviewRemoved, type ReviewRow,
 } from './reviews';
-import type { ContactMessage, Customer, EmailLogEntry, Order, Subscriber, User } from '../core/models';
+import type { ConsentLedgerRow, ContactMessage, Customer, EmailLogEntry, Order, Subscriber, User } from '../core/models';
+import { emailHash, ERASED_PREFIX } from './consent-ledger';
 import { fieldsOfType, valuesAt } from './field-walk';
 import { deletePrivateFile } from './media/private-files';
 import { anonymisedEntitlements } from './commerce/download-entitlements';
@@ -98,6 +99,13 @@ export interface SubjectData {
    */
   emails: EmailLogEntry[];
   /**
+   * The consent ledger's rows for this address, every purpose, in the order
+   * they were written — what they agreed to, under which wording (version and
+   * text hash), when, and every withdrawal. Art. 15 covers it like everything
+   * else; it is also the person's own proof of what they did and did not agree to.
+   */
+  consent: ConsentLedgerRow[];
+  /**
    * Counts of the transient operational records that mention this address —
    * change-feed snapshots and webhook deliveries. Reported as counts rather
    * than dumped: they are internal bookkeeping, not something the subject
@@ -117,6 +125,11 @@ export interface EraseReport {
    * because a shop must be able to produce its accounts.
    */
   ordersAnonymised: number;
+  /**
+   * Consent-ledger rows KEPT with the address replaced by its sha256 and the
+   * ip/ua removed — proof of consent is a legal obligation, see eraseSubject.
+   */
+  consentPseudonymised: number;
   /**
    * Published reviews kept as a RATING ONLY — name, email, order number, title
    * and body removed — so the product's average does not move because a
@@ -235,6 +248,7 @@ export async function collectSubjectData(rawEmail: string): Promise<SubjectData>
     reviews: reviewsByEmail(await LocalDB.getCustomEntities(REVIEWS_TYPE) as ReviewRow[], email),
     emails: ((await LocalDB.getEmailLog(2000)) as EmailLogEntry[])
       .filter((e) => normaliseEmail(e.to) === email),
+    consent: (await LocalDB.getConsentRows({ email })) as ConsentLedgerRow[],
     operational: {
       // Counted where the rows are, by the same substring rule the erasure
       // deletes by (deleteContentChangesFor). Not a page of the feed: a
@@ -403,6 +417,7 @@ export async function eraseSubject(rawEmail: string): Promise<EraseReport> {
     performed_at: new Date().toISOString(),
     deleted: { customers: 0, messages: 0, newsletter: 0, submissions: 0, reviews: 0, emails: 0, changeFeed: 0, webhookDeliveries: 0 },
     ordersAnonymised: 0,
+    consentPseudonymised: 0,
     reviewsAnonymised: 0,
     staffAccountFound: false,
     notes: [],
@@ -509,6 +524,34 @@ export async function eraseSubject(rawEmail: string): Promise<EraseReport> {
     );
   }
 
+  // The consent ledger is KEPT, pseudonymised — never deleted.
+  //
+  // Proof that consent was given is itself a legal obligation: Art. 7(1) puts
+  // the burden of demonstrating it on the controller, and Art. 5(2) on being
+  // able to show compliance at all. A complaint that arrives after the erasure
+  // ("you emailed me without my consent") can only be answered with these
+  // rows, and Art. 17(3)(b) and (e) exempt what is kept for a legal obligation
+  // or for defending a claim. What goes is the person: the address becomes its
+  // sha256 (so hashing an address somebody quotes finds the rows again, and
+  // nothing else does) and the ip and user agent are removed. Every decision,
+  // version, text hash and time stays exactly as recorded — the ledger is
+  // append-only and this is its one documented rewrite.
+  //
+  // Pseudonymised, not anonymous, and the report says so.
+  if (!email.startsWith(ERASED_PREFIX)) {
+    report.consentPseudonymised = await LocalDB.pseudonymiseConsentRows(
+      email, `${ERASED_PREFIX}${emailHash(email)}`, new Date().toISOString(),
+    );
+  }
+  if (report.consentPseudonymised > 0) {
+    report.notes.push(
+      `${report.consentPseudonymised} consent record(s) were kept with the address replaced by its `
+      + 'sha256 hash and the IP address and browser removed. They are the proof of what this person '
+      + 'agreed to and when, which you are required to be able to show (GDPR Art. 7(1)); they are '
+      + 'PSEUDONYMISED, not anonymous — hashing the same address finds them again.',
+    );
+  }
+
   // The send log. Deleted rather than anonymised: unlike an order it is a
   // convenience, not a record anyone is required to keep.
   report.deleted.emails = await LocalDB.deleteEmailLogFor(email);
@@ -556,6 +599,7 @@ export async function eraseSubject(rawEmail: string): Promise<EraseReport> {
   }
 
   if (report.ordersAnonymised === 0
+    && report.consentPseudonymised === 0
     && report.deleted.customers === 0
     && report.deleted.messages === 0
     && report.deleted.newsletter === 0

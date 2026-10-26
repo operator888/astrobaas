@@ -5,6 +5,7 @@ import { audit } from './audit';
 import { categories } from './categories';
 import { chrome } from './chrome';
 import { common } from './common';
+import { coupons } from './coupons';
 import { customers } from './customers';
 import { dashboard } from './dashboard';
 import { editor } from './editor';
@@ -34,6 +35,7 @@ export const el: Catalogue = {
   ...categories,
   ...chrome,
   ...common,
+  ...coupons,
   ...customers,
   ...dashboard,
   ...editor,

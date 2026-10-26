@@ -1,0 +1,165 @@
+---
+import AdminLayout from '../../../layouts/AdminLayout.astro';
+import { canOpenAdminPage } from '../../../lib/admin-access';
+import { consentRowsFor } from '../../../lib/consent-service';
+import { consentState, ConsentInputError } from '../../../lib/consent-ledger';
+import type { ConsentLedgerRow } from '../../../core/models';
+
+/**
+ * The consent ledger for one address — READ-ONLY, plus withdrawal.
+ *
+ * Every row ever written for the address, in the order written: who recorded
+ * it, what for, yes or no, when, under which wording (version and the hash of
+ * the exact text). Nothing on this screen edits a row — the ledger is
+ * append-only. "Withdraw" APPENDS a withdrawal row and, for the newsletter,
+ * takes the address off the list.
+ *
+ * Under /admin/privacy, so it inherits that screen's rule (administrators
+ * only) and sits where a data request is answered.
+ */
+const user = Astro.locals.user;
+if (!canOpenAdminPage('/admin/privacy/consent', user?.role)) {
+  return Astro.redirect('/admin');
+}
+
+const asked = (Astro.url.searchParams.get('email') ?? '').trim();
+let rows: ConsentLedgerRow[] = [];
+let error = '';
+if (asked) {
+  try {
+    rows = await consentRowsFor(asked);
+  } catch (err) {
+    if (err instanceof ConsentInputError) error = 'That is not an email address.';
+    else throw err;
+  }
+}
+const email = asked.toLowerCase();
+const purposes = [...new Set(rows.map((r) => r.purpose))].sort();
+const states = purposes.map((purpose) => ({ purpose, ...consentState(rows.filter((r) => r.purpose === purpose)) }));
+const decision = (r: ConsentLedgerRow) =>
+  r.granted === false ? 'Withdrawn' : r.confirmed_at ? 'Confirmed' : 'Granted';
+const when = (iso: string) => iso.replace('T', ' ').replace(/\.\d+Z$/, ' UTC').replace(/Z$/, ' UTC');
+---
+
+<AdminLayout title="Consent ledger">
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <p class="text-sm mb-2"><a href="/admin/privacy" class="text-blue-600 hover:underline">← Data requests</a></p>
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">Consent ledger</h1>
+    <p class="text-sm text-gray-500 mb-6">
+      Every consent decision recorded for one address, in the order it was written: what it was for,
+      yes or no, when, recorded by what, and the exact wording (its version and the hash of its
+      text). Records are never edited or removed — a withdrawal is added as a new record. After an
+      erasure the records stay with the address replaced by its hash.
+    </p>
+
+    <form method="get" class="bg-white border border-gray-200 rounded-xl p-6 mb-6 flex flex-wrap items-end gap-3">
+      <div class="flex-1 min-w-64">
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="ledger-email">Email address</label>
+        <input id="ledger-email" name="email" type="email" required value={asked} placeholder="someone@example.com"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" />
+      </div>
+      <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+        Show records
+      </button>
+    </form>
+
+    {error && <p class="text-sm text-red-600 mb-4" id="ledger-error">{error}</p>}
+
+    {asked && !error && rows.length === 0 && (
+      <p class="text-sm text-gray-500 mb-4" id="ledger-empty">No consent has been recorded for {email}.</p>
+    )}
+
+    {states.length > 0 && (
+      <section class="bg-white border border-gray-200 rounded-xl p-6 mb-6" id="ledger-state">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Current state</h2>
+        <ul class="divide-y divide-gray-100">
+          {states.map((s) => (
+            <li class="py-2 flex flex-wrap items-center justify-between gap-3 consent-purpose" data-purpose={s.purpose}>
+              <span class="text-sm">
+                <span class="font-mono">{s.purpose}</span> —
+                <span class="consent-status">
+                  {s.withdrawn ? 'withdrawn' : s.confirmed ? 'granted and confirmed' : s.granted ? 'granted, not confirmed' : 'not granted'}
+                </span>
+              </span>
+              {s.granted && (
+                <button type="button"
+                  class="withdraw-consent text-xs px-2 py-1 rounded border border-gray-300 text-gray-600 hover:bg-red-50 hover:text-red-700 hover:border-red-300"
+                  data-email={email} data-purpose={s.purpose}>Withdraw</button>
+              )}
+            </li>
+          ))}
+        </ul>
+        <p id="withdraw-error" class="text-sm text-red-600 m-0 mt-2"></p>
+      </section>
+    )}
+
+    {rows.length > 0 && (
+      <section class="bg-white border border-gray-200 rounded-xl p-6">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Records ({rows.length})</h2>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm" id="ledger-rows">
+            <thead class="text-left text-gray-500">
+              <tr>
+                <th class="py-2 pr-4 font-medium">When</th>
+                <th class="py-2 pr-4 font-medium">Purpose</th>
+                <th class="py-2 pr-4 font-medium">Decision</th>
+                <th class="py-2 pr-4 font-medium">Text version</th>
+                <th class="py-2 pr-4 font-medium">Text hash</th>
+                <th class="py-2 pr-4 font-medium">Recorded by</th>
+                <th class="py-2 font-medium">IP / browser</th>
+              </tr>
+            </thead>
+            <tbody class="text-gray-700">
+              {rows.map((r) => (
+                <tr class="border-t border-gray-100 ledger-row" data-purpose={r.purpose} data-decision={decision(r).toLowerCase()}>
+                  <td class="py-2 pr-4 whitespace-nowrap">{when(r.at)}</td>
+                  <td class="py-2 pr-4 font-mono">{r.purpose}</td>
+                  <td class="py-2 pr-4">{decision(r)}</td>
+                  <td class="py-2 pr-4 font-mono">{r.version || '—'}</td>
+                  <td class="py-2 pr-4 font-mono text-xs" title={r.text_hash}>{r.text_hash ? `${r.text_hash.slice(0, 12)}…` : '—'}</td>
+                  <td class="py-2 pr-4 font-mono">{r.source}</td>
+                  <td class="py-2 text-xs text-gray-500">{[r.ip, r.ua].filter(Boolean).join(' · ') || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    )}
+  </div>
+</AdminLayout>
+
+<script>
+  (() => {
+    const csrf = () =>
+      (window as any).__ASTROBAAS__?.csrf
+      || document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+      || '';
+    document.addEventListener('click', async (e) => {
+      const btn = (e.target as HTMLElement | null)?.closest<HTMLButtonElement>('.withdraw-consent');
+      if (!btn) return;
+      const { email, purpose } = btn.dataset;
+      if (!confirm(`Withdraw ${email}'s "${purpose}" consent? A withdrawal record is added; nothing recorded before is changed.`)) return;
+      btn.disabled = true;
+      const err = document.getElementById('withdraw-error');
+      if (err) err.textContent = '';
+      try {
+        const res = await fetch('/api/consent/ledger/withdraw', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-CSRF-Token': csrf() },
+          body: JSON.stringify({ email, purpose }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          if (err) err.textContent = json?.error?.message || json?.message || `Could not withdraw (${res.status})`;
+          btn.disabled = false;
+          return;
+        }
+        location.reload();
+      } catch (ex) {
+        if (err) err.textContent = (ex as Error).message || 'Could not reach the server';
+        btn.disabled = false;
+      }
+    });
+  })();
+</script>

@@ -36,6 +36,7 @@ import type {
   PluginRecord,
   ContactMessage,
   Subscriber,
+  ConsentLedgerRow,
   CustomEntity,
   PluginDataRecord,
   RedirectRule,
@@ -67,6 +68,26 @@ import type {
 export interface UpdateProductOptions {
   keepVariantStock?: readonly string[];
 }
+
+/**
+ * What `claimCouponUse` counts besides the coupon's total.
+ *
+ * `emailKey` is `couponEmailKey(email)` (lower-case hex, never the address):
+ * with it, the claim also counts one use against that buyer in
+ * `redemptions_by_email`, and — when `perEmailLimit` is set — lands only while
+ * that buyer is under it. Both counts move in the SAME atomic step as the
+ * total, so two checkouts by one buyer cannot both pass a one-per-customer
+ * code. `force` counts without checking any limit: re-counting a use that
+ * already happened (a cancelled order reopened), never a new sale.
+ */
+export interface CouponClaimOptions {
+  emailKey?: string;
+  perEmailLimit?: number | null;
+  force?: boolean;
+}
+
+/** A per-email key a coupon count may be stored under: lower-case hex only. */
+export const COUPON_EMAIL_KEY_RE = /^[a-f0-9]{16,64}$/;
 
 /**
  * What `transitionOrderStatus` requires of the stored order besides its status.
@@ -243,9 +264,13 @@ export interface Storage {
    * `used_count + 1` from the count it had READ after the order existed, so
    * two checkouts with a one-use code both passed and both wrote 1.
    */
-  claimCouponUse(id: string): Promise<boolean>;
-  /** Hand a claimed use back (the order it was claimed for was not placed). Never below 0. */
-  releaseCouponUse(id: string): Promise<void>;
+  claimCouponUse(id: string, opts?: CouponClaimOptions): Promise<boolean>;
+  /**
+   * Hand a claimed use back (the order it was claimed for was not placed, or
+   * was cancelled before payment). Never below 0. With `emailKey`, that
+   * buyer's count is handed back too.
+   */
+  releaseCouponUse(id: string, opts?: Pick<CouponClaimOptions, 'emailKey'>): Promise<void>;
 
   /**
    * Atomically increment and return a named counter.
@@ -505,6 +530,25 @@ export interface Storage {
   deleteMessage(id: string): Promise<boolean>;
   getSubscribers(): Promise<Subscriber[]>;
   createSubscriber(email: string): Promise<Subscriber | null>;
+
+  // The consent ledger (src/lib/consent-ledger.ts). APPEND-ONLY: there is
+  // deliberately no update and no delete here. The one rewrite is the GDPR
+  // erasure's pseudonymisation, which keeps every row and replaces only the
+  // address (and drops ip/ua). Its own collection on every driver, never a
+  // custom entity: those writes land in the public change feed.
+  /** Append one row. Rejects a duplicate id rather than overwriting it. */
+  appendConsentRow(row: ConsentLedgerRow): Promise<ConsentLedgerRow>;
+  /**
+   * Rows in the order they were WRITTEN (oldest first), optionally narrowed to
+   * one address and/or one purpose. `limit` keeps the NEWEST n, still oldest first.
+   */
+  getConsentRows(query?: { email?: string; purpose?: string; limit?: number }): Promise<ConsentLedgerRow[]>;
+  /**
+   * The erasure: every row for `email` keeps its purpose, decision, version,
+   * text hash and times; `email` becomes `replacement`, ip/ua are removed and
+   * `erased_at` is set. Returns how many rows were rewritten.
+   */
+  pseudonymiseConsentRows(email: string, replacement: string, erasedAt: string): Promise<number>;
 
   // Plugins
   getPlugins(): Promise<PluginRecord[]>;

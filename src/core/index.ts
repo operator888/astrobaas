@@ -171,6 +171,14 @@ export type { ApiResult, ApiFetchOptions } from '../lib/apiClient';
 // a caller that should be going through the API.
 export { fireEvent, webhookMatches, webhookBody, WEBHOOK_EVENTS } from '../lib/webhooks';
 export { signWebhook, newWebhookSecret } from '../lib/auth';
+// A plugin's DECLARED events (`webhookEvents`), checked against the declaration
+// and the core namespaces. Compiled plugins use `host.webhooks.emit`, which is
+// this bound to their own ids; a bundled plugin passes its id.
+export { emitPluginWebhookEvent, allPluginWebhookEvents } from '../lib/plugin-platform/webhook-events';
+
+// ---- Who a request is for (X-Client-IP / X-Client-UA on API-key requests only) ----
+export { requestClient } from '../lib/client-address';
+export type { RequestClient } from '../lib/client-address';
 
 // ---- Email (pluggable transport; send notifications, provide a transport) ----
 export { sendEmail, getEmailTransport, setEmailTransport, consoleTransport, webhookTransport, emailChannelActive, emailChannelLabel } from '../lib/email';
@@ -196,6 +204,10 @@ export { getPluginSettings, getPluginSetting } from '../lib/plugin-platform/sett
 export type {
   PluginCatalog, CatalogProduct, CatalogBrand, CatalogIterateOptions,
 } from '../lib/plugin-platform/catalog';
+// The shapes `host.coupons` takes and returns. Types only, for the same reason.
+export type {
+  PluginCoupons, IssueCouponInput, IssuedCoupon, CouponStatus,
+} from '../lib/plugin-platform/coupons';
 export type { PluginStore, PluginListOptions } from '../lib/plugin-platform/store';
 export { LocalDB } from '../lib/localdb';
 

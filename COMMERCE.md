@@ -437,8 +437,68 @@ destination is refused rather than falling back to free.
 
 ### Coupons
 
-Percentage or fixed, with optional minimum subtotal, validity window, total and
-per-customer usage limits, product/category restriction, and free shipping.
+Five kinds — `percent`, `fixed`, `bogo50`, `free_shipping` and `gift_product` —
+with an optional minimum subtotal, validity window, total and per-customer usage
+limits, single use, product/category/brand restriction, free shipping on top,
+and binding to one buyer's email. Edit them under **Shop → Coupons**.
+
+| kind | value | effect |
+| --- | --- | --- |
+| `percent` | basis points (1000 = 10%) | that share of the eligible lines, rounded half-up once |
+| `fixed` | minor units | that amount, never more than the eligible lines |
+| `bogo50` | — | pairs of eligible units, the cheaper of each half price (below) |
+| `free_shipping` | — | shipping costs 0; nothing off the goods |
+| `gift_product` | — | one unit of `gift_product_id` at price 0, if in stock |
+
+**How `bogo50` pairs units.** Every eligible line is split into its units, all
+units are sorted from most to least expensive (ties keep basket order), and they
+are paired 1st with 2nd, 3rd with 4th: the second of each pair is half price.
+An odd unit left over is not discounted. The half is taken once over the total of
+the discounted units, rounded half-up. One unit alone is refused
+(`coupon.not_applicable`), never accepted at a discount of 0 — that would spend
+a single-use code on nothing.
+
+**Restrictions.** `product_ids` and `category_slugs` form one filter (a line
+matching either qualifies); `brands` is a second filter that must ALSO hold.
+A code whose restrictions exclude every line is `coupon.not_applicable`.
+
+**Add-ons and tax.** A coupon discounts the line as priced, add-ons included
+(`COUPONS_DISCOUNT_ADDONS` in `line-addons.ts`), and is taken off BEFORE tax;
+with reverse charge the discounted net is what is charged.
+
+**The gift** is the last line, `coupon_gift: true`, price 0, no tax, no share
+of the discount. It must be a simple product with a unit free beyond what the
+basket already takes; checkout reserves that unit atomically like any other
+line, and a cancellation returns it.
+
+**Email binding and single use.** A coupon with `email` set validates only when
+the quote's or the order's email matches it, case-insensitively. `single_use`
+caps total uses at one. `usage_limit_per_customer` is counted per buyer in the
+same atomic claim as the total (keyed by a SHA-256 of the lower-cased address).
+
+**When a use is handed back.** A use is counted when the order is placed. It is
+handed back only when the order is **cancelled before it was paid** (payment
+status anything but `paid` / `refunded`): the buyer never had the discount. A
+cancellation after payment, and a refund, keep the use. Reopening a cancelled
+order counts it again, without a limit check — the order carries the discount
+whatever happened to the code meanwhile. Two cancellations at once hand it back
+once: the release is recorded on the order in the same write as the status.
+
+**Refusal codes.** Every refusal carries a stable code (`coupon.not_found`,
+`coupon.expired`, `coupon.not_started`, `coupon.min_subtotal`,
+`coupon.not_applicable`, `coupon.email_mismatch`, `coupon.already_redeemed`,
+`coupon.exhausted`) beside the older `reason` word. Disabled and revoked codes
+read as `coupon.expired`.
+
+**Plugin-issued codes.** A plugin issues codes through `host.coupons.issue()`
+(see PLUGIN_DEVELOPMENT.md). They are ordinary coupons with a `source`, checked
+by the same rules.
+
+**Scope `coupons:validate`.** A storefront key holding only this scope may call
+`POST /api/orders/quote` and nothing else: not `POST /api/orders`, not
+`GET /api/coupons`. Mint it with `POST /api/keys` and
+`scopes: ["coupons:validate"]`; the quote itself checks no role, so the role
+only matters for whatever else the same key is scoped to.
 
 Rejections carry a **reason** — but only staff see the specific one.
 `expired`, `disabled`, `not-started`, `usage-limit-reached` and
@@ -956,13 +1016,12 @@ Code: `src/lib/commerce/invoice-records.ts` (write path, issuers),
   but the clinical rules that decide whether a prescription is fillable are not
   in core, and priced lens options are not modelled at all —
   see [Paid vertical modules](#paid-vertical-modules).
-- **Coupon usage limits are atomic; per-customer limits are not.** `used_count`
-  is claimed atomically before the order is written. If the process dies
-  between the claim and the order write, one use is counted without an order,
-  which errs against the shop. `usage_limit_per_customer` is still judged from
-  the customer's prior orders. Two checkouts by the same customer at the same
-  instant both see the same count, so that limit can be exceeded by concurrent
-  orders.
+- **Coupon usage limits are atomic, per customer too.** `used_count` and the
+  buyer's own count are claimed in one conditional write before the order is
+  written. If the process dies between the claim and the order write, one use
+  is counted without an order, which errs against the shop. A per-customer
+  limit is matched on the EMAIL given at checkout: a buyer with two addresses
+  is two customers.
 - **The unpaid cap reads a bounded window.** It counts at most the newest 5000
   orders in the abandonment window and fails open beyond that. A buyer who
   rotates both email and network address is not stopped by it; the hold is what

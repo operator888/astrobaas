@@ -9683,6 +9683,53 @@ async function main() {
         if (r?.data?.coupon?.ok === false && r.data.coupon.reason === reason) {
           ok(`a rejected coupon reports "${reason}" so the UI can explain`);
         } else fail('coupon rejection', `${code} -> ${JSON.stringify(r?.data?.coupon)}`);
+        // ...and the stable contract code beside it (coupons v2).
+        const refusal = { 'minimum-not-met': 'coupon.min_subtotal', expired: 'coupon.expired', 'not-found': 'coupon.not_found' }[reason];
+        if (r?.data?.coupon?.refusal === refusal) ok(`...with the stable refusal code ${refusal}`);
+        else fail('coupon refusal code', `${code} -> ${JSON.stringify(r?.data?.coupon)}`);
+      }
+
+      // --- coupons v2 through the running server: bogo50 and an email-bound code ---
+      {
+        const made = await mkCoupon({ code: 'SMOKEBOGO', type: 'bogo50' });
+        const qb = await (await quote({ items: [{ product_id: vatId, qty: 2 }], coupon_code: 'smokebogo' })).json().catch(() => null);
+        // Two of the same unit: the second is half price (half of the 2480 a 10% code measured).
+        if (made.status === 201 && qb?.data?.coupon?.kind === 'bogo50' && qb.data.discount_cents === 1240) {
+          ok('a bogo50 coupon halves the second unit');
+        } else fail('bogo50 coupon', `create=${made.status} quote=${JSON.stringify(qb?.data?.coupon)} discount=${qb?.data?.discount_cents}`);
+        const one = await (await quote({ items: [{ product_id: vatId, qty: 1 }], coupon_code: 'SMOKEBOGO' })).json().catch(() => null);
+        if (one?.data?.coupon?.refusal === 'coupon.not_applicable') ok('...and refuses a single unit as not applicable');
+        else fail('bogo50 single unit', JSON.stringify(one?.data?.coupon));
+
+        await mkCoupon({ code: 'SMOKEMINE', kind: 'percent', value: 1000, email: 'Mine@Example.com', single_use: true });
+        const other = await (await quote({ items: [{ product_id: vatId, qty: 1 }], coupon_code: 'SMOKEMINE', email: 'other@example.com' })).json().catch(() => null);
+        const mine = await (await quote({ items: [{ product_id: vatId, qty: 1 }], coupon_code: 'SMOKEMINE', email: 'MINE@example.com' })).json().catch(() => null);
+        if (other?.data?.coupon?.refusal === 'coupon.email_mismatch' && mine?.data?.coupon?.ok === true) {
+          ok('an email-bound code works only for its email, in any case');
+        } else fail('email-bound coupon', `other=${JSON.stringify(other?.data?.coupon)} mine=${JSON.stringify(mine?.data?.coupon)}`);
+
+        // The storefront's narrow key (#166's `coupons:validate`) PRICES a real
+        // basket with #167's email-bound code — the gap #167 left open "until
+        // the scope grammar merges". A posts:read key is the contrast.
+        const mint = async (name, scopes) => (await (await fetch(`${BASE}/api/keys`, {
+          method: 'POST', headers: ch, body: JSON.stringify({ name, role: 'author', scopes }),
+        })).json().catch(() => null))?.data ?? null;
+        const cv = await mint('integrate-coupons-validate', ['coupons:validate']);
+        const pr = await mint('integrate-posts-read', ['posts:read']);
+        const keyedQuote = (key) => fetch(`${BASE}/api/orders/quote`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: [{ product_id: vatId, qty: 1 }], coupon_code: 'SMOKEMINE', email: 'mine@example.com' }),
+        });
+        const kq = cv?.key ? await keyedQuote(cv.key) : null;
+        const kqj = kq ? await kq.json().catch(() => null) : null;
+        if (kq?.status === 200 && kqj?.data?.coupon?.ok === true && kqj.data.discount_cents === 248 && kqj.data.total_cents === 2232) {
+          ok('a coupons:validate key quotes a basket with an email-bound 10% code (discount 248 of 2480)');
+        } else fail('COUPONS:VALIDATE QUOTE', `status=${kq?.status} ${JSON.stringify(kqj?.data ?? kqj)?.slice(0, 200)}`);
+        const pq = pr?.key ? await keyedQuote(pr.key) : null;
+        if (pq?.status === 403) ok('...and a posts:read key is refused on the same quote (403)');
+        else fail('posts:read quote', `status=${pq?.status}`);
+        for (const k of [cv, pr]) if (k?.id) await fetch(`${BASE}/api/keys/${k.id}`, { method: 'DELETE', headers: ch });
       }
       // A rejected code must not silently become an order at full price.
       const badCouponOrder = await fetch(`${BASE}/api/orders`, {
@@ -10903,6 +10950,207 @@ async function main() {
       });
       if (anonImp.status === 401 || anonImp.status === 403) ok('bulk import is staff-only');
       else fail('import authz', `status=${anonImp.status}`);
+    }
+  }
+
+  // 8z. Plugin game seams: named scopes, ctx.client, declared plugin webhook
+  // events, and the opt-in public order counter. Against the built server, so
+  // the middleware's real gates decide — and on every storage driver.
+  if (sessionCookie && csrfToken) {
+    const sh = {
+      Cookie: `${sessionCookie}; astrobaas_csrf=${csrfToken}`,
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': csrfToken,
+    };
+    const mintKey = async (body) => {
+      const r = await fetch(`${BASE}/api/keys`, { method: 'POST', headers: sh, body: JSON.stringify(body) });
+      return { status: r.status, data: (await r.json().catch(() => null))?.data ?? null };
+    };
+    const bearer = (key, extra = {}) => ({ Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...extra });
+    const SHOPPER = { 'X-Client-IP': '198.51.100.23', 'X-Client-UA': `ShopperBrowser/1 ${'x'.repeat(700)}` };
+
+    // --- scope grammar at the mint endpoint ---
+    const game = await mintKey({ name: 'seams-game', role: 'author', scopes: ['game:play'] });
+    const coupons = await mintKey({ name: 'seams-coupons', role: 'author', scopes: ['coupons:validate'] });
+    const stats = await mintKey({ name: 'seams-stats', role: 'author', scopes: ['stats:read'] });
+    const posts = await mintKey({ name: 'seams-posts', role: 'author', scopes: ['posts:read'] });
+    const unscoped = await mintKey({ name: 'seams-unscoped', role: 'author' });
+    if (game.status === 201 && coupons.status === 201 && stats.status === 201) ok('seams: game:play, coupons:validate and stats:read can be minted');
+    else fail('seams mint named scopes', JSON.stringify([game.status, coupons.status, stats.status]));
+    const badMint = await mintKey({ name: 'seams-bad', role: 'author', scopes: ['game:read'] });
+    if (badMint.status === 422) ok('seams: game:read is refused at mint (no such action on game)');
+    else fail('seams game:read mint', `status=${badMint.status}`);
+
+    // --- a bare-namespace plugin route declaring scope game:play ---
+    const play = (headers) => fetch(`${BASE}/api/fixturegame/play`, { method: 'POST', headers, body: '{}' });
+    if (game.data?.key && posts.data?.key && unscoped.data?.key) {
+      const r = await play(bearer(game.data.key, SHOPPER));
+      const j = await r.json().catch(() => null);
+      if (r.status === 200 && j?.played === true) ok('seams: a game:play key reaches a plugin route declaring scope game:play');
+      else fail('seams game:play route', `status=${r.status} ${JSON.stringify(j)?.slice(0, 160)}`);
+      if (j?.client?.ip === '198.51.100.23' && j?.client?.forwarded === true) ok('seams: on an API-key request ctx.client.ip is X-Client-IP');
+      else fail('seams ctx.client keyed ip', JSON.stringify(j?.client));
+      if (typeof j?.client?.ua === 'string' && j.client.ua.startsWith('ShopperBrowser/1') && j.client.ua.length === 512) ok('seams: ...and ctx.client.ua is X-Client-UA, capped at 512');
+      else fail('seams ctx.client keyed ua', `len=${j?.client?.ua?.length}`);
+
+      const garbage = await (await play(bearer(game.data.key, { 'X-Client-IP': 'not-an-ip' }))).json().catch(() => null);
+      if (garbage?.client?.ip && garbage.client.ip !== 'not-an-ip' && garbage.client.forwarded === false) ok('seams: a garbage X-Client-IP falls back to the real address');
+      else fail('seams garbage X-Client-IP', JSON.stringify(garbage?.client));
+
+      const denied = await play(bearer(posts.data.key));
+      if (denied.status === 403) ok('seams: a posts:read key is refused on the game:play route');
+      else fail('seams scope deny', `status=${denied.status}`);
+      const free = await play(bearer(unscoped.data.key));
+      if (free.status === 200) ok('seams: an unscoped key is unchanged (role governs)');
+      else fail('seams unscoped key', `status=${free.status}`);
+    }
+
+    // --- ctx.client is never forwarded for anonymous or cookie callers ---
+    {
+      const anon = await (await fetch(`${BASE}/api/plugin/test-platform/client`, { headers: SHOPPER })).json().catch(() => null);
+      if (anon?.client && anon.client.ip !== '198.51.100.23' && !String(anon.client.ua ?? '').startsWith('ShopperBrowser') && anon.client.forwarded === false) {
+        ok('seams: an ANONYMOUS request has X-Client-IP / X-Client-UA ignored');
+      } else fail('SEAMS ANON TRUSTED X-CLIENT', JSON.stringify(anon?.client));
+      const cookie = await (await fetch(`${BASE}/api/plugin/test-platform/client`, { headers: { Cookie: sessionCookie, ...SHOPPER } })).json().catch(() => null);
+      if (cookie?.client && cookie.client.ip !== '198.51.100.23' && cookie.client.forwarded === false) {
+        ok('seams: a COOKIE-SESSION request has X-Client-IP ignored');
+      } else fail('SEAMS COOKIE TRUSTED X-CLIENT', JSON.stringify(cookie?.client));
+    }
+
+    // --- a scope no key can hold is refused at registration ---
+    {
+      // As admin: a REGISTERED public route would answer 200; a refused one is
+      // an unknown path, 404 (anonymous would only ever see the 401 gate).
+      const r = await fetch(`${BASE}/api/plugin/test-platform/bad-scope`, { headers: { Cookie: sessionCookie } });
+      if (r.status === 404) ok('seams: a plugin route declaring game:read is refused at registration');
+      else fail('seams bad scope route', `status=${r.status}`);
+    }
+
+    // --- bare plugin routes: public and game:play served, core collision refused ---
+    {
+      const pub = await fetch(`${BASE}/api/fixturegame/campaigns/c1`);
+      const pj = await pub.json().catch(() => null);
+      if (pub.status === 200 && pj?.id === 'c1') ok('seams: a bare PUBLIC plugin route is served anonymously');
+      else fail('seams bare public route', `status=${pub.status}`);
+      // The game:play bare route is proven above (/api/fixturegame/play).
+      const clash = await fetch(`${BASE}/api/orders/fixturegame`);
+      const cj = await clash.text();
+      if (clash.status === 401 && !cj.includes('pwned')) ok('seams: a public game:play route on a CORE path is refused; core\'s gate stands');
+      else fail('SEAMS CORE PATH WIDENED', `status=${clash.status} ${cj.slice(0, 80)}`);
+      if (game.data?.key) {
+        const keyed = await fetch(`${BASE}/api/orders/fixturegame`, { headers: bearer(game.data.key) });
+        if (keyed.status === 403) ok('seams: ...and a game:play key is refused there (orders:read governs it)');
+        else fail('SEAMS GAME KEY ON CORE PATH', `status=${keyed.status}`);
+      }
+    }
+
+    // --- coupons:validate reaches the quote and nothing else ---
+    if (coupons.data?.key) {
+      const q = await fetch(`${BASE}/api/orders/quote`, { method: 'POST', headers: bearer(coupons.data.key), body: JSON.stringify({ items: [] }) });
+      if (q.status !== 403) ok(`seams: a coupons:validate key passes the scope gate on POST /api/orders/quote (status ${q.status})`);
+      else fail('seams coupons:validate quote', 'status=403');
+      if (posts.data?.key) {
+        // The contrast that makes the line above mean something.
+        const pq = await fetch(`${BASE}/api/orders/quote`, { method: 'POST', headers: bearer(posts.data.key), body: JSON.stringify({ items: [] }) });
+        if (pq.status === 403) ok('seams: ...where a posts:read key is refused (403)');
+        else fail('seams posts:read quote', `status=${pq.status}`);
+      }
+      const place = await fetch(`${BASE}/api/orders`, { method: 'POST', headers: bearer(coupons.data.key), body: JSON.stringify({ email: 'x@example.com', items: [] }) });
+      if (place.status === 403) ok('seams: ...but not POST /api/orders');
+      else fail('SEAMS COUPONS KEY PLACES ORDERS', `status=${place.status}`);
+    }
+
+    // --- declared plugin webhook events ---
+    const receiver = await startWebhookReceiver();
+    let hookId = null;
+    try {
+      const page = await (await fetch(`${BASE}/admin/webhooks`, { headers: { Cookie: sessionCookie } })).text();
+      if (page.includes('data-event="fixture.pinged"') && !page.includes('data-event="Not A Name"')) ok('seams: the admin webhook screen lists the declared plugin event');
+      else fail('seams admin webhook list', 'fixture.pinged missing or a refused name listed');
+
+      const reg = await fetch(`${BASE}/api/webhooks`, { method: 'POST', headers: sh, body: JSON.stringify({ url: receiver.url, events: ['fixture.pinged'] }) });
+      const rj = await reg.json().catch(() => null);
+      hookId = rj?.data?.id ?? null;
+      const secret = rj?.data?.secret;
+      const emit = (event) => fetch(`${BASE}/api/plugin/test-platform/emit`, { method: 'POST', headers: sh, body: JSON.stringify({ event, data: { n: 7 } }) });
+      const good = await emit('fixture.pinged');
+      if (good.status === 200) ok('seams: host.webhooks.emit accepts a declared event');
+      else fail('seams emit declared', `status=${good.status} ${await good.text()}`);
+      const d = await receiver.waitForMatching((b) => b?.event === 'fixture.pinged', 8000);
+      if (d?.data?.n === 7) ok('seams: the plugin event is delivered through the core webhook machinery');
+      else fail('seams plugin event delivery', JSON.stringify(d));
+      const raw = receiver.deliveries.find((x) => x.headers['x-astrobaas-event'] === 'fixture.pinged');
+      const want = secret && raw ? 'sha256=' + crypto.createHmac('sha256', secret).update(raw.body).digest('hex') : null;
+      if (raw && want && raw.headers['x-astrobaas-signature'] === want) ok('seams: ...signed with the webhook secret like a core event');
+      else fail('seams plugin event signature', String(raw?.headers?.['x-astrobaas-signature']));
+
+      for (const [event, why] of [['order.created', 'a core event'], ['coupon.redeemed', 'a core namespace'], ['fixture.undeclared', 'an undeclared event']]) {
+        const r = await emit(event);
+        if (r.status === 422) ok(`seams: host.webhooks.emit refuses ${why} (${event})`);
+        else fail(`SEAMS EMIT ${event}`, `status=${r.status}`);
+      }
+      // The deliveries log (core) recorded the plugin event like any other.
+      const log = await (await fetch(`${BASE}/api/webhooks/deliveries?webhook=${encodeURIComponent(hookId ?? '')}`, { headers: { Cookie: sessionCookie } })).json().catch(() => null);
+      const rows = Array.isArray(log?.data) ? log.data : [];
+      if (rows.some((x) => x.event === 'fixture.pinged')) ok('seams: the plugin event is in the delivery log');
+      else fail('seams delivery log', JSON.stringify(log)?.slice(0, 200));
+    } catch (e) {
+      fail('seams webhook integration', String(e?.stack || e));
+    } finally {
+      if (hookId) await fetch(`${BASE}/api/webhooks/${hookId}`, { method: 'DELETE', headers: sh });
+      await receiver.close();
+    }
+
+    // --- the public order counter ---
+    {
+      const URL_ = `${BASE}/api/stats/orders-this-month`;
+      const setStats = (patch) => fetch(`${BASE}/api/settings/update`, { method: 'POST', headers: sh, body: JSON.stringify(patch) });
+      await setStats({ public_order_stats_enabled: false, commerce_enabled: true });
+      const off = await fetch(URL_);
+      if (off.status === 404) ok('seams: /api/stats/orders-this-month is 404 while the setting is off');
+      else fail('SEAMS STATS ON BY DEFAULT', `status=${off.status}`);
+      const badTz = await setStats({ shop_timezone: 'Mars/Olympus' });
+      if (badTz.status === 400) ok('seams: an unknown shop_timezone is refused');
+      else fail('seams bad timezone', `status=${badTz.status}`);
+      await setStats({ public_order_stats_enabled: true, shop_timezone: 'UTC' });
+      const on = await fetch(URL_);
+      const oj = await on.json().catch(() => null);
+      const month = new Date().toISOString().slice(0, 7);
+      if (on.status === 200 && Number.isInteger(oj?.data?.count) && oj?.data?.month === month && Object.keys(oj.data).sort().join() === 'count,month') {
+        ok(`seams: the counter answers { count, month } when on (${oj.data.count} in ${month})`);
+      } else fail('seams stats on', `status=${on.status} ${JSON.stringify(oj)}`);
+      if (/public/.test(on.headers.get('cache-control') ?? '') && /max-age=60/.test(on.headers.get('cache-control') ?? '')) ok('seams: the counter is cacheable for a minute');
+      else fail('seams stats cache', String(on.headers.get('cache-control')));
+
+      // The same count, derived independently from the staff order list.
+      let all = [];
+      for (let offset = 0; offset < 5000; offset += 200) {
+        const pg = await (await fetch(`${BASE}/api/orders?limit=200&offset=${offset}`, { headers: { Cookie: sessionCookie } })).json().catch(() => null);
+        const rows = Array.isArray(pg?.data) ? pg.data : [];
+        all = all.concat(rows);
+        if (!pg?.meta?.hasMore) break;
+      }
+      const expected = all.filter((o) => o.payment_status === 'paid' && String(o.created_at).slice(0, 7) === month).length;
+      if (oj?.data?.count === expected) ok(`seams: the count equals the paid orders this month in the order list (${expected} of ${all.length})`);
+      else fail('seams stats count', `counter=${oj?.data?.count} list=${expected}`);
+
+      if (stats.data?.key) {
+        const keyed = await fetch(URL_, { headers: bearer(stats.data.key) });
+        // Public when on, so any key gets 200; that the scope itself grants it
+        // (rather than a downgrade to anonymous) is the unit test's to prove.
+        if (keyed.status === 200) ok('seams: a keyed storefront (stats:read) reads the counter');
+        else fail('seams stats:read key', `status=${keyed.status}`);
+      }
+      await setStats({ public_order_stats_enabled: false });
+      const offAgain = await fetch(URL_);
+      if (offAgain.status === 404) ok('seams: switching it off hides it again');
+      else fail('seams stats off again', `status=${offAgain.status}`);
+    }
+
+    // Leave no keys behind for later sections.
+    const keys = await (await fetch(`${BASE}/api/keys`, { headers: { Cookie: sessionCookie } })).json().catch(() => null);
+    for (const k of (Array.isArray(keys?.data) ? keys.data : [])) {
+      if (String(k.name ?? '').startsWith('seams-')) await fetch(`${BASE}/api/keys/${k.id}`, { method: 'DELETE', headers: sh });
     }
   }
 
@@ -13412,6 +13660,74 @@ async function main() {
           if (again.status === 404) ok('...and removing them again reports nothing to remove');
           else fail('subscriber double removal', `status=${again.status}`);
         }
+      }
+
+      // --- THE CONSENT LEDGER behind all of the above ---
+      //
+      // The click wrote two rows (the grant the signup made, and its
+      // confirmation), the operator's Remove appended a withdrawal, and the
+      // export — granted AND confirmed AND not withdrawn — followed each step.
+      if (csrfToken) {
+        const ah = { Cookie: `${sessionCookie}; astrobaas_csrf=${csrfToken}`, 'X-CSRF-Token': csrfToken };
+        const ledger = async () => (await (await fetch(
+          `${BASE}/api/consent/ledger?email=${encodeURIComponent(target)}`, { headers: ah },
+        )).json().catch(() => null))?.data?.rows ?? [];
+        const exported = async () => ((await (await fetch(
+          `${BASE}/api/newsletter/subscribers/export`, { headers: ah },
+        )).json().catch(() => null))?.data?.subscribers ?? []).map((c) => c.email);
+        const rows = await ledger();
+        const sources = rows.map((r) => `${r.source}:${r.granted}:${r.confirmed_at ? 'c' : '-'}`);
+        if (sources[0] === 'newsletter_form:true:-' && sources[1] === 'newsletter_confirm_link:true:c') {
+          ok('consent ledger: the confirmation click wrote the grant and its confirmation');
+        } else fail('consent ledger rows after confirm', JSON.stringify(sources));
+        if (rows.at(-1)?.granted === false && rows.at(-1)?.source === 'admin') {
+          ok('consent ledger: the operator\'s Remove APPENDED a withdrawal');
+        } else fail('consent ledger admin withdrawal', JSON.stringify(sources));
+        if (!(await exported()).includes(target)) ok('consent ledger: a withdrawn address is not exported');
+        else fail('consent export', 'a withdrawn address is still exported');
+        const anonLedger = await fetch(`${BASE}/api/consent/ledger?email=${encodeURIComponent(target)}`);
+        if (anonLedger.status === 401 || anonLedger.status === 403) ok('consent ledger: unreadable without a session');
+        else fail('consent ledger unguarded', `status=${anonLedger.status}`);
+
+        // The ORIGINAL confirmation link, opened again after they were removed
+        // (by them, or a mail scanner following links), must not put them back.
+        const before = (await ledger()).length;
+        const rejoin = await fetch(link[0], { redirect: 'manual' });
+        if (rejoin.status === 302 && /ok=0/.test(rejoin.headers.get('location') || '')
+          && (await ledger()).length === before && !(await exported()).includes(target)
+          && !(await readList()).includes(target)) {
+          ok('consent ledger: an old confirmation link opened after leaving re-subscribes nobody');
+        } else fail('stale confirmation link', `status=${rejoin.status} loc=${rejoin.headers.get('location')}`);
+
+        // RFC 8058 one-click with the REAL unsubscribe token the confirmed page
+        // handed over — a POST with no cookie and no CSRF header, exactly what a
+        // mail provider sends. Already withdrawn, so it is idempotent: 200, and
+        // still out of the list and the export.
+        const leaveTok = new URL(done.headers.get('location') || '/', BASE).searchParams.get('u') || '';
+        const oneClick = await fetch(`${BASE}/api/newsletter/unsubscribe?token=${encodeURIComponent(leaveTok)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'List-Unsubscribe=One-Click',
+        });
+        const afterRows = await ledger();
+        if (leaveTok && oneClick.status === 200 && afterRows.at(-1)?.granted === false) {
+          ok('consent ledger: a sessionless one-click unsubscribe with a real token is accepted');
+        } else fail('one-click withdrawal', `status=${oneClick.status} token=${!!leaveTok} last=${JSON.stringify(afterRows.at(-1))}`);
+        if (!(await readList()).includes(target) && !(await exported()).includes(target)) {
+          ok('...and they stay off the list and out of the export');
+        } else fail('one-click unsubscribe', 'still listed or exported');
+
+        const wdForged = await fetch(`${BASE}/api/consent/withdraw?token=forged`, { method: 'POST' });
+        if (wdForged.status === 200) ok('consent withdraw link: a forged token gets the same bare 200');
+        else fail('consent withdraw forged', `status=${wdForged.status}`);
+        // The link a person CLICKS is a GET with no session: it must reach the
+        // route (not the sign-in wall) and land on the public page.
+        const wdClick = await fetch(`${BASE}/api/consent/withdraw?token=forged`, { redirect: 'manual' });
+        const landing = wdClick.headers.get('location') || '';
+        const page = landing ? await fetch(new URL(landing, BASE)) : null;
+        if (wdClick.status === 302 && landing === '/consent/withdrawn?ok=0' && page?.status === 200) {
+          ok('consent withdraw link: a sessionless GET lands on the public withdrawn page');
+        } else fail('consent withdraw GET', `status=${wdClick.status} loc=${landing} page=${page?.status}`);
       }
     } else {
       fail('newsletter confirm link', 'no confirmation URL in the email');

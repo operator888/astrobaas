@@ -28,6 +28,7 @@ import {
   CHECKOUT_TERMS_KEYS, MAX_TERMS_LABEL_LENGTH, isTermsUrl,
 } from './commerce/checkout-terms';
 import { NAVIGATION_SETTING, validateNavigation, normaliseNavigation } from './navigation';
+import { PUBLIC_ORDER_STATS_KEY, SHOP_TIMEZONE_KEY, isValidTimeZone } from './commerce/order-stats';
 
 export interface SettingProblem {
   key: string;
@@ -111,6 +112,9 @@ const BOOLEAN_KEYS: ReadonlySet<string> = new Set([
   // would silently keep the outbound sweep running after the operator turned
   // it off — and this one makes requests to other people's servers.
   'link_check_external',
+  // Publishing the paid-order count. OFF unless switched on, and a stored
+  // "false" must read as off: it decides whether a business figure is public.
+  PUBLIC_ORDER_STATS_KEY,
 ]);
 
 /**
@@ -205,6 +209,12 @@ export function validateSetting(
     if (typeof value === 'string' && isTermsUrl(value)) return null;
     return 'must be a page on this site (starting with /) or an https:// address';
   }
+  // The shop's timezone decides which month an order is counted in. A typo
+  // would otherwise fall back to UTC without a word.
+  if (key === SHOP_TIMEZONE_KEY) {
+    if (value === null || value === undefined || value === '') return null;
+    return isValidTimeZone(value) ? null : 'must be a timezone name such as Europe/Athens or UTC';
+  }
   if (BOOLEAN_KEYS.has(key)) {
     if (value === null || value === undefined || value === '') return null;
     if (typeof value === 'boolean') return null;
@@ -261,6 +271,7 @@ export function normaliseSettingValue(key: string, value: unknown): unknown {
   if (key === SHOP_CURRENCY_KEY && typeof value === 'string' && value.trim()) {
     return value.trim().toUpperCase();
   }
+  if (key === SHOP_TIMEZONE_KEY && typeof value === 'string') return value.trim();
   if (BOOLEAN_KEYS.has(key)) {
     if (value === 'true' || value === '1') return true;
     if (value === 'false' || value === '0') return false;

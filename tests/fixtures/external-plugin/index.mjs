@@ -33,7 +33,9 @@ class GatewayVerificationError extends Error {
   }
 }
 
-export default function ({ definePlugin, PLUGIN_HOOKS }) {
+export default function ({ definePlugin, PLUGIN_HOOKS, webhooks }) {
+  const json = (body, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
   const provider = {
     id: 'test-gateway',
     label: 'Test Gateway',
@@ -97,6 +99,11 @@ export default function ({ definePlugin, PLUGIN_HOOKS }) {
       version: '1.0.0',
       description: 'Fixture: a plugin that owns API routes, an admin page and its own data.',
       author: 'AstroBaaS tests',
+
+      // --- Declared webhook events (host.webhooks.emit) ---
+      // `fixture.pinged` is this plugin's. `order.created` is CORE's and must
+      // be refused at boot, as must a name that is not lower-case dotted.
+      webhookEvents: ['fixture.pinged', 'order.created', 'Not A Name'],
 
       // --- Capability 3: the plugin's own storage, with its own migrations ---
       migrations: [
@@ -196,6 +203,65 @@ export default function ({ definePlugin, PLUGIN_HOOKS }) {
             return new Response(JSON.stringify({ rows: rows.map((r) => ({ id: r.id, data: r.data })) }), {
               status: 200, headers: { 'Content-Type': 'application/json' },
             });
+          },
+        },
+        {
+          // ctx.client: who the request is FOR. Echoed so smoke can prove the
+          // X-Client-* headers count only on an API-key request.
+          method: 'GET',
+          path: '/api/plugin/test-platform/client',
+          access: 'public',
+          handler: async ({ client }) => json({ client }),
+        },
+        {
+          // A BARE first-level namespace no core file serves, with a named
+          // scope — the shape the campaign-games storefront contract needs
+          // (`POST /api/game/spin`, scope `game:play`).
+          method: 'POST',
+          path: '/api/fixturegame/play',
+          access: 'public',
+          scope: 'game:play',
+          handler: async ({ client, user }) => json({ played: true, keyed: Boolean(user), client }),
+        },
+        {
+          // A bare PUBLIC read, like `GET /api/game/campaigns/:id`.
+          method: 'GET',
+          path: '/api/fixturegame/campaigns/:id',
+          access: 'public',
+          handler: async ({ params }) => json({ id: params.id, segments: [] }),
+        },
+        {
+          // Must be REFUSED: a game:play-scoped route on a CORE path. The
+          // order-detail file wins at the router, and the declaration must not
+          // re-decide core's gate before it.
+          method: 'GET',
+          path: '/api/orders/fixturegame',
+          access: 'public',
+          scope: 'game:play',
+          handler: async () => json({ pwned: true }),
+        },
+        {
+          // Must be REFUSED at registration: `game` defines no `read` action,
+          // so no key could ever hold this scope.
+          method: 'GET',
+          path: '/api/plugin/test-platform/bad-scope',
+          access: 'public',
+          scope: 'game:read',
+          handler: async () => json({ reached: true }),
+        },
+        {
+          // Staff-only: emits whatever event it is asked to, so smoke can show
+          // which ones host.webhooks.emit refuses.
+          method: 'POST',
+          path: '/api/plugin/test-platform/emit',
+          handler: async ({ request }) => {
+            const body = await request.json().catch(() => ({}));
+            try {
+              await webhooks.emit(body.event, body.data);
+              return json({ ok: true });
+            } catch (err) {
+              return json({ ok: false, error: String(err?.message ?? err) }, 422);
+            }
           },
         },
         {

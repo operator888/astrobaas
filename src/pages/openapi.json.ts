@@ -261,17 +261,28 @@ const ShippingMethod = {
     type: 'object',
     properties: {
       id: { type: 'string' }, code: { type: 'string' },
-      kind: { type: 'string', enum: ['percent', 'fixed'] },
-      value: { type: 'integer', description: 'Basis points for percent (1000 = 10%), minor units for fixed.' },
+      kind: {
+        type: 'string', enum: ['percent', 'fixed', 'bogo50', 'free_shipping', 'gift_product'],
+        description: 'Accepted on write as `kind` or `type`. bogo50: in each pair of qualifying units (paired from most to least expensive, across lines) the cheaper is half price; an odd unit left over is full price; one unit alone is refused (coupon.not_applicable). free_shipping: shipping costs 0, nothing off the goods. gift_product: adds one unit of gift_product_id at price 0; refused when it is not in stock.',
+      },
+      value: { type: 'integer', description: 'Basis points for percent (1000 = 10%), minor units for fixed. 0 for the other kinds.' },
       enabled: { type: 'boolean' }, description: { type: 'string' },
       min_subtotal_cents: { type: ['integer', 'null'] },
-      starts_at: { type: ['string', 'null'] }, ends_at: { type: ['string', 'null'] },
-      usage_limit: { type: ['integer', 'null'] },
-      usage_limit_per_customer: { type: ['integer', 'null'] },
+      starts_at: { type: ['string', 'null'] },
+      ends_at: { type: ['string', 'null'], description: 'Accepted on write as `ends_at` or `expires_at`.' },
+      usage_limit: { type: ['integer', 'null'], description: 'Total uses. Accepted on write as `max_redemptions`.' },
+      usage_limit_per_customer: { type: ['integer', 'null'], description: 'Uses per buyer email, counted atomically. Accepted on write as `max_redemptions_per_email`.' },
       used_count: { type: 'integer' },
       product_ids: { type: 'array', items: { type: 'string' } },
-      category_slugs: { type: 'array', items: { type: 'string' } },
+      category_slugs: { type: 'array', items: { type: 'string' }, description: 'Accepted on write as `categories` (or `conditions.categories`).' },
+      brands: { type: 'array', items: { type: 'string' }, description: 'Only products of these brands, matched as ?brand= matches (Ray-Ban = RAYBAN = its published slug). Must hold IN ADDITION to product_ids/category_slugs.' },
       free_shipping: { type: 'boolean' },
+      gift_product_id: { type: ['string', 'null'], description: 'For gift_product: a simple (non-variable) product.' },
+      email: { type: ['string', 'null'], description: 'Bound to one buyer: validates only for this email, case-insensitively. Stored lower-case.' },
+      single_use: { type: 'boolean', description: 'One redemption in total.' },
+      revoked_at: { type: ['string', 'null'], description: 'Set when a plugin revoked it (read-only).' },
+      source: { type: ['object', 'null'], description: '{ plugin, ref } when a plugin issued it through host.coupons.issue (read-only).' },
+      automatic: { type: 'boolean' },
     },
   } as const;
 
@@ -828,7 +839,7 @@ const ShippingMethod = {
         },
         post: {
           summary: 'Mint an API key (admin; secret returned once)',
-          description: 'Optional `scopes` (e.g. ["posts:write"]) restrict the key to resource:action capabilities; omit for full role-based access. `expires_in_days` sets an expiry. `forward_client_ip: true` lets the key\'s server name the shopper a request is for in `X-AstroBaaS-Client-IP` (one address), which per-IP route limits and order risk then use; the header is ignored on every other request.',
+          description: 'Optional `scopes` (e.g. ["posts:write"]) restrict the key to resource:action capabilities (`<resource>:<read|write|*>`, or a named action: `game:play`, `coupons:validate` — POST /api/orders/quote only — `stats:read`; actions are per resource, so `game:read` is refused); omit for full role-based access. On any API-key request, `X-Client-IP` / `X-Client-UA` name the shopper for plugin routes (`ctx.client`); they are ignored on anonymous and cookie requests. `expires_in_days` sets an expiry. `forward_client_ip: true` lets the key\'s server name the shopper a request is for in `X-AstroBaaS-Client-IP` (one address), which per-IP route limits and order risk then use; the header is ignored on every other request.',
           security: [{ bearerApiKey: [] }],
           requestBody: {
             required: true,
@@ -923,10 +934,26 @@ const ShippingMethod = {
             + 'shop never holds a record about somebody who did not ask — which is both the '
             + 'anti-abuse property (you cannot subscribe a stranger) and the lawful-basis one. '
             + 'The 201 is returned whether or not the address is already subscribed and whether '
-            + 'or not the mail went out, so this cannot be used to ask "is this person on your list?".',
+            + 'or not the mail went out, so this cannot be used to ask "is this person on your list?". '
+            + 'A storefront that shows its own consent wording sends it as `consent_text` with a '
+            + '`consent_version` label (both or neither); its sha256 rides in the signed link and is '
+            + 'written to the consent ledger when the link is clicked. Without them the default '
+            + 'core wording is recorded.',
           requestBody: {
             required: true,
-            content: { 'application/json': { schema: { type: 'object', required: ['email'], properties: { email: { type: 'string' } } } } },
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['email'],
+                  properties: {
+                    email: { type: 'string' },
+                    consent_text: { type: 'string', maxLength: 5000, description: 'The exact wording the visitor was shown. Hashed, never stored.' },
+                    consent_version: { type: 'string', maxLength: 64 },
+                  },
+                },
+              },
+            },
           },
           responses: { '201': ok({ type: 'object' }) },
         },
@@ -1000,6 +1027,95 @@ const ShippingMethod = {
             '403': { description: 'Staff only' },
             '404': { description: 'No such subscriber' },
           },
+        },
+      },
+      '/api/newsletter/subscribers/export': {
+        get: {
+          summary: 'Export the newsletter subscribers (staff)',
+          description:
+            'Read from the consent ledger: ONLY contacts whose newsletter consent is granted AND '
+            + 'confirmed (double opt-in) AND not withdrawn since. Each carries its proof — when it '
+            + 'was confirmed, the wording version and the sha256 of its text, and what recorded it. '
+            + 'Subscribers from before the ledger were recorded by a migration with '
+            + '`source: "migration"`. `?format=csv` returns a spreadsheet-safe CSV file.',
+          parameters: [
+            { name: 'format', in: 'query', required: false, schema: { type: 'string', enum: ['json', 'csv'] } },
+          ],
+          responses: {
+            '200': ok({ type: 'object', properties: { subscribers: { type: 'array', items: { type: 'object' } }, count: { type: 'integer' } } }),
+            '403': { description: 'Staff only' },
+          },
+        },
+      },
+      '/api/consent/ledger': {
+        get: {
+          summary: 'The consent ledger for one address (admin, read-only)',
+          description:
+            'Every consent-ledger row for the address, every purpose, in the order written — '
+            + '`{ id, email, purpose, granted, version, text_hash, at, ip?, ua?, source, '
+            + 'confirmed_at? }` — and the current state per purpose. The ledger is append-only: '
+            + 'no route edits or deletes a row. Administrators only.',
+          parameters: [
+            { name: 'email', in: 'query', required: true, schema: { type: 'string' } },
+          ],
+          responses: {
+            '200': ok({ type: 'object' }),
+            '400': { description: 'Not an email address' },
+            '403': { description: 'Administrators only' },
+          },
+        },
+      },
+      '/api/consent/ledger/withdraw': {
+        post: {
+          summary: 'Withdraw a consent, as the operator (admin)',
+          description:
+            'APPENDS a `granted: false` row (`source: "admin"`) for the address and purpose; '
+            + 'nothing recorded before is changed. For `newsletter` the address also leaves the list '
+            + 'and `subscriber.unsubscribed` fires. Session + CSRF; audited as '
+            + '`privacy.consent.withdraw`.',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['email', 'purpose'],
+                  properties: { email: { type: 'string' }, purpose: { type: 'string' } },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': ok({ type: 'object' }),
+            '400': { description: 'Invalid address or purpose' },
+            '403': { description: 'Administrators only' },
+          },
+        },
+      },
+      '/api/consent/withdraw': {
+        get: {
+          summary: 'Withdraw a consent by clicking a link (public, token-signed)',
+          description:
+            'The link a person clicks in an email (plugins mint it with '
+            + '`host.consent.withdrawUrl`). Withdraws the one purpose the token names and '
+            + 'redirects to `/consent/withdrawn?ok=1` (or `ok=0` for a bad or expired token).',
+          parameters: [
+            { name: 'token', in: 'query', required: true, schema: { type: 'string' } },
+          ],
+          responses: { '302': { description: 'Redirect to the withdrawn page' } },
+        },
+        post: {
+          summary: 'Withdraw a consent from a link (public, token-signed)',
+          description:
+            'The token (minted by core for one address and ONE purpose, its own signing purpose '
+            + 'so no other link can be replayed here) is in the query string, RFC 8058 style, and '
+            + 'is the whole authorisation: no session, exempt from CSRF. Appends a withdrawal row '
+            + '(`source: "withdraw_link"`). Answers the same 200 for a valid, an invalid and a '
+            + 'missing token, so it reveals nothing about who consented.',
+          parameters: [
+            { name: 'token', in: 'query', required: true, schema: { type: 'string' } },
+          ],
+          responses: { '200': { description: 'Accepted; the consent is withdrawn if the token named one' } },
         },
       },
       '/api/media/update': {
@@ -1384,7 +1500,7 @@ const ShippingMethod = {
               shipping_postcode: { type: 'string' },
               shipping_method_id: { type: 'string', description: 'An id from available_shipping_methods. Its COST is always re-derived server-side.' },
               coupon_code: { type: 'string' },
-              email: { type: 'string', description: 'Only used to evaluate per-customer coupon limits.' },
+              email: { type: 'string', description: 'The buyer\'s email, for coupon rules that depend on it: per-customer limits, and coupons bound to one email (compared case-insensitively). Send the address checkout will send, or an email-bound code is refused (coupon.email_mismatch for staff; coupon.not_found for anyone else, like every refusal but coupon.min_subtotal).' },
               shipping_address: { $ref: '#/components/schemas/Address', description: 'Read as POST /api/orders reads it: its country/postcode are the destination when shipping_country/shipping_postcode are absent. A malformed address is ignored here (the order refuses it).' },
               billing_address: { $ref: '#/components/schemas/Address', description: 'Its tax_id (delivery address as fallback) is the buyer\'s VAT id for EU reverse charge — the same reader POST /api/orders uses, so a quote and the order agree.' },
             } } } },
@@ -1395,9 +1511,15 @@ const ShippingMethod = {
               shipping_cents: { type: 'integer' }, tax_cents: { type: 'integer' },
               total_cents: { type: 'integer' }, prices_include_tax: { type: 'boolean' },
               requires_shipping: { type: 'boolean' }, weight_grams: { type: 'integer' },
-              lines: { type: 'array', items: { type: 'object', properties: { addons: { type: 'array', items: LineAddon, description: 'The add-ons priced into this line, already inside unit_price_cents. Absent when none.' } } }, description: 'Per-line net/tax/discount breakdown.' },
+              lines: { type: 'array', items: { type: 'object', properties: {
+                addons: { type: 'array', items: LineAddon, description: 'The add-ons priced into this line, already inside unit_price_cents. Absent when none.' },
+                coupon_gift: { type: 'boolean', description: 'true on the free unit a gift_product coupon added — always the last line, at unit_price_cents 0.' },
+              } }, description: 'Per-line net/tax/discount breakdown.' },
               available_shipping_methods: { type: 'array', items: { type: 'object' } },
-              coupon: { type: 'object', description: 'A REJECTED coupon is reported here with a reason, not as an error — the rest of the quote is still valid.' },
+              coupon: {
+                type: ['object', 'null'],
+                description: 'A REJECTED coupon is reported here with a reason, not as an error — the rest of the quote is still valid. Accepted: { ok: true, code, kind, discount_cents, free_shipping, gift_product_id? }. Rejected: { ok: false, reason, refusal, message, shortfall_cents? }, where refusal is one of the stable codes coupon.not_found, coupon.expired, coupon.not_started, coupon.min_subtotal, coupon.not_applicable, coupon.email_mismatch, coupon.already_redeemed, coupon.exhausted. Anyone who is not staff (an anonymous cart, an API key) gets coupon.not_found for every refusal except coupon.min_subtotal, so the endpoint cannot be used to learn which codes exist. POST /api/orders refuses with the same codes in error.params.refusal.',
+              },
             } }),
             '400': errRes('Invalid basket, an order limit exceeded, an unavailable product, or refused add-ons (reason checkout.addons_*, or the plugin\'s own)'),
             '500': errRes('An add-on plugin failed or returned an invalid result (reason checkout.addons_failed); nothing is priced without the add-on'),
@@ -2803,6 +2925,23 @@ const ShippingMethod = {
             },
           },
           responses: { '200': ok({ type: 'object' }) },
+        },
+      },
+      '/api/stats/orders-this-month': {
+        get: {
+          summary: 'Paid orders placed this month (opt-in, public)',
+          description: 'One number for a storefront\'s social proof: orders with payment_status "paid", counted by the month they were placed in the shop timezone (setting shop_timezone, default UTC). 404 — the same answer as an unknown path — unless the setting public_order_stats_enabled is on. Never revenue, amounts or anything per customer. Cache-Control: public, max-age=60. A scoped API key needs stats:read.',
+          responses: {
+            '200': ok({
+              type: 'object',
+              properties: {
+                count: { type: 'integer', minimum: 0 },
+                month: { type: 'string', pattern: '^\\d{4}-\\d{2}$', description: 'YYYY-MM in the shop timezone.' },
+              },
+              required: ['count', 'month'],
+            }),
+            '404': { description: 'The counter is switched off (or the shop is).' },
+          },
         },
       },
       '/api/locales': {

@@ -33,6 +33,7 @@ import {
 import { LocalDB } from './lib/localdb';
 import { securityHeaders, corsHeaders, corsAllowOrigin, describeCorsPosture, mergeVary, frameOptionsFor } from './lib/security-headers';
 import { apiKeyExpired, scopedKeyAllowed } from './lib/api-key-scopes';
+import { resolveRequestClient } from './lib/client-address';
 import { sharedRateLimitStore, describeRateLimitStore, type RateLimitResult } from './lib/rate-limit';
 import {
   resolveClientIp, trustedForwardedIp, CLIENT_IP_HEADER,
@@ -305,7 +306,14 @@ const PUBLIC_API_GET = [
   // Leaving the list. Public for the same reasons as confirming, and the right
   // to withdraw consent must be at least as easy as giving it.
   /^\/api\/newsletter\/unsubscribe\/?$/,
+  // Withdrawing any consent-ledger purpose from a link in an email: the same
+  // reasons, the same kind of signed single-purpose token (`consent-wd`).
+  /^\/api\/consent\/withdraw\/?$/,
   /^\/api\/locales\/?$/, // which languages this site serves (also in the URLs)
+  // "N orders this month" — the number an operator chose to publish. The
+  // handler 404s unless `public_order_stats_enabled` is on, so this widens
+  // nothing on a shop that has not asked for it. Exact path.
+  /^\/api\/stats\/orders-this-month\/?$/,
   // Anti-spam challenges exist FOR anonymous visitors; a session requirement
   // here would protect the forms from exactly the people they serve.
   /^\/api\/captcha\/challenge\/?$/,
@@ -442,6 +450,11 @@ const PUBLIC_API_WRITE = [
   // single-purpose, expiring token in the query string, checked in the handler
   // — with no token it removes nothing, exactly like the GET.
   /^\/api\/newsletter\/unsubscribe\/?$/,
+  // Withdrawing any consent-ledger purpose from a link. Same shape and same
+  // authorisation as the one-click unsubscribe: a signed, purpose-bound token
+  // in the query string, checked in the handler; with no valid token it
+  // withdraws nothing and answers the same 200.
+  /^\/api\/consent\/withdraw\/?$/,
   // Checkout: anonymous buyers place orders; totals are computed server-side
   // and the endpoint shares the same rate-limit + body-size ceilings.
   /^\/api\/orders\/?$/,
@@ -516,6 +529,11 @@ const CSRF_EXEMPT_WRITE = [
   // which is to say, remove somebody from a mailing list they can rejoin by
   // signing up again. Kept as an exact-path regex so it widens nothing else.
   /^\/api\/newsletter\/unsubscribe\/?$/,
+  // The consent-ledger withdrawal link, for the same reason and under the same
+  // rule: a mail client may POST it, and the signed single-purpose token
+  // (`consent-wd`, bound to one address AND one purpose) is the authentication.
+  // A forgery can only withdraw what its holder was already sent a link for.
+  /^\/api\/consent\/withdraw\/?$/,
 ];
 function isCsrfExempt(pathname: string, method = 'POST'): boolean {
   if (CSRF_EXEMPT_WRITE.some(rx => rx.test(pathname))) return true;
@@ -959,6 +977,16 @@ const main = defineMiddleware(async (context, next) => {
   const forwardedIp = isBearer ? trustedForwardedIp(bearerKey, request.headers.get(CLIENT_IP_HEADER)) : null;
   const ip = forwardedIp ?? clientIp(request, directAddr);
   locals.ip = ip;
+  // Who the request is FOR (`ctx.client` for plugins, `requestClient(locals)`
+  // for core). Built FROM `ip` — the limiter's identity — so there is one
+  // notion of the real address. X-Client-IP / X-Client-UA are read only for an
+  // API-key request; see lib/client-address.ts.
+  locals.client = resolveRequestClient({
+    headers: request.headers,
+    viaApiKey: isBearer,
+    address: ip,
+    addressForwarded: forwardedIp !== null,
+  });
   // Expose a login throttle the auth handler can call with the parsed email
   // (returns false when this address has failed too often across accounts, or
   // has exceeded the IP+email attempt limit).
@@ -1285,6 +1313,14 @@ const main = defineMiddleware(async (context, next) => {
       if (!isWrite && isPublicApi(method, pathname)) {
         user = null;
         locals.user = null;
+        // Served as ANONYMOUS from here on, so it loses what only a keyed
+        // request may claim: the shopper named in X-Client-IP / X-Client-UA.
+        locals.client = resolveRequestClient({
+          headers: request.headers,
+          viaApiKey: false,
+          address: locals.ip,
+          addressForwarded: forwardedIp !== null,
+        });
       } else {
         return withCors(new Response(
           JSON.stringify({ success: false, error: { message: 'This API key\'s scopes do not permit this endpoint', code: 'INSUFFICIENT_SCOPE' } }),

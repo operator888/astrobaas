@@ -171,6 +171,8 @@ export const POST: APIRoute = async ({ request, locals }) => {
       // in the quote's currency, so a cart can show what the line includes.
       // Their prices are already inside `unit_price_cents`; never add them again.
       lines: t.lines.map((l, i) => {
+        // The free unit a gift_product coupon added (always the last line).
+        if (i === priced.giftLineIndex) return { ...l, coupon_gift: true };
         const addons = priced.addons[i] ?? [];
         if (!addons.length) return l;
         const fx = (n: number) => presentment.rate
@@ -188,8 +190,24 @@ export const POST: APIRoute = async ({ request, locals }) => {
        */
       coupon: priced.coupon
         ? priced.coupon.ok
-          ? { ok: true, code: priced.coupon.coupon.code, discount_cents: priced.coupon.discount_cents, free_shipping: priced.coupon.freeShipping }
-          : { ok: false, reason: rejected!.reason, message: rejected!.message, shortfall_cents: rejected!.shortfall_cents }
+          ? {
+              ok: true,
+              code: priced.coupon.coupon.code,
+              kind: priced.coupon.coupon.kind,
+              discount_cents: priced.coupon.discount_cents,
+              free_shipping: priced.coupon.freeShipping,
+              ...(priced.coupon.gift_product_id && priced.giftLineIndex !== null
+                ? { gift_product_id: priced.coupon.gift_product_id } : {}),
+            }
+          : {
+              ok: false,
+              reason: rejected!.reason,
+              // The contract's stable code (coupon.not_found, coupon.min_subtotal, …),
+              // collapsed for strangers exactly as `reason` is.
+              refusal: rejected!.refusal,
+              message: rejected!.message,
+              shortfall_cents: rejected!.shortfall_cents,
+            }
         : null,
     }, 'Quote');
   } catch (err) {

@@ -273,8 +273,9 @@ export const POST: APIRoute = async ({ request, locals }) => {
         });
         message = shown.message;
         params = shown.reason === 'minimum-not-met'
-          ? { reason: shown.reason, shortfall_cents: shown.shortfall_cents ?? 0 }
-          : undefined;
+          ? { reason: shown.reason, refusal: shown.refusal, shortfall_cents: shown.shortfall_cents ?? 0 }
+          // The stable code a stranger may see: the one a missing code gets.
+          : { refusal: shown.refusal };
       }
       // The CODE is what a storefront translates; the message is the fallback
       // for clients that do not know it. Sent together so neither kind of

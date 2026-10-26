@@ -49,6 +49,18 @@ POST   /api/orders                Checkout: { email, name?, items:[{product_id,q
                                   attribution? { first?, last? }: utm_* / gclid /
                                   fbclid / msclkid + at; send ONLY with the
                                   shopper's marketing consent; strict -> 422.
+                                  coupon_code?: a refused code is 400
+                                  checkout.coupon_invalid with params.refusal
+                                  (coupon.not_found|expired|not_started|
+                                  min_subtotal|not_applicable|email_mismatch|
+                                  already_redeemed|exhausted). Non-staff see
+                                  coupon.not_found for all but min_subtotal.
+POST   /api/orders/quote          Same body; prices it, creates nothing. Send
+                                  email for email-bound coupons. coupon:{ok,
+                                  kind, discount_cents} or {ok:false, refusal}.
+                                  Coupon kinds: percent, fixed, bogo50,
+                                  free_shipping, gift_product (gift = last line,
+                                  coupon_gift:true, price 0).
 GET    /api/orders                List orders.                             [editor+]
 GET    /api/orders/{id}           One order.                               [editor+]
 PUT    /api/orders/{id}           Update status/note.                      [editor+]
@@ -221,9 +233,18 @@ POST   /api/keys                  Mint an API key (returned once).         [admi
 GET    /api/keys                  List key metadata.                       [admin]
 DELETE /api/keys/{id}             Revoke a key.                            [admin]
 POST   /api/keys/{id}/rotate      Rotate a key's secret in place.          [admin]
-Scopes: "<posts|content|media>:<read|write|*>" or "*". A scoped key is denied
-        (403 INSUFFICIENT_SCOPE) on resources/actions it lacks; an unscoped key
-        is governed only by its role. Expired keys are rejected (401).
+Scopes: "<posts|content|media|products|orders|customers|messages|finance>:<read|write|*>",
+        "*", or a NAMED action: "game:play" (campaign-game plugin routes),
+        "coupons:validate" (POST /api/orders/quote only), "stats:read"
+        (GET /api/stats/*); "<resource>:*" grants every action of that
+        resource. Actions are per resource: "game:read" is invalid (422).
+        A scoped key is denied (403 INSUFFICIENT_SCOPE) on resources/actions
+        it lacks; an unscoped key is governed only by its role. Expired keys
+        are rejected (401).
+        On an API-key request, X-Client-IP / X-Client-UA name the shopper a
+        storefront server is calling for (plugins see them as ctx.client);
+        ignored on anonymous and cookie requests, and an unparseable IP falls
+        back to the real address.
 
 ## Webhooks (outbound events)
 POST   /api/webhooks              Register { url, events[], active? }; the
@@ -233,17 +254,40 @@ DELETE /api/webhooks/{id}         Unregister a hook.                        [adm
 GET    /api/webhooks/deliveries   Delivery log (attempts/status).          [admin]
 POST   /api/webhooks/deliveries/{id}/redeliver   Re-send a delivery.       [admin]
 Events: post.created, post.updated, post.deleted, content.created,
-        content.updated, content.deleted. Subscribe to "*" for all or
+        content.updated, content.deleted, order.created, coupon.redeemed
+        ({ code, coupon_id, order_id, email_hash }), newsletter.subscribed
+        ({ email_hash, source, at }) — email_hash = sha256 hex of the trimmed,
+        lower-cased address, never the address, the same rule in both, so they
+        join. A plugin's declared events (e.g. game.verified) are listed in
+        Admin → Webhooks. Subscribe to "*" for all or
         "post.*" for a prefix. Each delivery is a POST with headers
         X-AstroBaaS-Event, X-AstroBaaS-Timestamp, and
         X-AstroBaaS-Signature: sha256=<hex>, where hex =
         HMAC-SHA256(secret, rawBody). Verify by recomputing over the exact
         received bytes (SDK: verifyWebhookSignature). Failed deliveries retry
         with backoff and are recorded in the delivery log for manual re-send.
+        Active plugins may declare events of their own (e.g. game.verified);
+        Admin → Webhooks lists them. They are signed and retried like core
+        events, and never use a core namespace (order.*, coupon.*, …).
+
+## Public stats (opt-in)
+GET    /api/stats/orders-this-month  { count, month } — paid orders placed this
+                                  month in the shop timezone (shop_timezone,
+                                  default UTC). 404 unless the setting
+                                  public_order_stats_enabled is on. Never an
+                                  amount. Cache-Control: public, max-age=60.
+                                  A scoped key needs stats:read.
 
 ## Public forms (anonymous, CSRF-protected, rate-limited)
 POST   /api/contact               { name, email, subject?, message }
-POST   /api/newsletter            { email }
+POST   /api/newsletter            { email, consent_text?, consent_version? } — double opt-in;
+                                  the wording's sha256 goes to the consent ledger on confirm
+GET|POST /api/consent/withdraw?token=…  withdraw one consent from a signed link (no session)
+
+## Consent ledger (append-only proof of consent)
+GET    /api/consent/ledger?email=…          every row for an address (admin, read-only)
+POST   /api/consent/ledger/withdraw         { email, purpose } — appends a withdrawal (admin)
+GET    /api/newsletter/subscribers/export   granted + confirmed + not withdrawn only (staff; ?format=csv)
 
 ## i18n
 GET    /api/locales               which languages this site serves (public)

@@ -45,6 +45,7 @@ import type {
   WebhookDelivery,
   AuditEvent,
   ConsentReceipt,
+  ConsentLedgerRow,
   EmailLogEntry,
   PostRevision,
   Product,
@@ -59,10 +60,10 @@ import type {
 } from '../core/models'
 import type {
   Storage, UpdateProductOptions, OrderTransitionGuard, RecentOrdersQuery,
-  PaymentEventClaim, PaymentEventClaimOptions, RefundAppend, OrderTagsWrite, OrderTimelineWrite, IdempotencyClaim, OrderInvoiceRecordsWrite, OrderFieldWrite, OrderCasField,
+  PaymentEventClaim, PaymentEventClaimOptions, RefundAppend, OrderTagsWrite, OrderTimelineWrite, IdempotencyClaim, OrderInvoiceRecordsWrite, OrderFieldWrite, OrderCasField, CouponClaimOptions,
 } from '../core/storage'
 import type { RefundRecord, InvoiceDocument } from '../core/models'
-import { ORDER_CAS_FIELDS } from '../core/storage'
+import { ORDER_CAS_FIELDS, COUPON_EMAIL_KEY_RE } from '../core/storage'
 import { span } from './request-profile'
 
 // Collision-resistant, unguessable identifiers. (Previously Date.now()+Math.random(),
@@ -379,6 +380,7 @@ export class LocalDB {
       db.data.webhookDeliveries = db.data.webhookDeliveries ?? []
       db.data.auditEvents = db.data.auditEvents ?? []
       db.data.consentReceipts = db.data.consentReceipts ?? []
+      db.data.consentLedger = db.data.consentLedger ?? []
       db.data.emailLog = db.data.emailLog ?? []
       db.data.postRevisions = db.data.postRevisions ?? []
       db.data.products = db.data.products ?? []
@@ -936,30 +938,44 @@ export class LocalDB {
    * The lowdb and doc-blob half of Storage.claimCouponUse: the limit check
    * and the increment in ONE locked() hold.
    */
-  static async claimCouponUse(id: string): Promise<boolean> {
-    if (sqlBackend) return sqlBackend.claimCouponUse(id)
+  static async claimCouponUse(id: string, opts: CouponClaimOptions = {}): Promise<boolean> {
+    if (sqlBackend) return sqlBackend.claimCouponUse(id, opts)
+    const key = typeof opts.emailKey === 'string' && COUPON_EMAIL_KEY_RE.test(opts.emailKey) ? opts.emailKey : null
     return locked(async () => {
       await db.read()
       const rows = ((db.data as any)?.coupons ?? []) as CouponRecord[]
       const c = rows.find(r => r.id === id)
       if (!c) return false
       const used = Number(c.used_count) || 0
-      if (c.usage_limit != null && used >= c.usage_limit) return false
+      const byEmail = (c.redemptions_by_email && typeof c.redemptions_by_email === 'object') ? c.redemptions_by_email : {}
+      const mine = key ? Number(byEmail[key]) || 0 : 0
+      if (!opts.force) {
+        if (c.usage_limit != null && used >= c.usage_limit) return false
+        // `single_use` caps the total at one (effectiveUsageLimit).
+        if (c.single_use === true && used >= 1) return false
+        if (key && opts.perEmailLimit != null && mine >= opts.perEmailLimit) return false
+      }
       c.used_count = used + 1
+      if (key) c.redemptions_by_email = { ...byEmail, [key]: mine + 1 }
       c.updated_at = new Date().toISOString()
       await db.write()
       return true
     })
   }
 
-  static async releaseCouponUse(id: string): Promise<void> {
-    if (sqlBackend) return sqlBackend.releaseCouponUse(id)
+  static async releaseCouponUse(id: string, opts: Pick<CouponClaimOptions, 'emailKey'> = {}): Promise<void> {
+    if (sqlBackend) return sqlBackend.releaseCouponUse(id, opts)
+    const key = typeof opts.emailKey === 'string' && COUPON_EMAIL_KEY_RE.test(opts.emailKey) ? opts.emailKey : null
     await locked(async () => {
       await db.read()
       const rows = ((db.data as any)?.coupons ?? []) as CouponRecord[]
       const c = rows.find(r => r.id === id)
       if (!c) return
       c.used_count = Math.max(0, (Number(c.used_count) || 0) - 1)
+      if (key) {
+        const byEmail = (c.redemptions_by_email && typeof c.redemptions_by_email === 'object') ? c.redemptions_by_email : {}
+        c.redemptions_by_email = { ...byEmail, [key]: Math.max(0, (Number(byEmail[key]) || 0) - 1) }
+      }
       c.updated_at = new Date().toISOString()
       await db.write()
     })
@@ -2470,6 +2486,69 @@ export class LocalDB {
     return locked(async () => {
       await db.read()
       return (db.data?.consentReceipts || []).find(r => r.id === id) ?? null
+    })
+  }
+
+  /* ---------- consent ledger ---------- */
+
+  /**
+   * Append one ledger row. APPEND-ONLY — see ConsentLedgerRow.
+   *
+   * No cap, unlike consent receipts and the email log: this is the proof that
+   * a person consented, and evicting the oldest rows would delete exactly the
+   * evidence a dispute about an old subscription needs. A duplicate id is
+   * refused rather than replacing the stored row.
+   */
+  static async appendConsentRow(row: ConsentLedgerRow) {
+    if (sqlBackend) return sqlBackend.appendConsentRow(row)
+    return locked(async () => {
+      await db.read()
+      if (!db.data) throw new Error('database not initialised')
+      if (!db.data.consentLedger) db.data.consentLedger = []
+      if (db.data.consentLedger.some(r => r.id === row.id)) {
+        throw new Error(`consent ledger row ${row.id} already exists; the ledger is append-only`)
+      }
+      const copy: ConsentLedgerRow = JSON.parse(JSON.stringify(row))
+      db.data.consentLedger.push(copy)
+      await db.write()
+      return JSON.parse(JSON.stringify(copy)) as ConsentLedgerRow
+    })
+  }
+
+  /** Rows in WRITE order (oldest first), as copies. */
+  static async getConsentRows(query: { email?: string; purpose?: string; limit?: number } = {}) {
+    if (sqlBackend) return sqlBackend.getConsentRows(query)
+    return locked(async () => {
+      await db.read()
+      let rows = (db.data?.consentLedger || []).filter(r =>
+        (query.email === undefined || r.email === query.email)
+        && (query.purpose === undefined || r.purpose === query.purpose))
+      if (query.limit !== undefined && Number.isFinite(query.limit) && query.limit > 0) {
+        rows = rows.slice(-Math.floor(query.limit))
+      }
+      return JSON.parse(JSON.stringify(rows)) as ConsentLedgerRow[]
+    })
+  }
+
+  /**
+   * The GDPR erasure's pseudonymisation — the ONE rewrite of ledger rows.
+   * Everything that proves the decision stays; the address becomes its hash
+   * and ip/ua go. See src/lib/consent-ledger.ts for why rows are kept at all.
+   */
+  static async pseudonymiseConsentRows(email: string, replacement: string, erasedAt: string) {
+    if (sqlBackend) return sqlBackend.pseudonymiseConsentRows(email, replacement, erasedAt)
+    return locked(async () => {
+      await db.read()
+      if (!db.data?.consentLedger) return 0
+      let n = 0
+      db.data.consentLedger = db.data.consentLedger.map(r => {
+        if (r.email !== email) return r
+        n += 1
+        const { ip: _ip, ua: _ua, ...rest } = r
+        return { ...rest, email: replacement, erased_at: erasedAt }
+      })
+      if (n > 0) await db.write()
+      return n
     })
   }
 

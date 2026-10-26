@@ -67,6 +67,15 @@ export interface Plugin {
    * core's schema version. Run at bootstrap; `up()` must be idempotent.
    */
   migrations?: readonly PluginMigration[];
+  /**
+   * Webhook events this plugin sends, e.g. `['game.verified']`.
+   *
+   * Listed on the admin webhook screen so an operator can subscribe to them,
+   * and the ONLY events `host.webhooks.emit` will send for this plugin.
+   * Lower-case dotted names; a core namespace (`order.*`, `coupon.*`, …) is
+   * refused. See lib/plugin-platform/webhook-events.ts.
+   */
+  webhookEvents?: readonly string[];
   /** Optional lifecycle callbacks. */
   activate?: () => void | Promise<void>;
   deactivate?: () => void | Promise<void>;

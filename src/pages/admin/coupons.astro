@@ -1,0 +1,407 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import { LocalDB } from '../../lib/localdb';
+import { canOpenAdminPage } from '../../lib/admin-access';
+import { getShopCurrency } from '../../lib/commerce-service';
+import { currencyExponent } from '../../lib/money-format';
+import { isVariable } from '../../lib/commerce/variants';
+
+/**
+ * The coupon editor: every type (percent, fixed, bogo50, free_shipping,
+ * gift_product), the conditions and the limits.
+ *
+ * It writes through `/api/coupons` and nothing else, so what this screen can
+ * save is exactly what the API's validator (normalizeCoupon +
+ * checkCouponRecord) accepts — there is no second set of rules in the page.
+ * Amounts are typed in the shop currency's major units and sent as minor
+ * units; a percentage is typed as a percentage and sent as basis points, the
+ * stored unit.
+ */
+await LocalDB.init();
+const user = Astro.locals.user;
+// Same rule the middleware enforces, asked the same way.
+if (!canOpenAdminPage('/admin/coupons', user?.role)) {
+  return Astro.redirect('/admin');
+}
+const t = Astro.locals.t;
+const currency = await getShopCurrency();
+const exponent = currencyExponent(currency);
+// A gift is one unit with no choice to make, so only simple products are offered.
+const giftProducts = (await LocalDB.getProducts())
+  .filter((p) => p.status === 'active' && p.type !== 'grouped' && !isVariable(p))
+  .sort((a, b) => a.name.localeCompare(b.name));
+const inputCls = 'w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500';
+const labelCls = 'block text-sm font-medium text-gray-700 mb-1';
+---
+
+<AdminLayout title={t('admin.coupons.title')}>
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8" id="coupons-root" data-currency={currency} data-exponent={String(exponent)}>
+    <h1 class="text-2xl font-semibold text-gray-900 mb-2">{t('admin.coupons.title')}</h1>
+    <p class="text-sm text-gray-500 mb-6">{t('admin.coupons.intro')}</p>
+
+    <form id="coupon-form" class="bg-white border border-gray-200 rounded-xl p-6 mb-8 grid gap-4 md:grid-cols-2" novalidate>
+      <h2 id="c-form-title" class="md:col-span-2 text-lg font-medium text-gray-900">{t('admin.coupons.newCoupon')}</h2>
+      <input type="hidden" id="c-id" />
+
+      <div>
+        <label class={labelCls} for="c-code">{t('admin.coupons.code')}</label>
+        <input id="c-code" name="code" required maxlength="40" autocomplete="off" class={`${inputCls} uppercase`} />
+        <p class="text-xs text-gray-400 mt-1">{t('admin.coupons.codeHint')}</p>
+      </div>
+      <div>
+        <label class={labelCls} for="c-kind">{t('admin.coupons.kind')}</label>
+        <select id="c-kind" name="kind" class={inputCls}>
+          <option value="percent">{t('admin.coupons.kindPercent')}</option>
+          <option value="fixed">{t('admin.coupons.kindFixed')}</option>
+          <option value="bogo50">{t('admin.coupons.kindBogo50')}</option>
+          <option value="free_shipping">{t('admin.coupons.kindFreeShipping')}</option>
+          <option value="gift_product">{t('admin.coupons.kindGift')}</option>
+        </select>
+        <p id="c-help-bogo50" class="text-xs text-gray-500 mt-1 hidden">{t('admin.coupons.kindHelpBogo50')}</p>
+        <p id="c-help-gift" class="text-xs text-gray-500 mt-1 hidden">{t('admin.coupons.kindHelpGift')}</p>
+      </div>
+
+      <div id="c-value-wrap">
+        <label class={labelCls} for="c-value" id="c-value-label"
+          data-percent={t('admin.coupons.valuePercent')} data-amount={`${t('admin.coupons.valueAmount')} (${currency})`}>{t('admin.coupons.valuePercent')}</label>
+        <input id="c-value" name="value" type="number" min="0" step="any" inputmode="decimal" class={inputCls} />
+      </div>
+      <div id="c-gift-wrap" class="hidden">
+        <label class={labelCls} for="c-gift">{t('admin.coupons.gift')}</label>
+        <select id="c-gift" name="gift_product_id" class={inputCls}>
+          <option value="">{t('admin.coupons.giftNone')}</option>
+          {giftProducts.map((p) => (
+            <option value={p.id}>{p.name}{typeof p.stock === 'number' ? ` (${p.stock})` : ''}</option>
+          ))}
+        </select>
+      </div>
+
+      <div class="md:col-span-2">
+        <label class={labelCls} for="c-description">{t('admin.coupons.description')}</label>
+        <input id="c-description" name="description" maxlength="300" class={inputCls} />
+      </div>
+
+      <h3 class="md:col-span-2 text-sm font-semibold text-gray-900 uppercase tracking-wide mt-2">{t('admin.coupons.conditions')}</h3>
+      <div>
+        <label class={labelCls} for="c-min">{`${t('admin.coupons.minSubtotal')} (${currency})`}</label>
+        <input id="c-min" name="min_subtotal" type="number" min="0" step="any" inputmode="decimal" class={inputCls} />
+      </div>
+      <div>
+        <label class={labelCls} for="c-categories">{t('admin.coupons.categories')}</label>
+        <input id="c-categories" name="categories" class={inputCls} placeholder="sunglasses, frames" />
+        <p class="text-xs text-gray-400 mt-1">{t('admin.coupons.categoriesHint')}</p>
+      </div>
+      <div class="md:col-span-2">
+        <label class={labelCls} for="c-brands">{t('admin.coupons.brands')}</label>
+        <input id="c-brands" name="brands" class={inputCls} placeholder="Ray-Ban, Persol" />
+        <p class="text-xs text-gray-400 mt-1">{t('admin.coupons.brandsHint')}</p>
+      </div>
+
+      <h3 class="md:col-span-2 text-sm font-semibold text-gray-900 uppercase tracking-wide mt-2">{t('admin.coupons.limits')}</h3>
+      <div>
+        <label class={labelCls} for="c-email">{t('admin.coupons.email')}</label>
+        <input id="c-email" name="email" type="email" autocomplete="off" class={inputCls} />
+        <p class="text-xs text-gray-400 mt-1">{t('admin.coupons.emailHint')}</p>
+      </div>
+      <div class="flex items-center gap-2 pt-6">
+        <input id="c-single" name="single_use" type="checkbox" class="h-4 w-4" />
+        <label for="c-single" class="text-sm text-gray-700">{t('admin.coupons.singleUse')}</label>
+      </div>
+      <div>
+        <label class={labelCls} for="c-max">{t('admin.coupons.maxRedemptions')}</label>
+        <input id="c-max" name="max_redemptions" type="number" min="1" step="1" class={inputCls} />
+      </div>
+      <div>
+        <label class={labelCls} for="c-per-email">{t('admin.coupons.maxPerEmail')}</label>
+        <input id="c-per-email" name="max_redemptions_per_email" type="number" min="1" step="1" class={inputCls} />
+      </div>
+      <div>
+        <label class={labelCls} for="c-starts">{t('admin.coupons.startsAt')}</label>
+        <input id="c-starts" name="starts_at" type="datetime-local" class={inputCls} />
+      </div>
+      <div>
+        <label class={labelCls} for="c-ends">{t('admin.coupons.endsAt')}</label>
+        <input id="c-ends" name="ends_at" type="datetime-local" class={inputCls} />
+      </div>
+
+      <div class="md:col-span-2 flex flex-wrap gap-x-6 gap-y-2">
+        <label id="c-free-shipping-wrap" class="flex items-center gap-2 text-sm text-gray-700">
+          <input id="c-free-shipping" type="checkbox" class="h-4 w-4" />{t('admin.coupons.freeShipping')}
+        </label>
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input id="c-automatic" type="checkbox" class="h-4 w-4" />{t('admin.coupons.automatic')}
+        </label>
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input id="c-enabled" type="checkbox" class="h-4 w-4" checked />{t('admin.coupons.enabled')}
+        </label>
+      </div>
+
+      <div class="md:col-span-2 flex items-center gap-3">
+        <button id="c-save" type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">{t('admin.coupons.save')}</button>
+        <button id="c-cancel" type="button" class="hidden px-4 py-2 border border-gray-300 rounded-lg text-gray-700">{t('admin.coupons.cancel')}</button>
+        <span id="c-message" role="status" class="text-sm"></span>
+      </div>
+    </form>
+
+    <div class="bg-white rounded-lg border border-gray-200 overflow-x-auto">
+      <table class="min-w-full divide-y divide-gray-200 text-sm" id="coupon-table">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">{t('admin.coupons.colCode')}</th>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">{t('admin.coupons.colType')}</th>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">{t('admin.coupons.colValue')}</th>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">{t('admin.coupons.colConditions')}</th>
+            <th class="px-4 py-3 text-right font-medium text-gray-500">{t('admin.coupons.colUsed')}</th>
+            <th class="px-4 py-3 text-left font-medium text-gray-500">{t('admin.coupons.colStatus')}</th>
+            <th class="px-4 py-3 text-right font-medium text-gray-500">{t('admin.coupons.colActions')}</th>
+          </tr>
+        </thead>
+        <tbody id="coupon-rows" class="divide-y divide-gray-100"></tbody>
+      </table>
+    </div>
+  </div>
+</AdminLayout>
+
+<script>
+  // @ts-nocheck — vanilla browser glue (DOM + fetch); the rules live in the API.
+  const root = document.getElementById('coupons-root');
+  const EXP = Number(root?.dataset.exponent ?? 2);
+  const CURRENCY = root?.dataset.currency ?? '';
+  const $ = (id) => document.getElementById(id);
+  const t = (k, p) => (typeof window.t === 'function' ? window.t(k, p) : k);
+  const csrf = () => (window.__ASTROBAAS__?.csrf) || document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+
+  async function api(method, path, body) {
+    const headers = { Accept: 'application/json' };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (method !== 'GET') headers['X-CSRF-Token'] = csrf();
+    const res = await fetch(path, { method, headers, credentials: 'same-origin', body: body ? JSON.stringify(body) : undefined });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || json?.success === false) throw new Error(json?.error?.message || `HTTP ${res.status}`);
+    return json?.data;
+  }
+
+  const KIND_LABEL = {
+    percent: 'admin.coupons.kindPercent',
+    fixed: 'admin.coupons.kindFixed',
+    bogo50: 'admin.coupons.kindBogo50',
+    free_shipping: 'admin.coupons.kindFreeShipping',
+    gift_product: 'admin.coupons.kindGift',
+  };
+  const VALUED = ['percent', 'fixed'];
+  const toMinor = (major) => Math.round(Number(major) * 10 ** EXP);
+  const toMajor = (minor) => (Number(minor) / 10 ** EXP).toFixed(EXP);
+  const money = (minor) => `${toMajor(minor)} ${CURRENCY}`;
+  const list = (s) => String(s ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  // ISO <-> the value a datetime-local input holds (local time, minutes).
+  const toLocalInput = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const fromLocalInput = (v) => (v ? new Date(v).toISOString() : null);
+  const intOrNull = (v) => (String(v).trim() === '' ? null : Math.round(Number(v)));
+
+  let coupons = [];
+
+  function syncKind() {
+    const kind = $('c-kind').value;
+    const valued = VALUED.includes(kind);
+    $('c-value-wrap').classList.toggle('hidden', !valued);
+    $('c-gift-wrap').classList.toggle('hidden', kind !== 'gift_product');
+    $('c-help-bogo50').classList.toggle('hidden', kind !== 'bogo50');
+    $('c-help-gift').classList.toggle('hidden', kind !== 'gift_product');
+    // A free_shipping coupon IS free shipping; the extra checkbox would be noise.
+    $('c-free-shipping-wrap').classList.toggle('hidden', kind === 'free_shipping');
+    const label = $('c-value-label');
+    label.textContent = kind === 'percent' ? label.dataset.percent : label.dataset.amount;
+  }
+
+  function message(text, ok) {
+    const el = $('c-message');
+    el.textContent = text;
+    el.className = `text-sm ${ok ? 'text-green-700' : 'text-red-600'}`;
+  }
+
+  function resetForm() {
+    $('coupon-form').reset();
+    $('c-id').value = '';
+    $('c-enabled').checked = true;
+    $('c-code').disabled = false;
+    $('c-form-title').textContent = t('admin.coupons.newCoupon');
+    $('c-cancel').classList.add('hidden');
+    syncKind();
+  }
+
+  function fill(c) {
+    $('c-id').value = c.id;
+    $('c-code').value = c.code;
+    $('c-kind').value = c.kind;
+    $('c-value').value = c.kind === 'percent' ? String(Number(c.value) / 100) : c.kind === 'fixed' ? toMajor(c.value) : '';
+    $('c-gift').value = c.gift_product_id ?? '';
+    $('c-description').value = c.description ?? '';
+    $('c-min').value = c.min_subtotal_cents != null ? toMajor(c.min_subtotal_cents) : '';
+    $('c-categories').value = (c.category_slugs ?? []).join(', ');
+    $('c-brands').value = (c.brands ?? []).join(', ');
+    $('c-email').value = c.email ?? '';
+    $('c-single').checked = c.single_use === true;
+    $('c-max').value = c.usage_limit ?? '';
+    $('c-per-email').value = c.usage_limit_per_customer ?? '';
+    $('c-starts').value = toLocalInput(c.starts_at);
+    $('c-ends').value = toLocalInput(c.ends_at);
+    $('c-free-shipping').checked = c.free_shipping === true;
+    $('c-automatic').checked = c.automatic === true;
+    $('c-enabled').checked = c.enabled !== false;
+    $('c-form-title').textContent = t('admin.coupons.editCoupon', { code: c.code });
+    $('c-cancel').classList.remove('hidden');
+    syncKind();
+    $('coupon-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function body() {
+    const kind = $('c-kind').value;
+    const out = {
+      code: $('c-code').value.trim(),
+      kind,
+      description: $('c-description').value.trim() || null,
+      min_subtotal_cents: $('c-min').value.trim() === '' ? null : toMinor($('c-min').value),
+      category_slugs: list($('c-categories').value),
+      brands: list($('c-brands').value),
+      email: $('c-email').value.trim() || null,
+      single_use: $('c-single').checked,
+      usage_limit: intOrNull($('c-max').value),
+      usage_limit_per_customer: intOrNull($('c-per-email').value),
+      starts_at: fromLocalInput($('c-starts').value),
+      ends_at: fromLocalInput($('c-ends').value),
+      free_shipping: kind !== 'free_shipping' && $('c-free-shipping').checked,
+      automatic: $('c-automatic').checked,
+      enabled: $('c-enabled').checked,
+      gift_product_id: kind === 'gift_product' ? ($('c-gift').value || null) : null,
+    };
+    if (kind === 'percent') out.value = Math.round(Number($('c-value').value || 0) * 100);
+    else if (kind === 'fixed') out.value = toMinor($('c-value').value || 0);
+    else out.value = 0;
+    return out;
+  }
+
+  function statusOf(c) {
+    const now = Date.now();
+    if (c.revoked_at) return ['admin.coupons.statusRevoked', 'text-red-700'];
+    if (c.enabled === false) return ['admin.coupons.statusDisabled', 'text-gray-500'];
+    if (c.ends_at && Date.parse(c.ends_at) < now) return ['admin.coupons.statusExpired', 'text-gray-500'];
+    if (c.starts_at && Date.parse(c.starts_at) > now) return ['admin.coupons.statusScheduled', 'text-amber-700'];
+    return ['admin.coupons.statusActive', 'text-green-700'];
+  }
+
+  function valueOf(c) {
+    if (c.kind === 'percent') return `${Number(c.value) / 100}%`;
+    if (c.kind === 'fixed') return money(c.value);
+    if (c.kind === 'gift_product') {
+      const opt = [...$('c-gift').options].find((o) => o.value === c.gift_product_id);
+      return opt ? opt.textContent : (c.gift_product_id ?? '—');
+    }
+    return '—';
+  }
+
+  function conditionsOf(c) {
+    const parts = [];
+    if (c.min_subtotal_cents) parts.push(t('admin.coupons.condMin', { amount: money(c.min_subtotal_cents) }));
+    if ((c.category_slugs ?? []).length) parts.push(c.category_slugs.join(', '));
+    if ((c.brands ?? []).length) parts.push(c.brands.join(', '));
+    if (c.email) parts.push(t('admin.coupons.condEmail', { email: c.email }));
+    if (c.single_use) parts.push(t('admin.coupons.condSingle'));
+    if (c.automatic) parts.push(t('admin.coupons.condAutomatic'));
+    if (c.source?.plugin) parts.push(t('admin.coupons.issuedBy', { plugin: c.source.plugin }));
+    return parts.join(' · ') || '—';
+  }
+
+  // Everything from the server is set as TEXT, never as HTML: a code, a brand
+  // or a plugin name is data, and this table is read with an admin session.
+  const cell = (text, cls = '') => {
+    const td = document.createElement('td');
+    td.className = `px-4 py-2 ${cls}`;
+    td.textContent = text;
+    return td;
+  };
+
+  function render() {
+    const tbody = $('coupon-rows');
+    tbody.replaceChildren();
+    if (!coupons.length) {
+      const tr = document.createElement('tr');
+      const td = cell(t('admin.coupons.none'), 'text-gray-500');
+      td.colSpan = 7;
+      tr.append(td);
+      tbody.append(tr);
+      return;
+    }
+    for (const c of coupons) {
+      const tr = document.createElement('tr');
+      tr.className = 'coupon-row hover:bg-gray-50';
+      tr.dataset.code = c.code;
+      const [statusKey, statusCls] = statusOf(c);
+      const limit = c.single_use ? 1 : c.usage_limit;
+      const actions = document.createElement('td');
+      actions.className = 'px-4 py-2 text-right whitespace-nowrap';
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'coupon-edit text-blue-600 hover:underline mr-3';
+      edit.textContent = t('admin.coupons.edit');
+      edit.addEventListener('click', () => fill(c));
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'coupon-delete text-red-600 hover:underline';
+      del.textContent = t('admin.coupons.delete');
+      del.addEventListener('click', async () => {
+        if (!confirm(t('admin.coupons.confirmDelete', { code: c.code }))) return;
+        try {
+          await api('DELETE', `/api/coupons/${encodeURIComponent(c.id)}`);
+          message(t('admin.coupons.deleted'), true);
+          if ($('c-id').value === c.id) resetForm();
+          await load();
+        } catch (e) { message(String(e.message || e), false); }
+      });
+      actions.append(edit, del);
+      tr.append(
+        cell(c.code, 'font-mono font-medium text-gray-900'),
+        cell(t(KIND_LABEL[c.kind] ?? c.kind)),
+        cell(valueOf(c)),
+        cell(conditionsOf(c), 'text-gray-600'),
+        cell(limit != null ? `${c.used_count ?? 0} / ${limit}` : String(c.used_count ?? 0), 'text-right tabular-nums'),
+        cell(t(statusKey), statusCls),
+        actions,
+      );
+      tbody.append(tr);
+    }
+  }
+
+  async function load() {
+    try {
+      coupons = (await api('GET', '/api/coupons')) ?? [];
+      coupons.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+      render();
+    } catch (e) {
+      message(t('admin.coupons.loadFailed'), false);
+    }
+  }
+
+  $('c-kind').addEventListener('change', syncKind);
+  $('c-cancel').addEventListener('click', () => { resetForm(); message('', true); });
+  $('coupon-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const id = $('c-id').value;
+    try {
+      await api(id ? 'PUT' : 'POST', id ? `/api/coupons/${encodeURIComponent(id)}` : '/api/coupons', body());
+      message(t('admin.coupons.saved'), true);
+      resetForm();
+      await load();
+    } catch (err) {
+      message(String(err.message || err), false);
+    }
+  });
+
+  syncKind();
+  load();
+</script>

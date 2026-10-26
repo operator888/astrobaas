@@ -508,6 +508,43 @@ export interface Subscriber {
   created_at: string;
 }
 
+/**
+ * One row of the consent ledger — see `src/lib/consent-ledger.ts`.
+ *
+ * APPEND-ONLY. A row is never edited and never deleted: a confirmation is a
+ * new row with `confirmed_at`, a withdrawal is a new row with `granted: false`,
+ * and the current state for (email, purpose) is read from the rows in the
+ * order they were written. The single exception is the GDPR erasure, which
+ * replaces `email` with `sha256:<hex>` and removes `ip` and `ua` — the proof
+ * that consent existed is kept, the person is not (see `pseudonymiseConsentRows`).
+ *
+ * Its own collection on every driver, and NOT a custom entity: custom-entity
+ * writes land in the public content change feed, which would publish who
+ * consented to what.
+ */
+export interface ConsentLedgerRow {
+  id: string;
+  /** Normalised lower-case address, or `sha256:<hex>` after an erasure. */
+  email: string;
+  /** What the consent is for. Known values: `game_terms`, `newsletter`. */
+  purpose: string;
+  granted: boolean;
+  /** The version label of the text the person saw, as the recorder named it. */
+  version: string;
+  /** sha256 (hex) of the exact UTF-8 text the person saw. Empty on a withdrawal with no prior grant. */
+  text_hash: string;
+  /** ISO timestamp the row was written (for a migrated row: when the old subscription was confirmed). */
+  at: string;
+  ip?: string;
+  ua?: string;
+  /** Who recorded it: `newsletter_form`, `unsubscribe_link`, `admin`, `migration`, a plugin id… */
+  source: string;
+  /** Set on a double-opt-in confirmation row. */
+  confirmed_at?: string;
+  /** Set by the erasure, the one rewrite this ledger allows. */
+  erased_at?: string;
+}
+
 /** A record stored in a custom (plugin-registered) content collection. */
 export interface CustomEntity {
   id: string;
@@ -1326,6 +1363,12 @@ export interface OrderItem {
   /** line total in cents */
   total_cents: number;
   /**
+   * The free unit a `gift_product` coupon added. Priced 0, stock reserved
+   * like any line, and marked so a receipt or a return can say why it cost
+   * nothing.
+   */
+  coupon_gift?: true;
+  /**
    * The prescription this line was ordered with, FROZEN at purchase.
    *
    * Stored on the line rather than referenced, for the same reason variant
@@ -2007,6 +2050,19 @@ export interface Order {
   shipping_method_name?: string;
   /** Coupon applied, if any. */
   coupon_code?: string;
+  /**
+   * The coupon use this order holds, recorded when checkout claimed it
+   * (claimCouponUse). What lets a cancellation BEFORE PAYMENT hand the use
+   * back exactly once: `released_at` is written in the same step as the
+   * status move (setOrderStatus), and only the request that won that move
+   * releases. `email_key` is set when the use was also counted against the
+   * buyer (`couponEmailKey`, a hash — never the address).
+   */
+  coupon_redemption?: {
+    coupon_id: string;
+    email_key?: string;
+    released_at?: string;
+  };
   /** Destination used to price shipping and tax. */
   shipping_country?: string;
   shipping_postcode?: string;
@@ -2219,6 +2275,8 @@ export interface DatabaseSchema {
   webhookDeliveries?: WebhookDelivery[];
   auditEvents?: AuditEvent[];
   consentReceipts?: ConsentReceipt[];
+  /** Append-only, uncapped, never in the change feed. See ConsentLedgerRow. */
+  consentLedger?: ConsentLedgerRow[];
   emailLog?: EmailLogEntry[];
   postRevisions?: PostRevision[];
   /** Commerce collections (optional so legacy DBs parse; backfilled on init). */

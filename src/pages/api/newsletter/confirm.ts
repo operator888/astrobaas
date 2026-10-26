@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { LocalDB } from '../../../lib/localdb';
-import { readConfirmToken, makeUnsubscribeToken } from '../../../lib/newsletter-confirm';
-import { fireEvent } from '../../../lib/webhooks';
+import { readConfirmToken, readConfirmConsent, makeUnsubscribeToken } from '../../../lib/newsletter-confirm';
+import { confirmNewsletterSignup } from '../../../lib/consent-service';
 
 /**
  * Complete a double opt-in.
@@ -13,34 +13,32 @@ import { fireEvent } from '../../../lib/webhooks';
  *
  * Redirects rather than returning JSON — a person is looking at this in a
  * browser, and a page of JSON is not an answer to "did that work?".
+ *
+ * The click writes the consent ledger: the grant the signup made (with the
+ * wording's version and hash, carried in the signed link) and its confirmation.
+ * The confirmation is what puts the address on the list — in consent-service.ts,
+ * the one place that decides it for core's forms and for plugins alike, and
+ * idempotently: a link clicked twice, or a prefetching mail client, adds no
+ * second row and fires no second `subscriber.confirmed`. A link minted before
+ * the person last unsubscribed no longer works.
  */
 export const prerender = false;
 
 export const GET: APIRoute = async ({ url, redirect }) => {
   try {
     await LocalDB.init();
-    const email = readConfirmToken(new URL(url).searchParams.get('token'));
+    const token = new URL(url).searchParams.get('token');
+    const email = readConfirmToken(token);
+    const consent = readConfirmConsent(token);
     // One outcome for every kind of bad token — expired, forged, malformed.
     // Distinguishing them tells a prober something about the signing key and
     // changes nothing for the person holding a link that does not work.
-    if (!email) return redirect('/newsletter/confirmed?ok=0', 302);
+    if (!email || !consent) return redirect('/newsletter/confirmed?ok=0', 302);
 
-    // Idempotent: a link clicked twice, or a prefetching mail client that opens
-    // it before the human does, must not create a second row. There is no
-    // unique index on any driver, so uniqueness lives in the write.
-    const existing = await LocalDB.getSubscribers();
-    const already = (existing as { email?: string }[]).some(
-      (s) => typeof s?.email === 'string' && s.email.trim().toLowerCase() === email,
-    );
-    if (!already) {
-      await LocalDB.createSubscriber(email);
-      // ESP sync (C-113). Fired only on a FIRST confirmation: a second click
-      // must not re-import the address, and the double-opt-in click is the
-      // only moment at which forwarding it to a third party is lawful.
-      // Fire-and-forget, like every other event — a subscriber must not fail
-      // to be recorded because somebody's automation is down.
-      void fireEvent('subscriber.confirmed', { email, confirmed_at: new Date().toISOString() });
-    }
+    // A link minted before the person unsubscribed is dead — the same failure
+    // page, and nothing written (consent-service.ts says why).
+    const { confirmed } = await confirmNewsletterSignup(email, consent);
+    if (!confirmed) return redirect('/newsletter/confirmed?ok=0', 302);
 
     // The way out, handed over at the moment they join. This is what makes the
     // page's own promise about unsubscribe links TRUE — before this, nothing in

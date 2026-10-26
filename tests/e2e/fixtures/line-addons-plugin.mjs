@@ -18,6 +18,9 @@ export default function ({ definePlugin, PLUGIN_HOOKS }) {
     version: '1.0.0',
     description: 'Test fixture: prices the e2e-engrave add-ons.',
     author: 'AstroBaaS tests',
+    // Declared only so tests/e2e/plugin-game-seams.spec.ts can see a plugin
+    // event listed on Admin → Webhooks. Nothing emits it.
+    webhookEvents: ['e2e.engraved'],
     filters: PLUGIN_HOOKS.ORDER_LINE_ADDONS
       ? {
         [PLUGIN_HOOKS.ORDER_LINE_ADDONS]: (current, ctx) => {

@@ -20,7 +20,9 @@ import {
   availableMethods, resolveChosenMethod,
   type AvailableMethod, type ShippingDestination, type ShippableBasket,
 } from './shipping';
-import { applyCoupon, normalizeCouponCode, type CouponResult } from './coupons';
+import { applyCoupon, normalizeCouponCode, type Coupon, type CouponResult } from './coupons';
+import { couponEmailKey } from './coupon-service';
+import { buildBrandDirectory, type BrandDirectory } from './brand';
 import { calculateTotals, type OrderTotals, type TotalsLine } from './totals';
 import {
   resolvePurchasable, explainResolveFailure, variantAvailability,
@@ -87,6 +89,12 @@ export interface PricedBasket {
   shipping: AvailableMethod | null;
   availableShipping: AvailableMethod[];
   coupon: CouponResult | null;
+  /**
+   * Index in `totals.lines` of the free unit a `gift_product` coupon added —
+   * always the LAST line — or null. Every other line is one of the request's
+   * items, in order.
+   */
+  giftLineIndex: number | null;
   tax: TaxSettings;
 }
 
@@ -218,28 +226,80 @@ export async function priceBasket(
 
   // The lines a coupon is judged against, built once: an automatic rule and a
   // typed code must be measured against exactly the same basket, or the two
-  // paths would eventually disagree about what a discount is worth.
+  // paths would eventually disagree about what a discount is worth. `qty` is
+  // there for bogo50, which pairs units; `brand` for brand-restricted codes.
   const couponLines = lines.map((l, i) => ({
     product_id: l.product_id,
     categories: products[i].categories,
+    brand: typeof products[i].brand === 'string' ? products[i].brand : undefined,
     amount_cents: couponAmount(l, i),
+    qty: l.qty,
   }));
+
+  /*
+   * What a coupon needs from storage besides the basket, loaded only for the
+   * coupons that will actually be judged — so a shop without brand-restricted
+   * or gift coupons pays nothing for either.
+   *
+   * BRANDS go through the same directory `?brand=` uses (buildBrandDirectory
+   * over the stored products and curated brands), so a coupon naming
+   * `ray-ban` means exactly the products that link shows.
+   *
+   * A GIFT is available when its product is active, a simple product, and has
+   * a unit free beyond what this basket already takes of it. No backorders: a
+   * gift the shop does not have is not a gift. Checked on the quote as well as
+   * the order, so a quote never promises a gift the order would refuse.
+   */
+  const couponContextFor = async (candidates: readonly Coupon[]) => {
+    let brandDirectory: Pick<BrandDirectory, 'keyFor'> | undefined;
+    if (candidates.some((c) => (c.brands ?? []).length > 0)) {
+      brandDirectory = buildBrandDirectory(await LocalDB.getProducts(), await LocalDB.getBrands());
+    }
+    const gifts = new Map<string, boolean>();
+    for (const c of candidates) {
+      const id = c.kind === 'gift_product' && typeof c.gift_product_id === 'string' ? c.gift_product_id : '';
+      if (!id || gifts.has(id)) continue;
+      const product = await LocalDB.getProduct(id);
+      const resolved = product && product.status === 'active' ? resolvePurchasable(product, null) : null;
+      // When ORDERING, placeOrder has already reserved the basket's own units
+      // before pricing, so the stock read here is net of them; counting them
+      // again refused a gift the shop had (quote yes, order no). When QUOTING
+      // nothing is reserved, so the basket's units are taken off here.
+      const inBasket = opts.checkAvailability
+        ? 0
+        : lines.reduce((s, l) => s + (l.product_id === id && !l.variant_id ? l.qty : 0), 0);
+      gifts.set(id, !!resolved && (resolved.stock === null || resolved.stock === undefined || resolved.stock >= inBasket + 1));
+    }
+    return { brandDirectory, giftAvailable: (id: string) => gifts.get(id) === true };
+  };
 
   if (code) {
     const all = await LocalDB.getCoupons();
     const found = all.find((c) => normalizeCouponCode(c.code) === code);
 
-    // Per-customer limit needs the customer's history. Only counted when the
-    // coupon actually sets a limit — otherwise every quote would scan orders.
+    /*
+     * Per-customer uses. Only counted when the coupon actually sets a limit —
+     * otherwise every quote would scan orders.
+     *
+     * Two sources, and the larger wins. The ORDER SCAN is what this always
+     * was, and is the only history a coupon redeemed before per-email counting
+     * existed has. The COUNTER (`redemptions_by_email`, kept atomically by
+     * claimCouponUse) is what two concurrent checkouts by one buyer cannot
+     * both slip past — the scan alone cannot see an order that is being
+     * written at the same moment.
+     */
     let customerUses = 0;
     if (found?.usage_limit_per_customer != null && input.email) {
       const email = input.email.trim().toLowerCase();
       const orders = await LocalDB.getOrders();
-      customerUses = orders.filter(
+      const scanned = orders.filter(
         (o) => o.email?.toLowerCase() === email &&
           normalizeCouponCode(o.coupon_code) === code &&
           o.status !== 'cancelled',
       ).length;
+      const key = couponEmailKey(email);
+      const counted = key ? Number(found.redemptions_by_email?.[key]) || 0 : 0;
+      customerUses = Math.max(scanned, counted);
     }
 
     coupon = applyCoupon(found, {
@@ -247,6 +307,8 @@ export async function priceBasket(
       subtotal_cents: subtotalForCoupon,
       nowMs,
       customerUses,
+      email: input.email,
+      ...(found ? await couponContextFor([found]) : {}),
     });
   } else {
     // AUTOMATIC RULES. No code was typed, so the shop's own rules apply —
@@ -271,6 +333,7 @@ export async function priceBasket(
     // shop with many switched-off promotions does not evaluate every one of
     // them on every cart change.
     const automatic = all.filter((c) => c.automatic === true && c.enabled);
+    const extra = automatic.length ? await couponContextFor(automatic) : {};
     let best: CouponResult | null = null;
     for (const rule of automatic) {
       // Per-customer limits are NOT counted for automatic rules: doing so would
@@ -280,6 +343,8 @@ export async function priceBasket(
         lines: couponLines,
         subtotal_cents: subtotalForCoupon,
         nowMs,
+        email: input.email,
+        ...extra,
       });
       if (!result.ok) continue;
       const better = !best || !best.ok
@@ -293,6 +358,44 @@ export async function priceBasket(
     coupon = best;
   }
   const discount_cents = coupon?.ok ? coupon.discount_cents : 0;
+
+  /*
+   * --- the gift, when the coupon is a gift_product ---
+   *
+   * One unit, priced 0, appended as the LAST line so every array aligned with
+   * `lines` (products, resolved, addons) stays aligned and the basket's own
+   * lines keep their indexes. Added AFTER the coupon was judged, so the gift
+   * never counts towards its own minimum spend, and BEFORE shipping, so its
+   * weight is shipped. At price 0 it carries no tax and no share of the
+   * discount (allocateDiscount gives a 0 line nothing).
+   */
+  let giftLineIndex: number | null = null;
+  if (coupon?.ok && coupon.gift_product_id) {
+    const gift = await LocalDB.getProduct(coupon.gift_product_id);
+    const resolved = gift ? resolvePurchasable(gift, null) : null;
+    if (gift && resolved) {
+      giftLineIndex = lines.length;
+      products.push(gift);
+      resolvedLines.push(resolved);
+      lineAddons.push([]);
+      addonUnits.push(0);
+      lines.push({
+        product_id: gift.id,
+        name: resolved.name,
+        qty: 1,
+        unit_price_cents: 0,
+        tax_class: gift.tax_class,
+        // 'none', not the product's own status: at price 0 the line owes no
+        // tax either way, and a taxable status would make the sale need a VAT
+        // rate for the gift's class — refusing a checkout over a free unit —
+        // and could decide on its own whether SHIPPING is taxed.
+        tax_status: 'none',
+        weight_grams: resolved.weight_grams ?? 0,
+        requires_shipping: gift.requires_shipping !== false && gift.virtual !== true,
+        categories: gift.categories,
+      });
+    }
+  }
 
   // --- shipping ---
   const requiresShipping = lines.some((l) => l.requires_shipping !== false);
@@ -400,6 +503,7 @@ export async function priceBasket(
     shipping: shipping ? { ...shipping, cost_cents: shippingCost } : null,
     availableShipping: offered,
     coupon,
+    giftLineIndex,
     tax,
   };
 }

@@ -13,7 +13,13 @@
  * fix instead of failing to bundle.
  */
 export { LocalDB } from '../../src/lib/localdb';
-export { placeOrder, setOrderStatus } from '../../src/lib/commerce-service';
+export { placeOrder, setOrderStatus, couponMove } from '../../src/lib/commerce-service';
+// Coupons v2 (tests/coupons-v2.test.mjs): the service behind host.coupons, and
+// the add-on decision the coupon maths must agree with.
+export * as couponService from '../../src/lib/commerce/coupon-service';
+export * as lineAddons from '../../src/lib/commerce/line-addons';
+export { POST as postCoupon } from '../../src/pages/api/coupons/index';
+export { PUT as putCoupon } from '../../src/pages/api/coupons/[id]';
 export { pluginManager, PLUGIN_HOOKS } from '../../src/lib/plugin-system';
 export { applyVerifiedEvent, refundOrder, startPayment } from '../../src/lib/payments/service';
 export * as registry from '../../src/lib/payments/registry';

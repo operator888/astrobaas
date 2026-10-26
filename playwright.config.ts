@@ -86,8 +86,10 @@ export default defineConfig({
       // A fixture plugin on PLUGIN_HOOKS.ORDER_LINE_ADDONS, loaded the way a
       // paid module is, for order-line-addons.spec.ts. Inert for any line that
       // does not send its own `e2e-engrave` namespace.
-      ASTROBAAS_PLUGINS: './tests/e2e/fixtures/line-addons-plugin.mjs',
-      ASTROBAAS_PLUGINS_ACTIVATE: 'e2e-line-addons',
+      // A second fixture, for consent-ledger.spec.ts: records consent through
+      // host.consent on one admin-only route under /api/plugin/e2e-consent/.
+      ASTROBAAS_PLUGINS: './tests/e2e/fixtures/line-addons-plugin.mjs,./tests/e2e/fixtures/consent-plugin.mjs',
+      ASTROBAAS_PLUGINS_ACTIVATE: 'e2e-line-addons,e2e-consent',
     },
   },
   globalSetup: './tests/e2e/global-setup.ts',

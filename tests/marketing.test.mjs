@@ -24,6 +24,21 @@ const popupScript = await read('src/pages/popup.js.ts');
 const popupPlugin = await read('src/plugins/popups/index.ts');
 const confirmRoute = await read('src/pages/api/newsletter/confirm.ts');
 const unsubRoute = await read('src/pages/api/newsletter/unsubscribe.ts');
+// Since the consent ledger, both routes act through consent-service.ts: the
+// subscribe and the unsubscribe live there, shared with the admin withdrawal and
+// with plugins (host.consent). The checks below read the function that does the
+// work, and separately assert that each route still reaches it.
+const consentService = await read('src/lib/consent-service.ts');
+const fnBody = (src, name) => {
+  const start = src.indexOf(`async function ${name}(`);
+  if (start < 0) return '';
+  const next = src.indexOf('\nasync function ', start + 1);
+  const api = src.indexOf('/* ----', start + 1);
+  const ends = [next, api].filter((i) => i > 0);
+  return src.slice(start, ends.length ? Math.min(...ends) : undefined);
+};
+const subscribeFn = fnBody(consentService, 'subscribeConfirmed');
+const unsubscribeFn = fnBody(consentService, 'unsubscribeAll');
 const submissionNotify = await read('src/lib/submission-notify.ts');
 const newsletterRoute = await read('src/pages/api/newsletter.ts');
 const orderConfirm = await read('src/lib/commerce/order-confirmation.ts');
@@ -235,19 +250,27 @@ check('there is NO event for an unconfirmed signup', () => {
     W.WEBHOOK_EVENTS.filter((e) => e.startsWith('subscriber')).join(', '));
 });
 
+check('both routes still act through the consent service', () => {
+  ok(/confirmNewsletterSignup\(/.test(code(confirmRoute)), 'the confirm route no longer confirms anything');
+  ok(/withdrawConsent\(/.test(code(unsubRoute)), 'the unsubscribe route no longer withdraws anything');
+  // ...and the service's newsletter paths call the two functions checked below.
+  ok(/await subscribeConfirmed\(/.test(code(consentService)), 'confirmation never subscribes');
+  ok(/await unsubscribeAll\(/.test(code(consentService)), 'withdrawal never unsubscribes');
+});
+
 check('confirmed fires on the double-opt-in click, and only the FIRST time', () => {
-  const src = code(confirmRoute);
+  const src = code(subscribeFn);
   ok(/fireEvent\('subscriber\.confirmed'/.test(src), 'nothing fires on confirmation');
   // Inside the `if (!already)` branch: a link clicked twice, or a prefetching
   // mail client, must not re-import the address.
-  const branch = src.slice(src.indexOf('if (!already)'), src.indexOf('const leave'));
+  const branch = src.slice(src.indexOf('if (!already)'));
   ok(/fireEvent\('subscriber\.confirmed'/.test(branch), 'it fires on every click, not just the first');
 });
 
 check('THE UNSUBSCRIBE FIRES — the event that must reach the ESP', () => {
   // An unsubscribe this site honours and Mailchimp does not ends in a spam
   // complaint, which is why confirm-only would be worse than nothing.
-  ok(/fireEvent\('subscriber\.unsubscribed'/.test(code(unsubRoute)), 'leaving is not forwarded');
+  ok(/fireEvent\('subscriber\.unsubscribed'/.test(code(unsubscribeFn)), 'leaving is not forwarded');
 });
 
 check('...once per person, not once per duplicate row', () => {
@@ -260,7 +283,7 @@ check('...once per person, not once per duplicate row', () => {
   // it — the second version of this check, defeated by one level of nesting.
   // The property is "exactly one event per person", and a count says that
   // directly.
-  const src = code(unsubRoute);
+  const src = code(unsubscribeFn);
   ok(src.includes('for (const m of matches)'), 'no delete loop');
   const fires = (src.match(/fireEvent\('subscriber\.unsubscribed'/g) ?? []).length;
   ok(fires === 1, `${fires} unsubscribe events in this route — it fires per row, not per person`);
@@ -274,7 +297,7 @@ check('...AND IT FIRES EVEN WHEN THE ROW IS ALREADY GONE', () => {
   // are permanently un-removable from the ESP. An unsubscribe is idempotent at
   // every ESP, so a duplicate costs nothing and a missing one costs a spam
   // complaint.
-  const src = code(unsubRoute);
+  const src = code(unsubscribeFn);
   ok(!/if \(matches\.length\)[\s\S]{0,120}fireEvent/.test(src), 'the event is gated on a row existing');
   ok(/void fireEvent\('subscriber\.unsubscribed'/.test(src), 'leaving is not forwarded at all');
 });
@@ -282,7 +305,7 @@ check('...AND IT FIRES EVEN WHEN THE ROW IS ALREADY GONE', () => {
 check('neither send blocks on the delivery', () => {
   // Somebody must not fail to leave a list because an automation endpoint is
   // down.
-  for (const [what, src] of [['confirm', confirmRoute], ['unsubscribe', unsubRoute]]) {
+  for (const [what, src] of [['confirm', subscribeFn], ['unsubscribe', unsubscribeFn]]) {
     ok(/void fireEvent/.test(code(src)), `${what} awaits the webhook`);
   }
 });

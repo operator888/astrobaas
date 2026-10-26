@@ -6,6 +6,127 @@ semver yet because the API surface is pre-alpha.
 
 ## [Unreleased]
 
+### Plugin platform: named scopes, the shopper's address, plugin webhook events, and a public order counter
+
+Four core seams a storefront game (the paid campaign-games module) builds on, each
+usable on its own.
+
+- **Named API-key scopes.** Besides `<resource>:<read|write|*>`, a resource can
+  have its own actions: `game:play` (plugin routes that declare it),
+  `coupons:validate` (`POST /api/orders/quote` and nothing else — not
+  `POST /api/orders`) and `stats:read` (`GET /api/stats/…`). `<resource>:*`
+  grants every action of that resource. Actions are per resource, so
+  `game:read` is refused at mint with `422`, and a plugin route declaring a
+  scope no key can hold is refused at registration. Every existing scope and
+  every unscoped key behaves exactly as before.
+- **Plugin routes on a bare namespace.** `access: 'public'`, `csrf: 'exempt'`
+  and `scope` were allowed only under `/api/plugin/`. They are now also
+  allowed under a first-level name no core route file serves (`/api/game/…`),
+  which a storefront contract with fixed URLs needs. Core's names are listed in
+  `CORE_API_NAMESPACES`, and a test fails when a core directory is added
+  without being listed.
+- **`ctx.client` — who the request is for.** On a request authenticated by an
+  API key, `X-Client-IP` and `X-Client-UA` name the shopper a storefront server
+  is calling for; on anonymous and cookie requests they are ignored. A value
+  that is not exactly one IP address falls back to the real address — the same
+  one the rate limiter counts — and the UA is capped at 512 characters. Plugin
+  routes get `{ ip, ua, forwarded }` as `ctx.client`; core routes get it from
+  `requestClient(locals)`.
+- **Webhook events from plugins.** A plugin declares `webhookEvents:
+  ['game.verified']` and sends them with `host.webhooks.emit(event, data)`.
+  Delivery is the core's — the same signature, log, retries and Redeliver
+  button. A plugin cannot send an event it did not declare, another plugin's
+  event, or anything in a core namespace (`order.*`, `coupon.*`, …). Admin →
+  Webhooks now lists the core events and every active plugin's events, one
+  click to add each.
+- **Public order counter (opt-in).** `GET /api/stats/orders-this-month` returns
+  `{ count, month }`: paid orders placed this month in the shop's timezone.
+  It is a 404 until **Settings → Commerce → Public order counter** is switched
+  on (`public_order_stats_enabled`, with a new `shop_timezone` setting, default
+  UTC), never exposes an amount, and is cacheable for a minute.
+
+### Coupons: buy-one-get-one, free shipping, gifts, email-bound codes, and codes a plugin can issue
+
+Three new coupon types join `percent` and `fixed`: **`bogo50`** (in each pair of
+qualifying units the cheaper one is half price; units are paired from most to
+least expensive across lines, an odd unit left over is full price, and one unit
+alone is refused rather than discounted by nothing), **`free_shipping`**, and
+**`gift_product`** (adds one unit of a chosen simple product at price 0, as the
+last line, marked `coupon_gift`; refused when the gift is out of stock, and its
+unit is reserved and released like any other line). Coupons can also be limited
+to **brands** (matched the way `?brand=` matches, so `Ray-Ban`, `RAYBAN` and the
+brand's published slug are one maker), **bound to one email** (compared
+case-insensitively), and made **single use**. A new admin screen,
+**Shop → Coupons** (`/admin/coupons`), creates and edits every type.
+
+- **One answer from the quote and the order.** Both run the same validation. A
+  refusal now also carries a stable code — `coupon.not_found`, `expired`,
+  `not_started`, `min_subtotal`, `not_applicable`, `email_mismatch`,
+  `already_redeemed`, `exhausted` — as `coupon.refusal` on the quote and
+  `params.refusal` on a refused order. Anyone who is not staff still sees
+  `coupon.not_found` for everything except `min_subtotal`, as before.
+- **Per-customer limits are now atomic.** The buyer's count (a SHA-256 of the
+  lower-cased address, never the address) is claimed in the same conditional
+  write as the total, on all three storage drivers, so two concurrent checkouts
+  by one buyer can no longer both pass a one-per-customer code. Orders placed
+  before this still count through the order history, as they always did.
+- **A cancellation before payment hands the use back**, once, even when two
+  cancellations race; a paid order that is cancelled, and a refund, keep it.
+  Reopening a cancelled order counts it again.
+- **`coupon.redeemed` webhook**: `{ code, coupon_id, order_id, email_hash }`.
+- **`host.coupons`** for compiled plugins: `issue()` (a server-generated,
+  unguessable code, optionally prefixed), `status()` and `revoke()` — see
+  PLUGIN_DEVELOPMENT.md.
+- **Existing coupons keep working unchanged.** The stored shape only gained
+  optional fields, so there is no migration. The plugin contract's names
+  (`type`, `expires_at`, `max_redemptions`, `max_redemptions_per_email`,
+  `categories`, `conditions`) are accepted by `POST/PUT /api/coupons` as aliases.
+- Editing a coupon on the relational driver no longer rewrites the whole row,
+  so an edit can no longer overwrite a use counted at the same moment.
+
+### Consent ledger: proof of consent, the newsletter on top of it, and a mail seam for plugins
+
+Every consent decision is now a row in an **append-only consent ledger** —
+`{ email, purpose, granted, version, text_hash, at, ip?, ua?, source, confirmed_at? }`
+— and the current state is read from the rows. A confirmation is a new row; a
+withdrawal is a new row with `granted: false`; nothing is ever edited. The
+relational driver refuses DELETE and UPDATE on the table outright. Its own
+collection on every driver, never a custom entity, so nothing about who agreed to
+what reaches the public change feed.
+
+- **The newsletter runs on it.** The confirmation click writes the grant (with the
+  wording's version and the sha256 of its exact text, carried in the signed link)
+  and its confirmation; unsubscribing — link, RFC 8058 one-click, or the operator's
+  Remove — appends a withdrawal. The signup still stores nothing until the click.
+  A storefront can send its own wording with the signup as `consent_text` +
+  `consent_version`.
+- **Subscriber export**, `GET /api/newsletter/subscribers/export` (`?format=csv`):
+  ONLY addresses whose newsletter consent is granted AND confirmed AND not
+  withdrawn since, each with its proof. Existing subscribers are recorded by
+  migration 16 as `source: 'migration'`, so the export keeps them.
+- **New webhook event `newsletter.subscribed`** — `{ email_hash, source, at }`,
+  never the address — on a confirmed newsletter consent, alongside the existing
+  `subscriber.confirmed`.
+- **Admin:** a read-only ledger per address at **Data requests → Consent ledger**
+  (`/admin/privacy/consent`), with Withdraw (audited). `GET /api/consent/ledger`
+  and `POST /api/consent/ledger/withdraw` behind it, administrators only.
+- **Public withdrawal link:** `/api/consent/withdraw?token=…` (GET from an email,
+  landing on `/consent/withdrawn`; POST for a machine), a signed token bound to one
+  address and one purpose. Plugins mint it with `host.consent.withdrawUrl`.
+- **Behaviour change:** an old newsletter confirmation link opened after the
+  person unsubscribed no longer re-subscribes them; signing up again sends a new
+  one. Campaign sends also skip any address whose latest newsletter record is a
+  withdrawal.
+- **GDPR:** the data-request export includes the ledger rows. An erasure KEEPS
+  them as proof of consent (Art. 7(1)), with the address replaced by its sha256
+  and the IP and browser removed; the erase report says so.
+- **Plugins:** `host.consent.record / confirm / withdraw` (a `confirm` only
+  confirms when the latest row is a grant, so confirming a newsletter nobody
+  ticked subscribes nobody) and `host.mail.send`, which sends through the
+  configured core transport and never raw SMTP. Bulk mail through it reaches only
+  confirmed newsletter contacts and always carries RFC 8058 one-click unsubscribe.
+  See PLUGIN_DEVELOPMENT.md, "Consent and mail".
+
 ### Product reviews: a public door, a moderation queue, and GDPR (text reviews)
 
 Customers can review a product through `POST /api/products/{ref}/reviews`, and a
