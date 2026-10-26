@@ -297,6 +297,7 @@ check('escapeHtml stringifies null/number safely', escapeHtml(null) === '' && es
   // Scope token validation.
   check('isValidScope accepts resource:action', isValidScope('posts:write') && isValidScope('content:read'));
   check('isValidScope accepts resource:* and *', isValidScope('media:*') && isValidScope('*'));
+  check('isValidScope accepts the erp plugin scope', isValidScope('erp:read') && isValidScope('erp:write') && isValidScope('erp:*'));
   check('isValidScope rejects junk', !isValidScope('posts') && !isValidScope('posts:delete') && !isValidScope('foo:read') && !isValidScope(5));
 
   // Required-scope mapping.

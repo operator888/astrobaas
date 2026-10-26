@@ -19,6 +19,10 @@ export const SCOPED_RESOURCES = [
   // finance:write, so a website or agent can hold a key that touches invoices
   // and nothing else. Listed here so such a key can be minted.
   'finance',
+  // The EWS ERP external plugin (/api/plugin/erp/…) declares erp:read /
+  // erp:write, so an agent can hold a key that reaches the ERP and nothing
+  // else on the site.
+  'erp',
 ] as const;
 
 /**

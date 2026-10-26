@@ -6,6 +6,12 @@ semver yet because the API surface is pre-alpha.
 
 ## [Unreleased]
 
+### API keys: `erp` scope
+
+API keys can now be minted with `erp:read` / `erp:write`, the scopes the EWS ERP
+plugin's routes (`/api/plugin/erp/…`) declare. An agent key scoped to `erp:*`
+reaches the ERP and its MCP server and nothing else on the site.
+
 ### ECWS Billing: invoicing and bookkeeping (your own Lexware)
 
 A new bundled plugin, **ECWS Billing** (E-Commerce Web Services; plugin id
