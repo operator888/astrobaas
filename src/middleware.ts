@@ -33,6 +33,7 @@ import {
 import { LocalDB } from './lib/localdb';
 import { securityHeaders, corsHeaders, corsAllowOrigin, describeCorsPosture, mergeVary, frameOptionsFor } from './lib/security-headers';
 import { apiKeyExpired, scopedKeyAllowed } from './lib/api-key-scopes';
+import { resolveRequestClient } from './lib/client-address';
 import { sharedRateLimitStore, describeRateLimitStore, type RateLimitResult } from './lib/rate-limit';
 import {
   resolveClientIp, trustedForwardedIp, CLIENT_IP_HEADER,
@@ -254,7 +255,7 @@ function loginRateCheck(ip: string, email: string): Promise<boolean> {
  * "why is your shop endpoint reachable on non-shops?".
  */
 const COMMERCE_API =
-  /^\/api\/(products|product-categories|product-bulk|brands|coupons|customers|orders|shipping-methods|payments|commerce)(\/|$)/;
+  /^\/api\/(products|product-categories|product-bulk|brands|coupons|customers|orders|shipping-methods|payments|commerce|invoice-records)(\/|$)/;
 
 /** Paths the public can read without a session. */
 const PUBLIC_API_GET = [
@@ -305,7 +306,14 @@ const PUBLIC_API_GET = [
   // Leaving the list. Public for the same reasons as confirming, and the right
   // to withdraw consent must be at least as easy as giving it.
   /^\/api\/newsletter\/unsubscribe\/?$/,
+  // Withdrawing any consent-ledger purpose from a link in an email: the same
+  // reasons, the same kind of signed single-purpose token (`consent-wd`).
+  /^\/api\/consent\/withdraw\/?$/,
   /^\/api\/locales\/?$/, // which languages this site serves (also in the URLs)
+  // "N orders this month" — the number an operator chose to publish. The
+  // handler 404s unless `public_order_stats_enabled` is on, so this widens
+  // nothing on a shop that has not asked for it. Exact path.
+  /^\/api\/stats\/orders-this-month\/?$/,
   // Anti-spam challenges exist FOR anonymous visitors; a session requirement
   // here would protect the forms from exactly the people they serve.
   /^\/api\/captcha\/challenge\/?$/,
@@ -315,9 +323,21 @@ const PUBLIC_API_GET = [
   // Commerce catalog is public read; orders/customers are staff-only (PII).
   /^\/api\/products\/?$/,
   /^\/api\/products\/[^/]+$/,
+  // One product's availability. Public for the same reason the product is: the
+  // quantity it reports is the `stock` the product route already publishes.
+  /^\/api\/products\/[^/]+\/stock-status\/?$/,
+  // A product's APPROVED reviews and their aggregate (C-35). Public like the
+  // product itself; the route returns an allow-listed projection with no
+  // email, and 404s for an inactive product exactly as the product route does.
+  /^\/api\/products\/[^/]+\/reviews\/?$/,
   /^\/api\/brands\/?$/,
   /^\/api\/product-categories\/?$/,
   /^\/api\/payments\/?$/, // which payment methods this install offers
+  // A purchased file, for whoever holds the signed, expiring link: the token IS
+  // the credential (lib/commerce/download-entitlements.ts), as for a magic link.
+  // And the buyer's list of downloads, authorised by their receipt token.
+  /^\/api\/downloads\/?$/,
+  /^\/api\/downloads\/[^/]+$/,
   // A storefront must render shipping choices before checkout.
   /^\/api\/shipping-methods\/?$/,
   // The EU withdrawal notice is information a trader is REQUIRED to publish,
@@ -362,6 +382,13 @@ const PUBLIC_API_GET = [
   // everyone else. Without this a deploy script holding a valid HEALTH_TOKEN
   // would be refused by the middleware before its token was ever looked at.
   /^\/api\/health\/deep\/?$/,
+
+  // One invoice/credit-memo record as a PDF. Allow-listed so the BUYER can
+  // knock with the receipt token from their confirmation email, exactly as
+  // /receipt.pdf does; the handler admits staff or a token naming that
+  // record's order, and answers the same 404 to everything else. Exact shape,
+  // so nothing else under /api/invoice-records/ becomes public by accident.
+  /^\/api\/invoice-records\/[^/]+\/pdf$/,
 ];
 
 const AUTH_API = /^\/api\/auth\//;
@@ -389,6 +416,9 @@ const AUTH_API = /^\/api\/auth\//;
  */
 
 function isPublicApi(method: string, pathname: string): boolean {
+  // HEAD on a download link checks the link without counting a download
+  // (src/pages/api/downloads/[token].ts); link checkers send one first.
+  if (method === 'HEAD' && /^\/api\/downloads\/[^/]+$/.test(pathname)) return true;
   if (method !== 'GET') return false;
   if (PUBLIC_API_GET.some(rx => rx.test(pathname))) return true;
   // A plugin route that declared itself public. Consulted AFTER the core list,
@@ -411,12 +441,20 @@ const PUBLIC_API_WRITE = [
   // "Tell me when it's back" — the storefront's button on a sold-out product.
   // Public and rate-limited through the same gate as the newsletter box.
   /^\/api\/products\/[^/]+\/notify-me\/?$/,
+  // A product review (C-35). Through the same public gate, plus a proof of
+  // work that is ALWAYS required on this surface; lands pending.
+  /^\/api\/products\/[^/]+\/reviews\/?$/,
   // RFC 8058 one-click unsubscribe. The caller is Gmail's or Outlook's mail
   // infrastructure pressing the button shown at the top of a campaign message,
   // which has no session and no cookie. Authorised by the signed,
   // single-purpose, expiring token in the query string, checked in the handler
   // — with no token it removes nothing, exactly like the GET.
   /^\/api\/newsletter\/unsubscribe\/?$/,
+  // Withdrawing any consent-ledger purpose from a link. Same shape and same
+  // authorisation as the one-click unsubscribe: a signed, purpose-bound token
+  // in the query string, checked in the handler; with no valid token it
+  // withdraws nothing and answers the same 200.
+  /^\/api\/consent\/withdraw\/?$/,
   // Checkout: anonymous buyers place orders; totals are computed server-side
   // and the endpoint shares the same rate-limit + body-size ceilings.
   /^\/api\/orders\/?$/,
@@ -491,6 +529,11 @@ const CSRF_EXEMPT_WRITE = [
   // which is to say, remove somebody from a mailing list they can rejoin by
   // signing up again. Kept as an exact-path regex so it widens nothing else.
   /^\/api\/newsletter\/unsubscribe\/?$/,
+  // The consent-ledger withdrawal link, for the same reason and under the same
+  // rule: a mail client may POST it, and the signed single-purpose token
+  // (`consent-wd`, bound to one address AND one purpose) is the authentication.
+  // A forgery can only withdraw what its holder was already sent a link for.
+  /^\/api\/consent\/withdraw\/?$/,
 ];
 function isCsrfExempt(pathname: string, method = 'POST'): boolean {
   if (CSRF_EXEMPT_WRITE.some(rx => rx.test(pathname))) return true;
@@ -552,6 +595,10 @@ const CROSS_ORIGIN_PUBLIC_WRITE = [
   /^\/api\/contact\/?$/,
   /^\/api\/newsletter\/?$/,
   /^\/api\/products\/[^/]+\/notify-me\/?$/,
+  // The review form on a headless product page is the same cookie-less
+  // cross-origin POST. Leaving it off this list would ship a review endpoint
+  // that only same-origin pages can reach — the checkout defect again.
+  /^\/api\/products\/[^/]+\/reviews\/?$/,
   // ...and the form builder's own forms, which were the sibling left behind:
   // a `writable: 'public'` type posted from a headless site (a table request,
   // an RSVP, an enquiry) got `403 CSRF_FAILED`, and its file field with it.
@@ -930,6 +977,16 @@ const main = defineMiddleware(async (context, next) => {
   const forwardedIp = isBearer ? trustedForwardedIp(bearerKey, request.headers.get(CLIENT_IP_HEADER)) : null;
   const ip = forwardedIp ?? clientIp(request, directAddr);
   locals.ip = ip;
+  // Who the request is FOR (`ctx.client` for plugins, `requestClient(locals)`
+  // for core). Built FROM `ip` — the limiter's identity — so there is one
+  // notion of the real address. X-Client-IP / X-Client-UA are read only for an
+  // API-key request; see lib/client-address.ts.
+  locals.client = resolveRequestClient({
+    headers: request.headers,
+    viaApiKey: isBearer,
+    address: ip,
+    addressForwarded: forwardedIp !== null,
+  });
   // Expose a login throttle the auth handler can call with the parsed email
   // (returns false when this address has failed too often across accounts, or
   // has exceeded the IP+email attempt limit).
@@ -1256,6 +1313,14 @@ const main = defineMiddleware(async (context, next) => {
       if (!isWrite && isPublicApi(method, pathname)) {
         user = null;
         locals.user = null;
+        // Served as ANONYMOUS from here on, so it loses what only a keyed
+        // request may claim: the shopper named in X-Client-IP / X-Client-UA.
+        locals.client = resolveRequestClient({
+          headers: request.headers,
+          viaApiKey: false,
+          address: locals.ip,
+          addressForwarded: forwardedIp !== null,
+        });
       } else {
         return withCors(new Response(
           JSON.stringify({ success: false, error: { message: 'This API key\'s scopes do not permit this endpoint', code: 'INSUFFICIENT_SCOPE' } }),

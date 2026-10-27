@@ -24,6 +24,7 @@ export const chrome = {
   'admin.chrome.products': 'Produkte',
   'admin.chrome.orders': 'Bestellungen',
   'admin.chrome.customers': 'Kunden',
+  'admin.chrome.coupons': 'Gutscheine',
   'admin.chrome.media': 'Medien',
   'admin.chrome.themes': 'Designs',
   'admin.chrome.users': 'Benutzer',

@@ -1,0 +1,73 @@
+---
+/**
+ * A grouped product's page body: its members, each with a quantity box, and
+ * ONE "Add selected to cart" button.
+ *
+ * A plain GET form to /cart/ — it works with JavaScript off on this page. The
+ * cart page adds each `add.<id>` with a quantity above 0 as its own line (see
+ * `addFromQuery` in lib/cart.ts); the group itself is never a cart line, and
+ * the CMS refuses it if one is sent. No price is added up here: the cart asks
+ * the CMS for the total, as it always does.
+ */
+import type { Product } from '../lib/cms';
+import { groupMembers } from '../lib/group';
+import { GROUP_FIELD_PREFIX } from '../lib/cart';
+import { formatMoney } from '../lib/money';
+import { stockBadge } from '../lib/stock';
+
+interface Props { product: Product; currency: string }
+const { product, currency } = Astro.props;
+const members = groupMembers(product);
+const rows = members.map((m) => ({ m, stock: stockBadge(m) }));
+const anyBuyable = rows.some((r) => r.m.type !== 'variable' && r.stock.buyable);
+const plain = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+---
+<article class="group" data-group={product.id}>
+  <h1>{product.name}</h1>
+  {product.short_description && <div class="prose" set:html={product.short_description} />}
+
+  {rows.length === 0 ? (
+    <p class="notice">Nothing in this set is available right now.</p>
+  ) : (
+    <form class="group-buy" method="get" action="/cart/">
+      <ul class="group-items">
+        {rows.map(({ m, stock }) => {
+          const was = m.on_sale && m.regular_price_cents && m.regular_price_cents > m.price_cents ? m.regular_price_cents : null;
+          const field = `${GROUP_FIELD_PREFIX}${m.id}`;
+          return (
+            <li class="group-item" data-member={m.id}>
+              <div class="group-img">
+                {m.image ? <img src={m.image.src} alt="" width="160" height="160" loading="lazy" /> : null}
+              </div>
+              <div class="group-info">
+                <a class="card-name" href={`/product/${m.slug}/`}>{m.name}</a>
+                <span class="price">
+                  {m.type === 'variable' && 'From '}
+                  {was !== null && <span class="visually-hidden">Sale price </span>}
+                  {formatMoney(m.price_cents, currency)}
+                  {was !== null && <del><span class="visually-hidden">Was </span>{formatMoney(was, currency)}</del>}
+                </span>
+                <span class={`stock stock-${stock.tone}`}>{stock.label}</span>
+              </div>
+              <div class="group-qty">
+                {m.type === 'variable' ? (
+                  <a href={`/product/${m.slug}/`}>Choose options</a>
+                ) : (
+                  <>
+                    <label for={`qty-${m.id}`}>Quantity <span class="visually-hidden">of {plain(m.name)}</span></label>
+                    <input id={`qty-${m.id}`} name={field} type="number" min="0" max="99" inputmode="numeric"
+                      value={stock.buyable ? '1' : '0'} disabled={!stock.buyable} />
+                  </>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      <p class="hint">Set a quantity to 0 to leave that item out. Each item is added to your cart on its own.</p>
+      <button class="btn" type="submit" disabled={!anyBuyable}>{anyBuyable ? 'Add selected to cart' : 'Sold out'}</button>
+    </form>
+  )}
+
+  {product.description && <div class="prose" set:html={product.description} />}
+</article>

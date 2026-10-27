@@ -60,6 +60,14 @@ function publicMaySeeType(entityType: string): boolean {
   // Unknown-to-the-registry types are core/plugin bookkeeping, not custom
   // collections; leave those to the core allow-list above (they are not here).
   if (!def) return false;
+  // A MODERATED collection is not, even when it is publicly readable. Its feed
+  // rows are written on arrival — pending and spam included — so an anonymous
+  // poller would see every submission's id and timing, and could tell a
+  // stored review from one silently dropped as a duplicate: exactly the
+  // "did this address already review / buy this?" oracle the review route
+  // answers identically to avoid. Storefronts read approved reviews from
+  // `GET /api/products/{ref}/reviews`; staff still see these rows.
+  if (def.moderated) return false;
   return contentTypeIsPublic(def);
 }
 

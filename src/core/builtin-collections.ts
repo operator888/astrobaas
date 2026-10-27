@@ -59,7 +59,10 @@ export const COMMENT_TYPE: ContentTypeDefinition = {
   fields: [
     { name: 'post_id', rule: { type: 'id' } },
     { name: 'author_name', rule: { type: 'string', min: 1, max: 80 } },
-    { name: 'author_email', rule: { type: 'email', optional: true } },
+    // `private`: asked for so an operator can reply, never shown. Before the
+    // flag existed the public list handed every commenter's address to anyone
+    // who opened the network tab.
+    { name: 'author_email', rule: { type: 'email', optional: true }, private: true },
     { name: 'body', rule: { type: 'string', min: 2, max: 4000 } },
   ],
 };
@@ -72,26 +75,53 @@ export const COMMENT_TYPE: ContentTypeDefinition = {
  * it from one place.
  *
  * `verified_buyer` is NOT a field a submitter can set — it is stamped by the
- * server when the review carries an order the address actually placed. Being
+ * server when the address has a paid order containing the product. Being
  * absent from the declared list is what makes that true: `validate()` copies
  * nothing it was not asked for, so a posted `verified_buyer: true` is dropped.
+ *
+ * ## One public door, and it is not `/api/content/review`
+ *
+ * The type is `writable: 'staff'`. Strangers submit through
+ * `POST /api/products/{ref}/reviews` (lib/reviews.ts), which is the only door
+ * that knows a review belongs to a PRODUCT: it checks the product exists and
+ * takes reviews, requires the proof of work, refuses a second review from the
+ * same address, and answers identically whatever happened. The generic
+ * content door did none of that — it stored a review of `no-such-product` —
+ * and leaving it open beside the new one would make every rule on the new one
+ * optional.
+ *
+ * ## Where reviews live, and why the email cannot reach a public feed
+ *
+ * In the custom-entity store, like comments: three drivers, backup, GDPR
+ * export and the moderation primitive for free. That store writes to the
+ * change feed, which is public — but a public caller receives METADATA ONLY
+ * there (type, id, action, time, field names; never a value, see
+ * `publicEntry` in api/content/changes.ts), and `author_email` is `private`,
+ * so no public READ of the collection returns it either. Erasure purges the
+ * feed's staff-only snapshots along with the review.
  */
 export const REVIEW_TYPE: ContentTypeDefinition = {
   name: REVIEWS_TYPE,
   label: 'Review',
   labelPlural: 'Reviews',
   visibility: 'public',
-  writable: 'public',
+  writable: 'staff',
   moderated: true,
   fields: [
     { name: 'product_id', rule: { type: 'id' } },
     { name: 'author_name', rule: { type: 'string', min: 1, max: 80 } },
-    { name: 'author_email', rule: { type: 'email', optional: true } },
+    { name: 'author_email', rule: { type: 'email', optional: true }, private: true },
     { name: 'rating', rule: { type: 'number', min: 1, max: 5, int: true } },
     { name: 'title', rule: { type: 'string', max: 120, optional: true } },
     { name: 'body', rule: { type: 'string', min: 2, max: 4000 } },
     /** The order this review is attached to, if the reviewer gave one. */
-    { name: 'order_number', rule: { type: 'string', max: 40, optional: true } },
+    { name: 'order_number', rule: { type: 'string', max: 40, optional: true }, private: true },
+    /**
+     * The language the review was WRITTEN in, normalised to a configured site
+     * locale. A storefront filters on it (`?locale=`) so a Greek product page
+     * is not a wall of German.
+     */
+    { name: 'locale', rule: { type: 'string', max: 35, optional: true } },
   ],
 };
 

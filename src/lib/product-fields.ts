@@ -12,8 +12,10 @@
  *    listings and lookups; a 4 kB string or one with markup in it does not.
  *  - **Linked-product ids are ids.** They are rendered as links, so an unchecked
  *    value there is a redirect/injection vector.
- *  - **Downloads are https URLs.** A `javascript:` or `file:` download link is
- *    handed straight to a buyer.
+ *  - **Downloads are https URLs, own media, or private files.** A
+ *    `javascript:` or `file:` download link is handed straight to a buyer.
+ *    And a download's location is STAFF-only: the catalogue a stranger reads
+ *    lists its name, never its url (projectProductForReader).
  *  - **Enums fall back to the safe member**, never to whatever was typed —
  *    an unrecognised backorder policy must mean "no", not "yes".
  */
@@ -31,7 +33,7 @@ export { mediaKindOf, isVideoMedia, buildMediaKindIndex, type MediaKindIndex } f
 import { publicCustomFields, type ProductFieldDef } from '../core/product-fields-def';
 import type {
   BackorderPolicy, CatalogVisibility, TaxStatus,
-  ProductAttribute, ProductDimensions, ProductDownload, ProductImage, ProductVariant,
+  ProductAttribute, ProductAttributeSwatch, ProductDimensions, ProductDownload, ProductImage, ProductVariant,
 } from '../core/models';
 
 /** Caps chosen so a hostile import cannot bloat a row without bound. */
@@ -144,21 +146,171 @@ export function normalizeAttributes(v: unknown): ProductAttribute[] {
           .filter((x): x is string => !!x)
       : [];
     if (!values.length) continue; // an attribute with no values says nothing
-    out.push({ name, values, visible: a.visible !== false });
+    const attr: ProductAttribute = { name, values, visible: a.visible !== false };
+    // Written out only when set, so a catalogue without swatches normalises to
+    // exactly the bytes it did before the fields existed.
+    if (a.display === 'swatch') attr.display = 'swatch';
+    const swatches = normalizeSwatches(a.swatches, values);
+    if (swatches) attr.swatches = swatches;
+    out.push(attr);
   }
   return out;
 }
 
+/*
+ * Swatches (core/color-swatches-visual-variant-selection).
+ *
+ * A swatch reaches a shopper's page as a CSS colour and an <img src>, so both
+ * halves are validated to the one shape a storefront can use without further
+ * thought, and anything else is REFUSED — by `swatchProblems` at the save, with
+ * the value named, rather than dropped without a word.
+ */
+
+/** `#rgb` or `#rrggbb`, nothing else; stored as lower-case `#rrggbb`. */
+const HEX_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+
+export function normalizeSwatchColor(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const s = v.trim();
+  if (!HEX_COLOR.test(s)) return undefined;
+  const hex = s.slice(1).toLowerCase();
+  return '#' + (hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex);
+}
+
+/** A file inside this CMS's uploads: URL-safe segments only, so no `//`. */
+const OWN_MEDIA = /^\/uploads\/(?:[A-Za-z0-9._~%-]+\/)*[A-Za-z0-9._~%-]+$/;
+
 /**
- * Downloads must be https.
+ * A swatch image is a MEDIA REFERENCE: a file in this CMS's uploads
+ * (`/uploads/...`), or an https URL (an imported catalogue, a media CDN).
+ *
+ * Refused: `data:` and `javascript:`, plain http (mixed content on an https
+ * shop), protocol-relative `//host`, other paths on this host (`/admin/...` is
+ * not a picture), a `.` or `..` segment, credentials in the URL, anything over
+ * 1000 characters (an address is rejected, never truncated — see
+ * normalizeImages) and a video, which in an <img> renders nothing.
+ */
+export function normalizeSwatchImage(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const s = v.trim();
+  if (!s || s.length > 1000) return undefined;
+  if (s.startsWith('/')) {
+    if (!OWN_MEDIA.test(s)) return undefined;
+    // Literal or percent-encoded (`%2e%2e`, which a URL parser resolves, and
+    // encoded slashes a file route may decode): a dot segment could walk out
+    // of /uploads/. Our own upload names never contain any of these.
+    if (/%2e|%2f|%5c/i.test(s) || s.split('/').some((seg) => seg === '..' || seg === '.')) return undefined;
+  } else {
+    // The same characters the storefront's `swatchImage` refuses, and a host
+    // right after the slashes as it requires, so a value saved here is never
+    // one the shared picker rule then drops.
+    if (!/^https:\/\/[^/]/i.test(s) || /[\s"'<>\\`()]/.test(s)) return undefined;
+    let u: URL;
+    try { u = new URL(s); } catch { return undefined; }
+    if (u.protocol !== 'https:' || !u.hostname || u.username || u.password) return undefined;
+  }
+  return mediaKindOf(s) === 'video' ? undefined : s;
+}
+
+/** One value's swatch, or undefined when it has neither half. */
+export function normalizeSwatch(v: unknown): ProductAttributeSwatch | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const r = v as Record<string, unknown>;
+  const out: ProductAttributeSwatch = {};
+  const color = normalizeSwatchColor(r.color);
+  const image = normalizeSwatchImage(r.image);
+  if (color) out.color = color;
+  if (image) out.image = image;
+  return color || image ? out : undefined;
+}
+
+/** The swatches of one attribute, keyed by its (normalised) values only. */
+function normalizeSwatches(v: unknown, values: readonly string[]): Record<string, ProductAttributeSwatch> | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const out: Record<string, ProductAttributeSwatch> = {};
+  for (const [k, raw] of Object.entries(v as Record<string, unknown>)) {
+    const key = str(k, PRODUCT_LIMITS.tagLength);
+    if (!key || !values.includes(key)) continue;
+    const sw = normalizeSwatch(raw);
+    if (sw) out[key] = sw;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * What is wrong with the swatches in an `attributes` payload, in words — one
+ * line per refused colour or image. Empty when everything would be kept.
+ *
+ * `saveProduct` answers 400 with these instead of letting `normalizeAttributes`
+ * quietly drop a typo: a merchant who typed `#ff00zz` must hear about it, not
+ * find a plain button on the shop.
+ */
+export function swatchProblems(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const raw of v) {
+    if (!raw || typeof raw !== 'object') continue;
+    const a = raw as Record<string, unknown>;
+    const name = typeof a.name === 'string' ? a.name.trim() : '';
+    if (a.display !== undefined && a.display !== null && a.display !== 'swatch' && a.display !== 'buttons') {
+      out.push(`${name}: display must be "swatch", "buttons" or absent`);
+    }
+    if (a.swatches === undefined || a.swatches === null) continue;
+    if (typeof a.swatches !== 'object' || Array.isArray(a.swatches)) {
+      out.push(`${name}: swatches must be an object keyed by value`);
+      continue;
+    }
+    const values = Array.isArray(a.values) ? a.values.map((x) => (typeof x === 'string' ? x.trim() : '')) : [];
+    for (const [value, sw] of Object.entries(a.swatches as Record<string, unknown>)) {
+      if (!values.includes(value.trim())) {
+        out.push(`${name}: a swatch for "${value}", which is not one of its values`);
+        continue;
+      }
+      if (sw === null) continue;
+      if (typeof sw !== 'object' || Array.isArray(sw)) {
+        out.push(`${name} ${value}: a swatch is { color, image }`);
+        continue;
+      }
+      const r = sw as Record<string, unknown>;
+      const hasColor = r.color !== undefined && r.color !== null && r.color !== '';
+      const hasImage = r.image !== undefined && r.image !== null && r.image !== '';
+      if (hasColor && !normalizeSwatchColor(r.color)) {
+        out.push(`${name} ${value}: colour must be a hex colour like #1a2b3c`);
+      }
+      if (hasImage && !normalizeSwatchImage(r.image)) {
+        out.push(`${name} ${value}: image must be an /uploads/ path or an https URL to a picture`);
+      }
+    }
+  }
+  return out;
+}
+
+/** A download stored in the private uploads directory: `private:pf_<20 hex>`. */
+export const PRIVATE_DOWNLOAD_PREFIX = 'private:';
+const PRIVATE_DOWNLOAD_RE = /^private:pf_[0-9a-f]{20}$/;
+
+/** The private-file id a download names, or null when it is not a private one. */
+export function privateDownloadId(url: unknown): string | null {
+  return typeof url === 'string' && PRIVATE_DOWNLOAD_RE.test(url) ? url.slice(PRIVATE_DOWNLOAD_PREFIX.length) : null;
+}
+
+/**
+ * Downloads must be https, our own media, or a private file.
  *
  * This URL is handed to a paying customer to click. `javascript:` is XSS,
  * `file:` probes their machine, and plain http downgrades a paid asset to a
- * tamperable one.
+ * tamperable one. `//host` is protocol-relative — another site — and is
+ * refused with the rest. A `private:` reference must name a well-formed
+ * private-file id; it is resolved on the server and never sent out.
+ *
+ * Names are unique within a product (a later duplicate is dropped): the name
+ * is what an entitlement uses to find a file again after the merchant edits
+ * the list.
  */
 export function normalizeDownloads(v: unknown): ProductDownload[] {
   if (!Array.isArray(v)) return [];
   const out: ProductDownload[] = [];
+  const names = new Set<string>();
   for (const raw of v.slice(0, PRODUCT_LIMITS.downloads)) {
     if (!raw || typeof raw !== 'object') continue;
     const d = raw as Record<string, unknown>;
@@ -166,11 +318,30 @@ export function normalizeDownloads(v: unknown): ProductDownload[] {
     const name = str(d.name, PRODUCT_LIMITS.tagLength) ?? 'Download';
     if (!url) continue;
     // Relative paths are our own media, and therefore fine.
-    const isOwnMedia = url.startsWith('/');
-    if (!isOwnMedia && !/^https:\/\//i.test(url)) continue;
+    // `//host` and `/\\host` are other hosts: browsers follow both as
+    // protocol-relative, so neither is our own media.
+    const isOwnMedia = url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/\\');
+    const isPrivate = privateDownloadId(url) !== null;
+    if (!isOwnMedia && !isPrivate && !/^https:\/\//i.test(url)) continue;
+    if (names.has(name)) continue;
+    names.add(name);
     out.push({ name, url });
   }
   return out;
+}
+
+/**
+ * A per-product download limit or expiry override. `null` (absent, blank,
+ * junk, negative) means "use the shop default"; `0` is a decision
+ * (unlimited / never expires) and is kept.
+ */
+/** Upper bounds for the per-product overrides, and for the shop defaults. */
+export const DOWNLOAD_LIMIT_MAX = 10_000;
+/** Ten years. */
+export const DOWNLOAD_EXPIRY_DAYS_MAX = 3650;
+
+export function normalizeDownloadOverride(v: unknown, max: number): number | null {
+  return normalizeMeasurement(v, max);
 }
 
 /** Ids of linked products. Shape-checked because they are rendered as links. */
@@ -413,14 +584,6 @@ export function availableFor(
   return { ok: true };
 }
 
-/** Should staff be warned about this product's level? */
-export function isLowStock(product: { stock: number | null; low_stock_threshold?: number | null }): boolean {
-  if (product.stock === null || product.stock === undefined) return false;
-  const t = product.low_stock_threshold;
-  if (t === null || t === undefined || !Number.isFinite(t)) return false;
-  return product.stock <= t;
-}
-
 /**
  * Is a scheduled sale live at `nowMs`?
  *
@@ -612,7 +775,7 @@ export const WRITABLE_PRODUCT_FIELDS = [
   // shipping
   'weight_grams', 'dimensions_mm', 'shipping_class', 'requires_shipping',
   // nature
-  'virtual', 'downloadable', 'downloads',
+  'virtual', 'downloadable', 'downloads', 'download_limit', 'download_expiry_days',
   // taxonomy + media
   'brand', 'categories', 'tags', 'images', 'model_url',
   // merchandising
@@ -626,6 +789,10 @@ export const WRITABLE_PRODUCT_FIELDS = [
   // Variations. `type` is DERIVED from these, never accepted from a client —
   // a product claiming type:'variable' with no variants would be unbuyable.
   'variants',
+  // ...except `type: 'grouped'`, the one type that cannot be derived; any
+  // other value is ignored and the type derived as before (saveProduct,
+  // applyGroupRules). With it, the group's ordered member ids.
+  'type', 'grouped_product_ids',
   // Optical: whether this product needs an Rx, and which form to collect.
   'requires_prescription', 'prescription_type',
   // GPSR (EU 2023/988). Operator-entered, and they must be writable through the
@@ -798,11 +965,22 @@ export function projectProductForReader<T extends { custom?: Record<string, unkn
   isStaff: boolean,
 ): T {
   if (isStaff) return product;
-  if (!product.custom) return product;
-  const visible = publicCustomFields(product.custom, fields);
+  const downloads = (product as { downloads?: unknown }).downloads;
+  if (!product.custom && !Array.isArray(downloads)) return product;
   const out = { ...product };
-  if (visible) out.custom = visible;
-  else delete out.custom;
+  if (product.custom) {
+    const visible = publicCustomFields(product.custom, fields);
+    if (visible) out.custom = visible;
+    else delete out.custom;
+  }
+  // A paid file's location is what the purchase buys access to. Publishing it
+  // in the catalogue made every entitlement check moot: anyone could read the
+  // url off GET /api/products and fetch it. A storefront may still say what
+  // is included, so the NAMES stay.
+  if (Array.isArray(downloads)) {
+    (out as { downloads?: unknown }).downloads = downloads
+      .map((d) => ({ name: String((d as { name?: unknown })?.name ?? 'Download') }));
+  }
   return out;
 }
 

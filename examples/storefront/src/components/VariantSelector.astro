@@ -1,0 +1,157 @@
+---
+/*
+ * VariantSelector: choose a variant option by option, colour then size.
+ *
+ * - One radio group per option, in the merchant's attribute order. A value
+ *   that does not exist with the earlier choices, or is sold out, is disabled
+ *   and says why, in words beside it.
+ * - The price, the stock line, the SKU and the image follow the choice, and a
+ *   status region announces the new price to a screen reader.
+ * - The choice is kept in the address as ?variant=<id>, so a link opens it.
+ * - Without JavaScript it is a plain select inside the page's form: it
+ *   submits as `variant` (a server-rendered theme reads it back through the
+ *   `selected` prop; the static starter's cart needs script anyway), and the
+ *   radio groups stay hidden and disabled.
+ *
+ * Which values can be chosen is decided by lib/variant-selection.ts, a
+ * byte-identical copy of the CMS's own (astrobaas/client exports it); this file
+ * only renders. The browser half is scripts/variant-selector.ts, loaded as a
+ * bundled module, so the strict CSP needs no exception.
+ *
+ * Styling: every rule reads an --ab-variant-* custom property with the shop's
+ * own token as fallback, so a theme restyles it by setting those properties,
+ * and the class names (ab-variant__*) are stable hooks. Each option group
+ * carries data-display: "buttons", or "swatches" when the merchant marked the
+ * option as a swatch option or gave every value a colour or image
+ * (`swatchAxes` in lib/variant-selection.ts decides).
+ *
+ * Swatches are the same radios drawn differently. Each keeps its value as
+ * text: always in the radio's name for a screen reader, and shown beside the
+ * swatch on hover and focus. The chosen one gets a ring AND a check, so the
+ * choice never rests on colour; a sold-out one is cross-hatched and says why
+ * in words. The colour is NOT an inline style — the starter's CSP has no
+ * 'unsafe-inline' — but a data attribute the bundled script copies into a CSS
+ * custom property through the CSSOM, which style-src does not govern. Without
+ * script the groups stay hidden and the select is used, as for buttons.
+ *
+ * Page contract: the element holding the price has data-variant-price, the
+ * stock line data-stock, the main image data-variant-image, and the buy button
+ * data-variant-buy, all inside the element with data-product-root.
+ */
+import type { Product } from '../lib/cms';
+import { stockBadge } from '../lib/stock';
+import { pickerData, pickerJson } from '../lib/variant-view';
+import { initialSelection, optionStates, matchVariant, blockedText } from '../lib/variant-selection';
+
+interface Props {
+  product: Product;
+  currency: string;
+  /** A server-rendered theme passes the request's ?variant= to render that choice. */
+  selected?: string | null;
+  /** The form field the chosen variant id is submitted as. */
+  name?: string;
+}
+
+const { product, currency, selected = null, name = 'variant' } = Astro.props;
+const data = pickerData(product, currency);
+const { axes, variants, views, swatches } = data;
+const selection = initialSelection(axes, variants, selected);
+const states = optionStates(axes, variants, selection);
+const match = matchVariant(axes, variants, selection);
+const uid = `v-${product.id}`.replace(/[^A-Za-z0-9_-]/g, '');
+// Every enabled variant, sold out or not, for the select that works without
+// script; a sold-out one is listed and disabled, the same as a radio.
+const all = (product.variants ?? []).filter((v) => v.enabled !== false && views[v.id]);
+const sku = match ? views[match.id].sku : (product.sku ?? '');
+---
+{variants.length > 0 && (
+  <div class="ab-variant" data-variant-selector data-selected={match?.id ?? ''}>
+    <script type="application/json" data-variant-data set:html={pickerJson(data)}></script>
+
+    <div class="field ab-variant__fallback" data-variant-fallback>
+      <label for={`${uid}-select`}>Option</label>
+      <select id={`${uid}-select`} name={name} required data-variant-select>
+        <option value="" selected={!match}>Choose an option</option>
+        {all.map((v) => {
+          const view = views[v.id];
+          const note = stockBadge(v).note;
+          return (
+            <option value={v.id} disabled={!view.buyable} selected={match?.id === v.id}>
+              {view.label} — {view.price}{note ? ` (${note})` : ''}
+            </option>
+          );
+        })}
+      </select>
+    </div>
+
+    <div class="ab-variant__groups" data-variant-groups hidden>
+      {axes.map((axis, i) => {
+        const sw = swatches[i];
+        return (
+        <fieldset class="ab-variant__axis" data-axis={axis.name} data-display={sw ? 'swatches' : 'buttons'} disabled>
+          <legend class="ab-variant__legend">
+            {axis.name}<span class="ab-variant__current" data-axis-current>{selection[axis.name] ? `: ${selection[axis.name]}` : ''}</span>
+          </legend>
+          <div class="ab-variant__choices">
+            {states[i].map((s, j) => {
+              const note = s.reason ? blockedText(axes, selection, i, s.reason) : '';
+              const input = (
+                <input
+                  class="ab-variant__input"
+                  type="radio"
+                  name={`${uid}-${i}`}
+                  id={`${uid}-${i}-${j}`}
+                  value={s.value}
+                  checked={selection[axis.name] === s.value}
+                  disabled={!s.selectable}
+                />
+              );
+              if (!sw) return (
+                <label class="ab-variant__choice" data-value={s.value}>
+                  {input}
+                  <span class="ab-variant__pill">
+                    <span class="ab-variant__value">{s.value}</span>
+                    <span class="ab-variant__note" data-note>{note}</span>
+                  </span>
+                </label>
+              );
+              const swatch = sw[s.value];
+              return (
+                <label class="ab-variant__choice ab-variant__choice--swatch" data-value={s.value}>
+                  {input}
+                  <span
+                    class="ab-variant__swatch"
+                    data-swatch-kind={swatch?.image ? 'image' : swatch?.color ? 'color' : 'text'}
+                    data-swatch-color={swatch?.color ?? undefined}
+                    data-swatch-tone={swatch?.color && swatch.light ? 'light' : 'dark'}
+                  >
+                    {swatch?.image && <img class="ab-variant__swatch-img" src={swatch.image} alt="" width="44" height="44" loading="lazy" decoding="async" />}
+                    {!swatch && <span class="ab-variant__swatch-text" aria-hidden="true">{s.value}</span>}
+                    <svg class="ab-variant__check" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  </span>
+                  <span class="ab-variant__label"><span class="ab-variant__value">{s.value}</span></span>
+                  {/* The name in sight where hover and focus cannot reach: under a
+                      sold-out swatch (a disabled radio takes no focus) and on a
+                      touch screen. Hidden from screen readers, which already
+                      read the label above. */}
+                  <span class="ab-variant__swatch-name" aria-hidden="true">{s.value}</span>
+                  <span class="ab-variant__note" data-note>{note}</span>
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
+        );
+      })}
+      <p class="ab-variant__hint" data-variant-hint></p>
+    </div>
+
+    <p class="ab-variant__sku" hidden={!sku}>SKU: <span data-variant-sku>{sku}</span></p>
+    <p class="visually-hidden" role="status" aria-live="polite" data-variant-live></p>
+  </div>
+)}
+
+<script>
+  import { mountVariantSelector } from '../scripts/variant-selector';
+  for (const el of document.querySelectorAll<HTMLElement>('[data-variant-selector]')) mountVariantSelector(el);
+</script>

@@ -2,11 +2,15 @@ import type { APIRoute } from 'astro';
 import { LocalDB } from '../../../lib/localdb';
 import { ApiResponseBuilder } from '../../../lib/api-response';
 import { validate, parsePaging } from '../../../lib/validate';
-import { placeOrder } from '../../../lib/commerce-service';
+import { placeOrder, getCheckoutTermsSettings, getAttributionEnabled } from '../../../lib/commerce-service';
+import { parseAttribution, attributionFromCookies, consentCookieRefusesMarketing } from '../../../lib/commerce/attribution';
+import { parseConsentFlag } from '../../../lib/commerce/checkout-terms';
 import { isAcceptedMethod } from '../../../lib/payments/registry';
 import { canReadCommerce, canWriteCommerce } from '../../../lib/auth';
 import { captchaCheck } from '../../../lib/captcha';
 import { isCheckoutEmail } from '../../../lib/commerce/checkout-email';
+import { filterOrdersByTag } from '../../../lib/commerce/order-tags';
+import { withoutTimeline } from '../../../lib/commerce/order-timeline';
 import { publicCouponRejection } from '../../../lib/commerce/coupons';
 import {
   validIdempotencyKey, idempotencyStorageKey, bodyFingerprint, IDEMPOTENCY_LEASE_MS, IDEMPOTENCY_TTL_MS,
@@ -23,12 +27,18 @@ export const GET: APIRoute = async ({ url, locals }) => {
     let orders = await LocalDB.getOrders();
     const status = url.searchParams.get('status');
     if (status) orders = orders.filter(o => o.status === status);
+    // Staff tags, any casing. A tag that is not a valid tag matches nothing —
+    // never "no filter", which would read as "every order has it".
+    const tag = url.searchParams.get('tag');
+    if (tag !== null) orders = filterOrdersByTag(orders, tag);
     orders.sort((a, b) => b.created_at.localeCompare(a.created_at));
     // Shared parser: `?limit=abc` used to become NaN and silently return an
     // empty page, which reads as "no orders" to whoever is debugging.
     const limit = parsePaging(url.searchParams.get('limit'), { fallback: 50, min: 1, max: 200 });
     const offset = parsePaging(url.searchParams.get('offset'), { fallback: 0, min: 0, max: 1_000_000 });
-    const page = orders.slice(offset, offset + limit);
+    // The stored timeline is per-order history read through its own route; a
+    // list of fifty orders must not carry fifty of them.
+    const page = orders.slice(offset, offset + limit).map(withoutTimeline);
     return ApiResponseBuilder.success(page, undefined, {
       total: orders.length, count: page.length, limit, offset,
       page: Math.floor(offset / limit) + 1, hasMore: offset + page.length < orders.length,
@@ -146,6 +156,46 @@ export const POST: APIRoute = async ({ request, locals }) => {
       return ApiResponseBuilder.badRequest(`Payment method "${method}" is not available`);
     }
 
+    // Consent. Only a real boolean (or nothing) is a consent record — see
+    // parseConsentFlag. Refused here, before the requirement is even read, so a
+    // client sending "true" as a string hears about it whether or not the shop
+    // has switched the requirement on.
+    const terms = parseConsentFlag((body as any)?.terms_accepted);
+    const privacy = parseConsentFlag((body as any)?.privacy_accepted);
+    if (!terms.ok || !privacy.ok) {
+      await release();
+      return ApiResponseBuilder.validationError('Invalid order payload', {
+        ...(terms.ok ? {} : { terms_accepted: 'must be true or false' }),
+        ...(privacy.ok ? {} : { privacy_accepted: 'must be true or false' }),
+      });
+    }
+    // Staff place orders for somebody on the phone: there is no box in front of
+    // them, so the requirement is for shoppers and the API keys that serve them.
+    const termsSettings = isStaff ? null : await getCheckoutTermsSettings();
+
+    // Attribution (commerce/attribution.ts). A body field's SHAPE is validated
+    // strictly — a headless storefront must hear that it sent an unknown key or
+    // an over-long value, not have it silently dropped — but its times are
+    // judged leniently: `at` comes from the shopper's device clock, and a
+    // wrong clock must never cost the sale. Without a body field, a checkout
+    // from this site's own pages carries the visitor's first-party cookie, read
+    // only after the consent cookie is re-checked for `marketing` here, on the
+    // server. A browser request whose own consent cookie on this site says "no
+    // marketing" keeps nothing, whatever the body claims. Staff placing an
+    // order for somebody on the phone have no campaign of their own; and
+    // nothing is kept while the merchant has switched attribution off.
+    const attributionNow = Date.now();
+    const attributionIn = parseAttribution((body as any)?.attribution, attributionNow, { lenientClock: true });
+    if (!attributionIn.ok) {
+      await release();
+      return ApiResponseBuilder.validationError('Invalid order payload', attributionIn.errors);
+    }
+    const cookieHeader = request.headers.get('cookie');
+    let attribution = isStaff || (!isKey && consentCookieRefusesMarketing(cookieHeader, attributionNow))
+      ? undefined
+      : (attributionIn.value ?? attributionFromCookies(cookieHeader, attributionNow) ?? undefined);
+    if (attribution && !(await getAttributionEnabled())) attribution = undefined;
+
     const rawItems = (body as any)?.items;
     if (!Array.isArray(rawItems) || rawItems.length === 0) {
       await release();
@@ -168,6 +218,11 @@ export const POST: APIRoute = async ({ request, locals }) => {
         // deny-by-default and rebuilds the value field by field, so nothing the
         // client sends survives except the fields the clinical rules accept.
         prescription: i.prescription,
+        // Priced add-on selections (PLUGIN_HOOKS.ORDER_LINE_ADDONS), passed
+        // through as sent: the service refuses an unknown shape with a 400
+        // that names it, and prices the rest server-side. Only included when
+        // sent, so a line without add-ons is the line it always was.
+        ...(i.addons !== undefined ? { addons: i.addons } : {}),
         qty: Number(i.qty),
       }));
     // Destination, shipping choice and coupon travel to the service, which
@@ -198,6 +253,10 @@ export const POST: APIRoute = async ({ request, locals }) => {
       // Hashed before storage — the raw address is never kept.
       client_ip: locals.ip,
       buyer_limits: isStaff ? {} : { email: true, ip: !user },
+      terms_accepted: terms.value,
+      privacy_accepted: privacy.value,
+      require_terms: !!termsSettings?.required,
+      attribution,
     });
     // Forward the service's status: 409 tells the buyer the last unit went to
     // someone else (refresh and retry), 400 that the request itself was wrong.
@@ -214,8 +273,9 @@ export const POST: APIRoute = async ({ request, locals }) => {
         });
         message = shown.message;
         params = shown.reason === 'minimum-not-met'
-          ? { reason: shown.reason, shortfall_cents: shown.shortfall_cents ?? 0 }
-          : undefined;
+          ? { reason: shown.reason, refusal: shown.refusal, shortfall_cents: shown.shortfall_cents ?? 0 }
+          // The stable code a stranger may see: the one a missing code gets.
+          : { refusal: shown.refusal };
       }
       // The CODE is what a storefront translates; the message is the fallback
       // for clients that do not know it. Sent together so neither kind of
@@ -240,6 +300,10 @@ export const POST: APIRoute = async ({ request, locals }) => {
       total_cents: value.total_cents,
       currency: value.currency,
       status: value.status,
+      // Echoed only when the buyer answered, so a client that never sends the
+      // flag sees the response it always saw.
+      ...(value.terms_accepted !== undefined ? { terms_accepted: value.terms_accepted } : {}),
+      ...(value.terms_accepted_at ? { terms_accepted_at: value.terms_accepted_at } : {}),
     };
     if (idem) {
       const held = idem;

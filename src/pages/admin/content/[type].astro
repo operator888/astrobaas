@@ -56,6 +56,7 @@ const clientDef = {
             <option value="pending">waiting for approval</option>
             <option value="approved">published</option>
             <option value="rejected">hidden</option>
+            <option value="spam">spam</option>
           </select>
         </label>
         <span class="text-xs text-gray-400">
@@ -672,7 +673,10 @@ const clientDef = {
    */
   const statusOf = (row) => {
     const s = row?.data?._status;
-    return s === 'pending' || s === 'approved' || s === 'rejected' ? s : 'approved';
+    // `spam` too — the fourth state core/moderation.ts knows. Without it a spam
+    // row read as APPROVED here, with a green pill, while the public could not
+    // see it.
+    return s === 'pending' || s === 'approved' || s === 'rejected' || s === 'spam' ? s : 'approved';
   };
 
   const STATUS_CLASS = {
@@ -681,6 +685,7 @@ const clientDef = {
     pending: 'bg-amber-100 text-amber-800',
     approved: 'bg-green-100 text-green-800',
     rejected: 'bg-gray-100 text-gray-600',
+    spam: 'bg-red-100 text-red-700',
   };
 
   async function setStatus(id, status) {
@@ -786,6 +791,14 @@ const clientDef = {
           no.textContent = 'Hide';
           no.addEventListener('click', () => setStatus(row.id, 'rejected'));
           actions.appendChild(no);
+        }
+        if (s !== 'spam') {
+          const junk = document.createElement('button');
+          junk.type = 'button';
+          junk.className = 'text-sm text-red-700 hover:text-red-900';
+          junk.textContent = 'Spam';
+          junk.addEventListener('click', () => setStatus(row.id, 'spam'));
+          actions.appendChild(junk);
         }
       }
       const edit = document.createElement('button');

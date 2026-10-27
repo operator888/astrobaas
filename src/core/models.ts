@@ -508,6 +508,43 @@ export interface Subscriber {
   created_at: string;
 }
 
+/**
+ * One row of the consent ledger — see `src/lib/consent-ledger.ts`.
+ *
+ * APPEND-ONLY. A row is never edited and never deleted: a confirmation is a
+ * new row with `confirmed_at`, a withdrawal is a new row with `granted: false`,
+ * and the current state for (email, purpose) is read from the rows in the
+ * order they were written. The single exception is the GDPR erasure, which
+ * replaces `email` with `sha256:<hex>` and removes `ip` and `ua` — the proof
+ * that consent existed is kept, the person is not (see `pseudonymiseConsentRows`).
+ *
+ * Its own collection on every driver, and NOT a custom entity: custom-entity
+ * writes land in the public content change feed, which would publish who
+ * consented to what.
+ */
+export interface ConsentLedgerRow {
+  id: string;
+  /** Normalised lower-case address, or `sha256:<hex>` after an erasure. */
+  email: string;
+  /** What the consent is for. Known values: `game_terms`, `newsletter`. */
+  purpose: string;
+  granted: boolean;
+  /** The version label of the text the person saw, as the recorder named it. */
+  version: string;
+  /** sha256 (hex) of the exact UTF-8 text the person saw. Empty on a withdrawal with no prior grant. */
+  text_hash: string;
+  /** ISO timestamp the row was written (for a migrated row: when the old subscription was confirmed). */
+  at: string;
+  ip?: string;
+  ua?: string;
+  /** Who recorded it: `newsletter_form`, `unsubscribe_link`, `admin`, `migration`, a plugin id… */
+  source: string;
+  /** Set on a double-opt-in confirmation row. */
+  confirmed_at?: string;
+  /** Set by the erasure, the one rewrite this ledger allows. */
+  erased_at?: string;
+}
+
 /** A record stored in a custom (plugin-registered) content collection. */
 export interface CustomEntity {
   id: string;
@@ -793,6 +830,71 @@ export interface ProductVariant {
   /** Image src, normally one of the parent's. */
   image?: string;
   enabled: boolean;
+  /**
+   * READ-ONLY, derived on every public read from `stock` and the product's
+   * threshold and backorder policy. Never stored; a client that sends it back
+   * has it dropped. See `lib/commerce/stock-status.ts`.
+   */
+  stock_status?: StockStatusInfo;
+  /**
+   * READ-ONLY, derived on every product read by `resolvePurchasable` — the
+   * checkout's own function: the price, sale state, SKU and image a shopper
+   * gets for THIS variant after inheriting from the parent. Never stored.
+   * See `withResolvedVariants` in `lib/commerce/variants.ts`.
+   */
+  resolved?: ResolvedVariantView;
+}
+
+/** What one variant costs and is, after inheritance — `ProductVariant.resolved`. */
+export interface ResolvedVariantView {
+  price_cents: number;
+  regular_price_cents: number;
+  on_sale: boolean;
+  sku?: string;
+  image?: string;
+}
+
+/** One member of a grouped product, as the product API returns it. */
+export interface GroupedProductMember {
+  id: string;
+  name: string;
+  slug: string;
+  sku?: string;
+  /** `variable` = choose an option on the member's own page before buying. */
+  type: 'simple' | 'variable';
+  /** The member's current price; for a member with variants, its cheapest. */
+  price_cents: number;
+  regular_price_cents: number;
+  on_sale: boolean;
+  stock_status: StockStatusInfo;
+  /** The member's main photograph, or null. */
+  image: { src: string; alt?: string } | null;
+  status: Product['status'];
+  catalog_visibility: CatalogVisibility;
+}
+
+/** The three things a shopper is told about availability. */
+export type StockStatus = 'in-stock' | 'low-stock' | 'out-of-stock';
+
+/**
+ * What a public stock badge needs, derived from `stock`, the effective
+ * low-stock threshold and the backorder policy.
+ */
+export interface StockStatusInfo {
+  status: StockStatus;
+  /** False when units are not counted (`stock` is null): always buyable. */
+  tracked: boolean;
+  /**
+   * Units on hand, never negative. `null` when untracked. Exposed exactly as
+   * `stock` already is on the public product API — this adds no disclosure.
+   */
+  available_qty: number | null;
+  /** The level at or below which `low-stock` shows: the product's own, else the shop's. */
+  threshold_qty: number;
+  /** Out of stock but a backorder policy still lets the order through. */
+  backorderable: boolean;
+  /** Whether one unit can be ordered right now — the checkout's own answer. */
+  purchasable: boolean;
 }
 
 /** A product attribute, e.g. { name: "Colour", values: ["Black", "Tortoise"] }. */
@@ -801,13 +903,109 @@ export interface ProductAttribute {
   values: string[];
   /** Show on the product page. Attributes used only for filtering can be hidden. */
   visible: boolean;
+  /**
+   * How a storefront draws this option's values. `'swatch'` asks for colour or
+   * image swatches; absent means buttons. A picker also draws swatches when
+   * EVERY value has one, marked or not (`swatchAxes` in
+   * `lib/commerce/variant-selection.ts` decides).
+   */
+  display?: 'swatch';
+  /**
+   * Per value, the swatch the merchant set: keys are entries of `values`.
+   * Absent when no value has one. See `normalizeSwatch` for what is accepted.
+   */
+  swatches?: Record<string, ProductAttributeSwatch>;
 }
 
-/** A downloadable file granted after purchase. */
+/**
+ * One option value's swatch: a colour, an image, or both (the image wins
+ * where it can load, the colour shows behind it).
+ */
+export interface ProductAttributeSwatch {
+  /** `#rrggbb`, lower case. Nothing else is stored. */
+  color?: string;
+  /** A media reference: `/uploads/...` on this CMS, or an https URL. Never a video. */
+  image?: string;
+}
+
+/**
+ * A downloadable file granted after purchase.
+ *
+ * `url` is one of three things:
+ *  - `private:pf_<20 hex>` — a file uploaded to the PRIVATE uploads directory
+ *    (lib/media/private-files.ts). Streamed by the core to a buyer holding a
+ *    valid signed link; its location is never sent to anyone.
+ *  - `https://…` — a file hosted elsewhere. The buyer is redirected there only
+ *    after the signed link checks out, so the URL itself IS visible to them
+ *    once they download. Use a private file when that matters.
+ *  - `/…` — a file in this site's public media. Public: anyone with the path
+ *    can fetch it, entitlement or not.
+ *
+ * Never sent to a non-staff reader of the catalogue: the product API strips
+ * `url` and keeps only `name` (projectProductForReader).
+ */
 export interface ProductDownload {
   name: string;
   url: string;
 }
+
+/** Why an entitlement stopped working. `staff` is a person's decision and sticks. */
+export type EntitlementRevokeReason = 'refunded' | 'cancelled' | 'staff' | 'erased';
+
+/** One counted download. The newest {@link ENTITLEMENT_LOG_MAX} are kept. */
+export interface DownloadLogEntry {
+  /** ISO time the download was granted (counted). */
+  at: string;
+  /** The file's name, as listed on the entitlement. */
+  file: string;
+  /** The requester's address. Personal data: removed by an erasure. */
+  ip?: string;
+}
+
+/**
+ * The right to download one order line's files (lib/commerce/download-entitlements.ts).
+ *
+ * Stored on the ORDER (`Order.entitlements`), one per paid line of a
+ * downloadable product, so it is backed up, exported and erased with the
+ * order it belongs to. Holds no secret: a download link is an HMAC over the
+ * entitlement id and is minted when shown, never stored.
+ */
+export interface DownloadEntitlement {
+  /** `ent_` + random hex. What a signed link names. */
+  id: string;
+  /** Index of the order line it was granted for. */
+  line: number;
+  product_id: string;
+  /** The line's name, for display after the product is renamed or deleted. */
+  name: string;
+  /**
+   * The files, FROZEN at grant like a line's variant options. A download
+   * prefers the product's current file of the same name (so a merchant can
+   * fix a broken URL) and falls back to this copy (so a deleted product's
+   * buyers keep their files).
+   */
+  files: ProductDownload[];
+  /**
+   * Downloads allowed PER FILE (the plan's rule: "limit 5 = each file up to
+   * 5 times"), so a bundle of three files with a limit of 2 still lets the
+   * buyer fetch every file twice. `null` = unlimited.
+   */
+  download_limit: number | null;
+  /** Downloads counted so far, all files together. Written only by compare-and-set. */
+  download_count: number;
+  /** Downloads counted per file, by index into `files`. What the limit is checked against. */
+  file_counts?: number[];
+  /** ISO time after which no link works. `null` = never expires. */
+  expires_at: string | null;
+  granted_at: string;
+  revoked_at?: string;
+  revoked_reason?: EntitlementRevokeReason;
+  /** Newest last, bounded. `download_count` is the authoritative number. */
+  log?: DownloadLogEntry[];
+}
+
+/** How many log entries one entitlement keeps. The count is kept separately. */
+export const ENTITLEMENT_LOG_MAX = 50;
 
 /**
  * Physical dimensions in MILLIMETRES, as integers.
@@ -871,7 +1069,27 @@ export interface Product {
   on_sale: boolean;
   /** null = not tracked */
   stock: number | null;
+  /**
+   * Stored flag, derived from `stock` when the product is WRITTEN. For a
+   * product with variants it reflects the product's own count, which such a
+   * product does not sell from — read `stock_status` instead.
+   */
   in_stock: boolean;
+  /**
+   * READ-ONLY. Present on every public product response; derived on read and
+   * never stored. Judges variable products by their enabled variants.
+   */
+  stock_status?: StockStatusInfo;
+  /**
+   * READ-ONLY. Derived on every read, never stored, never accepted from a
+   * client. The cheapest price a buyer can pay: `price_cents` for a simple
+   * product, the cheapest enabled variant for a variable one, and the
+   * cheapest member a shopper can see for a grouped one (null when no member
+   * is visible). It is the key `?sort=price_asc|price_desc` orders by.
+   */
+  price_from_cents?: number | null;
+  /** READ-ONLY, derived on read. The dearest enabled variant; = `price_from_cents` when simple. */
+  price_to_cents?: number | null;
   /** product-category slugs */
   categories: string[];
   /** brand slug */
@@ -965,9 +1183,24 @@ export interface Product {
    * instead of losing it to a null.
    */
   manage_stock?: boolean;
-  /** Warn staff at or below this. Null = no warning. */
+  /**
+   * The level at or below which this product reads "low stock". Null =
+   * inherit the shop-wide default (`inventory_low_stock_threshold_qty`, 5);
+   * 0 = never show "low stock" for this product.
+   */
   low_stock_threshold?: number | null;
   backorders?: BackorderPolicy;
+  /**
+   * Downloads a buyer of this product may make in total; `null`/absent =
+   * the shop default (`downloads_limit_default`), `0` = unlimited.
+   */
+  download_limit?: number | null;
+  /**
+   * Days a buyer's downloads stay available after the order is paid;
+   * `null`/absent = the shop default (`downloads_expiry_days_default`),
+   * `0` = never expire.
+   */
+  download_expiry_days?: number | null;
   /** At most one per order, whatever the order limits say. */
   sold_individually?: boolean;
 
@@ -1011,8 +1244,28 @@ export interface Product {
    * `variable` products are bought through a variant; `simple` ones directly.
    * Derived from whether `variants` is non-empty, and stored so a listing can
    * filter without loading every variant.
+   *
+   * `grouped` is the one value a client CHOOSES (it cannot be derived: a group
+   * whose last member was deleted must not turn into a €0 simple product). A
+   * grouped product shows the products in `grouped_product_ids` and is never
+   * bought itself — see lib/commerce/grouped.ts.
    */
-  type?: 'simple' | 'variable';
+  type?: 'simple' | 'variable' | 'grouped';
+  /**
+   * A grouped product's members, in display order. Each is an ordinary product
+   * bought on its own cart line. Validated on every write (2–10, no duplicates,
+   * no groups, no products with variants); a deleted member is removed from
+   * every group that listed it.
+   */
+  grouped_product_ids?: string[];
+  /**
+   * READ-ONLY, derived on every read of a grouped product: its members,
+   * resolved. A public read lists only active, non-hidden members.
+   */
+  grouped_products?: GroupedProductMember[];
+  // `price_from_cents` (declared above) is also a grouped product's lowest
+  // member price ("from €X"); `price_cents` on a read carries the same number
+  // so a client that knows nothing of groups does not show €0.
   /**
    * Buyable variations. When present, checkout REQUIRES a variant_id — an
    * order for "the frame" without saying which colour is not fulfillable.
@@ -1043,6 +1296,7 @@ export interface Product {
  */
 import type { ShippingMethod as ShippingMethodRecord } from '../lib/commerce/shipping';
 import type { Coupon as CouponRecord } from '../lib/commerce/coupons';
+import type { OrderAttribution } from '../lib/commerce/attribution';
 export type { ShippingMethodRecord, CouponRecord };
 
 export interface Brand {
@@ -1109,6 +1363,12 @@ export interface OrderItem {
   /** line total in cents */
   total_cents: number;
   /**
+   * The free unit a `gift_product` coupon added. Priced 0, stock reserved
+   * like any line, and marked so a receipt or a return can say why it cost
+   * nothing.
+   */
+  coupon_gift?: true;
+  /**
    * The prescription this line was ordered with, FROZEN at purchase.
    *
    * Stored on the line rather than referenced, for the same reason variant
@@ -1117,6 +1377,37 @@ export interface OrderItem {
    * that settles a dispute about a remake.
    */
   prescription?: Prescription;
+  /**
+   * Priced add-ons on this line (a lens coating, an engraving), FROZEN at
+   * purchase from the same priced line `total_cents` came from — see
+   * PLUGIN_HOOKS.ORDER_LINE_ADDONS. Each `unit_price_cents` is per unit and is
+   * already INSIDE `total_cents`; never add it again. Absent when none.
+   */
+  addons?: OrderLineAddon[];
+}
+
+/** One priced add-on on an order line. See `OrderItem.addons`. */
+export interface OrderLineAddon {
+  /** The plugin's own id for the option, e.g. `ar-coating`. */
+  id: string;
+  /** What a receipt prints. */
+  label: string;
+  /**
+   * Integer cents per unit of the line. A plugin returns it in the shop's
+   * base currency; a stored order line holds it in the ORDER's currency
+   * (converted with the order's rate), like `total_cents`.
+   */
+  unit_price_cents: number;
+  /** Which plugin added it, so an order line can say where a charge came from. */
+  source?: string;
+  /** The plugin's own category, e.g. `coating`, `index`. */
+  kind?: string;
+  /**
+   * The `line.addons` key this add-on answers, e.g. `lens`. Optional; when a
+   * line sends selections under two keys, setting it lets the core check that
+   * EACH key was priced rather than only that something was.
+   */
+  namespace?: string;
 }
 
 export type OrderStatus =
@@ -1236,6 +1527,200 @@ export interface RefundRecord {
   actor: string;
 }
 
+/* ---------------- invoice and credit-memo RECORDS ----------------
+ *
+ * A frozen, NON-FISCAL copy of what an order charged (and what a refund gave
+ * back), for issuers and for the shop's own books. The rules live in
+ * lib/commerce/invoice-records.ts.
+ *
+ * These are RECORDS, not invoices. The owner decision on `Address.tax_id`
+ * (2026-09-04) stands: AstroBaaS is not a fiscal device. Only an issuer — a
+ * plugin for a licensed provider, a Peppol access point, a ΦΗΜ bridge — issues
+ * the legal document, and its number is the only document number a record
+ * ever carries. `internal_reference` is the shop's own bookkeeping counter and
+ * is labelled as such everywhere it is shown.
+ */
+
+/** One line of a record. Money in minor units of the record's currency. */
+export interface InvoiceRecordLine {
+  /** 'goods' for an order line, 'shipping' for the delivery charge. */
+  kind: 'goods' | 'shipping';
+  description: string;
+  /** Absent on a partial credit, where the refund is a share of the line. */
+  qty?: number;
+  product_id?: string;
+  variant_id?: string;
+  /** Excluding tax. */
+  net_cents: number;
+  /** Basis points, 2400 = 24%. */
+  tax_rate_bp: number;
+  tax_cents: number;
+  /** net + tax. */
+  total_cents: number;
+  /** Credit memos only: the index of the invoice-record line this credits. */
+  invoice_line?: number;
+  /**
+   * WHY this line carries the VAT it does, frozen from the priced order when
+   * the record was finalised (a credit memo copies its invoice line's):
+   *
+   *  - `standard`        VAT charged under the normal rules, at `tax_rate_bp` (> 0);
+   *  - `reverse-charge`  EU B2B: the buyer accounts for the VAT;
+   *  - `export`          outside the EU VAT territory: no EU VAT due;
+   *  - `exempt`          a person recorded an exemption on the order (a tax
+   *                      override with `exempt`, and its reason).
+   *
+   * ABSENT MEANS CORE CANNOT TELL — never "standard". A 0 % line the engine
+   * stamped nothing on is tax switched off, an untaxed product or a zero-rated
+   * class, and the order does not say which; an order with no per-line
+   * breakdown says nothing at all. An issuer must decide such a line itself or
+   * refuse it, never assume. See `lineTaxTreatments` in invoice-records-rules.
+   */
+  tax_treatment?: InvoiceLineTaxTreatment;
+  /** ISO country whose VAT table priced the line, when not the shop's own. */
+  tax_jurisdiction?: string;
+}
+
+/** See `InvoiceRecordLine.tax_treatment`. */
+export type InvoiceLineTaxTreatment = 'standard' | 'reverse-charge' | 'export' | 'exempt';
+
+/** One row of the VAT analysis: everything charged at one rate. */
+export interface InvoiceVatRow {
+  rate_bp: number;
+  base_cents: number;
+  tax_cents: number;
+}
+
+/** A snapshot of a party, frozen with the record. */
+export interface InvoiceParty {
+  name?: string;
+  company?: string;
+  /** One line, as printed. */
+  address?: string;
+  country?: string;
+  /**
+   * Captured, never validated (see `Address.tax_id`). An issuer that needs a
+   * valid one reports the problem on the record; it never blocks a sale.
+   */
+  tax_id?: string;
+  email?: string;
+}
+
+/**
+ * What an issuer plugin made of the record. Written by core only: `issuing`
+ * is the claim taken BEFORE the issuer is called, so two finalisations never
+ * call it twice; `issued` / `failed` is what it answered; `declined` means
+ * every issuer asked said "not mine", so the record is treated exactly as with
+ * no issuer (it is not a failure, and the internal reference applies).
+ */
+export interface InvoiceIssuerState {
+  /**
+   * The issuer's id — the one that holds (or last held) the record. Empty
+   * when no issuer could be chosen (see `error`) and when every issuer
+   * declined it (see `declined`).
+   */
+  id: string;
+  status: 'issuing' | 'issued' | 'failed' | 'declined';
+  /**
+   * The idempotency key every attempt at this record carries
+   * (`astrobaas:<record id>`): the same on a retry, after a timeout, from the
+   * background sweep. A late success is accepted only under it.
+   */
+  key?: string;
+  /** Calls made to `id` for this record, this one included. */
+  attempts?: number;
+  /**
+   * `failed` only: the issuer said the failure may be retried (or core timed
+   * out waiting, so the outcome is unknown). The background sweep retries it,
+   * with the same key, at `next_attempt_at`.
+   */
+  retryable?: true;
+  /** When the background sweep retries it. Absent once the attempts run out. */
+  next_attempt_at?: string;
+  /** The issuers that said "not mine", in the order they were asked, with why. */
+  declined?: { id: string; reason: string }[];
+  /** `issued` only: the success arrived after core stopped waiting. */
+  late?: true;
+  /** The LEGAL document number, as the issuer returned it. */
+  number?: string;
+  /** Whatever else it returned — for myDATA the ΜΑΡΚ, UID and QR URL. */
+  identifiers?: Record<string, string>;
+  issued_at?: string;
+  /** The issuer's own sentence when it refused (an invalid ΑΦΜ, say). */
+  error?: string;
+  /** When the claim was taken. */
+  attempted_at: string;
+}
+
+/** Issued outside AstroBaaS and recorded here, so no issuer is ever called. */
+export interface InvoiceIssuedExternally {
+  at: string;
+  /**
+   * User id; 'order' when it came from `Order.external_receipt_no`; 'invoice'
+   * on a credit memo whose invoice record was issued elsewhere.
+   */
+  actor: string;
+  /** The document number the other system gave it, when known. */
+  number?: string;
+}
+
+interface InvoiceDocumentBase {
+  /** `<order id>.inv-<n>` or `<order id>.cm-<n>` — it names its order. */
+  id: string;
+  order_id: string;
+  created_at: string;
+  currency: string;
+  prices_include_tax: boolean;
+  lines: InvoiceRecordLine[];
+  vat: InvoiceVatRow[];
+  net_cents: number;
+  tax_cents: number;
+  total_cents: number;
+  issuer?: InvoiceIssuerState;
+  issued_externally?: InvoiceIssuedExternally;
+  /**
+   * The shop's OWN sequential reference, when it switched one on and no
+   * issuer is configured. NOT an invoice number, and never printed as one.
+   */
+  internal_reference?: string;
+}
+
+export type InvoiceRecordStatus = 'draft' | 'final' | 'cancelled';
+
+/** The record of what one order charged. Immutable once `final`. */
+export interface InvoiceRecord extends InvoiceDocumentBase {
+  kind: 'invoice';
+  status: InvoiceRecordStatus;
+  finalised_at?: string;
+  cancelled_at?: string;
+  /** What created it: the shop's `invoice_record_on` setting, or a person. */
+  trigger: 'paid' | 'shipped' | 'manual';
+  seller: InvoiceParty;
+  buyer: InvoiceParty;
+  /**
+   * False when the order carried no per-line VAT breakdown (an order placed
+   * before one was stored): the lines are then the order lines at rate 0, and
+   * `vat` is empty rather than invented.
+   */
+  vat_complete: boolean;
+}
+
+/** The record of what one refund gave back, against one invoice record. */
+export interface CreditMemoRecord extends InvoiceDocumentBase {
+  kind: 'credit_memo';
+  /** Always final: it records a refund that already happened. */
+  status: 'final';
+  finalised_at: string;
+  invoice_record_id: string;
+  /**
+   * `RefundRecord.id` — the refund-ledger entry this follows. Absent on a
+   * staff correction ("credit in full", before a corrected record is made),
+   * where no money moved.
+   */
+  refund_id?: string;
+}
+
+export type InvoiceDocument = InvoiceRecord | CreditMemoRecord;
+
 /**
  * A human's deliberate departure from what the tax engine computed.
  *
@@ -1269,6 +1754,34 @@ export interface TaxOverride {
    *  without re-running an engine whose settings have since changed. */
   was_rate_bp: number;
   now_rate_bp: number;
+}
+
+/**
+ * One stored event in an order's timeline. See `Order.timeline`.
+ *
+ * Deliberately a closed shape: the only free text is `text` and the two tag
+ * lists, and those are exactly what an erasure clears.
+ */
+export interface OrderTimelineEntry {
+  id: string;
+  /** ISO instant the thing happened. */
+  at: string;
+  /** Dotted machine code, e.g. `status.changed`, `payment.captured`, `note.comment`, `tags.changed`, `bulk.<action>`. */
+  event: string;
+  /** A user id, `provider`, or `system` / `system:<job>`. Never a display name. */
+  actor: string;
+  /** Status moves: the two statuses. */
+  from?: string;
+  to?: string;
+  /** Payments: minor units of the order's own currency. */
+  amount_cents?: number;
+  /** FREE TEXT a person typed (a note or comment, a bulk-action reason). Cleared by an erasure. */
+  text?: string;
+  /** Tag edits. FREE TEXT; cleared by an erasure. */
+  added?: string[];
+  removed?: string[];
+  /** A reference that is not personal: a tracking number. Kept through an erasure, like the order's own. */
+  ref?: string;
 }
 
 export interface Order {
@@ -1361,6 +1874,31 @@ export interface Order {
    * address. Absent means UNKNOWN, never "no match".
    */
   ip_hash?: string;
+  /*
+   * Checkout consent, frozen at checkout (commerce/checkout-terms.ts).
+   *
+   * ABSENT MEANS UNKNOWN, never "accepted" and never "declined": an order from
+   * before this existed, an import, a staff-placed order, or a storefront that
+   * renders no box. They are not backfilled. `false` is an explicit "no", which
+   * can only be stored while the shop's requirement is off.
+   */
+  terms_accepted?: boolean;
+  /** ISO time the SERVER recorded the acceptance. Only ever set with
+   *  `terms_accepted: true`, and never read from the request. */
+  terms_accepted_at?: string;
+  /** Optional GDPR consent, recorded the same way. Never required. */
+  privacy_accepted?: boolean;
+  privacy_accepted_at?: string;
+  /**
+   * Which campaign brought the order: first and last touch, each with the
+   * time of the visit (commerce/attribution.ts).
+   *
+   * ABSENT MEANS NOTHING WAS KEPT — the visitor did not grant marketing
+   * consent, arrived with no campaign tags, the merchant switched attribution
+   * off, the order predates this, or it was placed by staff. Never an empty
+   * object. Personal data: exported with the order, removed on erasure.
+   */
+  attribution?: OrderAttribution;
   tax_overrides?: TaxOverride[];
   /** The engine's own breakdown, written ONCE when the first override lands and
    *  never rewritten. Absent = `line_totals` IS the engine's answer. */
@@ -1422,6 +1960,41 @@ export interface Order {
    */
   staff_note?: string;
   /**
+   * Staff-only labels ("VIP", "damaged", "needs review") — the shop's own way to
+   * group orders without touching any order field.
+   *
+   * NEVER shown to the buyer: no receipt, email, public lookup or checkout
+   * response reads this. Like `staff_note` it is the shop's record, not
+   * something the customer supplied. Free text, so it is rendered as text
+   * everywhere. At most 10 per order, written only through
+   * `lib/commerce/order-tags.ts` (normalised, case-insensitively unique),
+   * and absent — never `[]` — when an order has none.
+   */
+  tags?: string[];
+  /**
+   * The events on this order that no other field records — a status change, a
+   * payment arriving, a staff note or comment, a tag edit, a bulk action.
+   * Newest last, at most 100 (the oldest are dropped).
+   *
+   * NOT the whole timeline. What an order's own fields already say (placed,
+   * shipped, each refund, a tax override, abandoned…) is derived from those
+   * fields when the timeline is READ, so it can never disagree with them.
+   *
+   * STAFF ONLY, like `tags` and `staff_note`; absent when nothing has been
+   * recorded. Written only through `lib/commerce/order-timeline.ts`. Never
+   * returned by the order endpoints — `GET /api/orders/{id}/timeline` is the
+   * one reader — and its free text is cleared by an erasure.
+   */
+  timeline?: OrderTimelineEntry[];
+  /**
+   * Download entitlements, one per paid line of a downloadable product.
+   * Granted when the order reaches `processing` or `completed`, revoked when it
+   * is cancelled or refunded, and written only through
+   * `lib/commerce/download-entitlements.ts` (compare-and-set, so concurrent
+   * downloads cannot overrun a limit). Absent when the order has none.
+   */
+  entitlements?: DownloadEntitlement[];
+  /**
    * Fulfilment, deliberately BESIDE `status` rather than inside it.
    *
    * Adding a `shipped` status would put fulfilment into the state machine that
@@ -1477,6 +2050,19 @@ export interface Order {
   shipping_method_name?: string;
   /** Coupon applied, if any. */
   coupon_code?: string;
+  /**
+   * The coupon use this order holds, recorded when checkout claimed it
+   * (claimCouponUse). What lets a cancellation BEFORE PAYMENT hand the use
+   * back exactly once: `released_at` is written in the same step as the
+   * status move (setOrderStatus), and only the request that won that move
+   * releases. `email_key` is set when the use was also counted against the
+   * buyer (`couponEmailKey`, a hash — never the address).
+   */
+  coupon_redemption?: {
+    coupon_id: string;
+    email_key?: string;
+    released_at?: string;
+  };
   /** Destination used to price shipping and tax. */
   shipping_country?: string;
   shipping_postcode?: string;
@@ -1563,6 +2149,15 @@ export interface Order {
    * while the aggregate quietly exceeds what was charged.
    */
   refunds?: RefundRecord[];
+  /**
+   * Invoice and credit-memo RECORDS — frozen, non-fiscal copies of what was
+   * charged and refunded, for issuer plugins and the shop's books. Written
+   * only by `lib/commerce/invoice-records.ts`, through the atomic
+   * `compareAndSetOrderInvoiceRecords`; PUT /api/orders/{id} cannot touch it.
+   * Absent until the first record; `[]` only on an order a data-subject
+   * erasure reached before it had one (see gdpr.ts).
+   */
+  invoice_records?: InvoiceDocument[];
   created_at: string;
   updated_at: string;
   /**
@@ -1680,6 +2275,8 @@ export interface DatabaseSchema {
   webhookDeliveries?: WebhookDelivery[];
   auditEvents?: AuditEvent[];
   consentReceipts?: ConsentReceipt[];
+  /** Append-only, uncapped, never in the change feed. See ConsentLedgerRow. */
+  consentLedger?: ConsentLedgerRow[];
   emailLog?: EmailLogEntry[];
   postRevisions?: PostRevision[];
   /** Commerce collections (optional so legacy DBs parse; backfilled on init). */

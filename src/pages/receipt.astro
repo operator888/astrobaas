@@ -32,6 +32,9 @@ import { settingsMap, settingStr } from '../lib/settings-map';
 import { formatMoney } from '../lib/money-format';
 import { publicStrings } from '../lib/i18n/public-strings';
 import { readReceiptToken, receiptIsAvailable, receiptView } from '../lib/commerce/receipt';
+import {
+  buyerDownloads, loadDownloadSettings, reconcileEntitlements, orderHasDownloadableLines,
+} from '../lib/commerce/download-entitlements';
 import type { Order } from '../core/models';
 
 await LocalDB.init();
@@ -44,8 +47,9 @@ const s = publicStrings(locale).receipt;
 const orderId = readReceiptToken(Astro.url.searchParams.get('token'));
 let order: Order | null = null;
 if (orderId) {
-  const all = await LocalDB.getOrders();
-  order = (all as Order[]).find((o) => String(o.id) === orderId) ?? null;
+  // Reconciled on read: a paid order that predates downloads, or reached its
+  // status by a path that did not grant, gets its entitlements here.
+  order = (await reconcileEntitlements(orderId)).order;
 }
 const ok = receiptIsAvailable(order);
 
@@ -57,6 +61,14 @@ if (!ok) Astro.response.status = 404;
 const view = ok && order
   ? receiptView(order, (cents) => formatMoney(cents, { currency: order!.currency, locale }))
   : null;
+
+// Purchased files. Links are minted per view and never stored; each one is a
+// counted, expiring credential (lib/commerce/download-entitlements.ts).
+const dlSettings = await loadDownloadSettings();
+const downloads = ok && order ? buyerDownloads(order, dlSettings.linkTtlHours) : [];
+const downloadsPending = ok && order && downloads.length === 0 && await orderHasDownloadableLines(order);
+const fill = (tpl: string, vars: Record<string, string | number>) =>
+  tpl.replace(/\{(\w+)\}/g, (_, k) => String(vars[k] ?? ''));
 
 const seller = settingStr(settings['trader_legal_name']) || settingStr(settings['site_title']);
 const sellerAddress = settingStr(settings['trader_address']);
@@ -121,6 +133,13 @@ const sellerVat = settingStr(settings['trader_vat_number']);
                   <td class="py-2 text-gray-900">
                     {line.name}
                     {line.options && <span class="block text-xs text-gray-500">{line.options}</span>}
+                    {line.addons.length > 0 && (
+                      <ul class="receipt-addons mt-0.5 text-xs text-gray-500">
+                        {line.addons.map((a) => (
+                          <li class="flex justify-between gap-4"><span>+ {a.label}</span><span class="tabular-nums">{a.amount}</span></li>
+                        ))}
+                      </ul>
+                    )}
                   </td>
                   <td class="py-2 text-right text-gray-600 tabular-nums">{line.qty}</td>
                   <td class="py-2 text-right text-gray-600 tabular-nums">{line.vatRate ?? '—'}</td>
@@ -147,6 +166,42 @@ const sellerVat = settingStr(settings['trader_vat_number']);
               <span>{s.total}</span><span class="tabular-nums">{view.total}</span>
             </div>
           </div>
+
+          {(downloads.length > 0 || downloadsPending) && (
+            <section id="downloads" class="rounded-lg border border-gray-200 p-4 space-y-3" aria-labelledby="downloads-heading">
+              <h2 id="downloads-heading" class="font-semibold text-gray-900">{s.downloadsHeading}</h2>
+              {downloadsPending && <p class="text-sm text-gray-600">{s.downloadsPending}</p>}
+              {downloads.map((d) => (
+                <div class="space-y-1">
+                  <p class="text-sm font-medium text-gray-900">{d.name}</p>
+                  {d.state === 'active' && (
+                    <ul class="space-y-1">
+                      {d.files.map((f) => (
+                        <li class="text-sm">
+                          {f.href
+                            ? <a class="download-link text-blue-700 underline break-all" href={f.href} rel="nofollow noreferrer">{f.name}</a>
+                            : <span class="text-gray-500">{f.name}</span>}
+                          <span class="text-xs text-gray-500"> · {f.remaining === null ? s.downloadsUnlimited : fill(s.downloadsLeft, { n: f.remaining })}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {d.state === 'inactive' && <p class="text-sm text-gray-600">{s.downloadsPending}</p>}
+                  {d.state === 'expired' && <p class="text-sm text-gray-600">{s.downloadsExpired}</p>}
+                  {d.state === 'revoked' && <p class="text-sm text-gray-600">{s.downloadsRevoked}</p>}
+                  {d.state === 'exhausted' && <p class="text-sm text-gray-600">{s.downloadsExhausted}</p>}
+                  {d.state === 'active' && (
+                    d.expires_at && (
+                      <p class="text-xs text-gray-500">{fill(s.downloadsUntil, { date: d.expires_at.slice(0, 10) })}</p>
+                    )
+                  )}
+                </div>
+              ))}
+              {downloads.some((d) => d.state === 'active') && (
+                <p class="text-xs text-gray-500 print:hidden">{fill(s.downloadsNote, { hours: dlSettings.linkTtlHours })}</p>
+              )}
+            </section>
+          )}
 
           <div class="space-y-2 border-t border-gray-200 pt-6 text-xs text-gray-500">
             {view.taxIncluded && <p>{s.vatIncluded}</p>}

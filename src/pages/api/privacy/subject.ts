@@ -64,6 +64,7 @@ export const GET: APIRoute = async ({ url, locals }) => {
         messages: data.messages.length,
         has_customer: !!data.customer,
         submissions: data.submissions.reduce((n, g) => n + g.entries.length, 0),
+        reviews: data.reviews.length,
       },
     });
 
@@ -114,6 +115,8 @@ export const POST: APIRoute = async ({ request, locals }) => {
         messages: report.deleted.messages,
         newsletter: report.deleted.newsletter,
         submissions: report.deleted.submissions,
+        reviews_deleted: report.deleted.reviews,
+        reviews_anonymised: report.reviewsAnonymised,
         change_feed: report.deleted.changeFeed,
         webhook_deliveries: report.deleted.webhookDeliveries,
         staff_account_found: report.staffAccountFound,

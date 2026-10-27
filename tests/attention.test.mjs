@@ -126,6 +126,23 @@ const ids = (cards) => cards.map((c) => c.id);
   check('...but a DRAFT one is not — it is not on sale',
     !only({ products: [{ id: 'p1', status: 'draft', in_stock: false }] })
       .includes('active-out-of-stock'));
+  // The stored flag follows the PRODUCT's own count, which a product with
+  // variants does not sell from: every variant sold out, flag still true.
+  check('a product whose every variant is sold out is reported, whatever the stored flag says',
+    only({ products: [{
+      id: 'p1', status: 'active', in_stock: true, stock: null,
+      variants: [{ enabled: true, stock: 0 }, { enabled: true, stock: 0 }],
+    }] }).includes('active-out-of-stock'));
+  check('...but one with a variant still on the shelf is not',
+    !only({ products: [{
+      id: 'p1', status: 'active', in_stock: true, stock: null,
+      variants: [{ enabled: true, stock: 0 }, { enabled: true, stock: 2 }],
+    }] }).includes('active-out-of-stock'));
+  check('...and a sold-out variant that is DISABLED does not count against it',
+    !only({ products: [{
+      id: 'p1', status: 'active', in_stock: true, stock: null,
+      variants: [{ enabled: false, stock: 0 }, { enabled: true, stock: 3 }],
+    }] }).includes('active-out-of-stock'));
 
   check('a scheduled post whose date has passed is reported',
     only({ posts: [{ id: 'a1', status: 'scheduled', publish_date: ago(2) }] })

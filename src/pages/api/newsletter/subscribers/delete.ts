@@ -2,6 +2,8 @@ import type { APIRoute } from 'astro';
 import { LocalDB } from '../../../../lib/localdb';
 import { ApiResponseBuilder } from '../../../../lib/api-response';
 import { fireEvent } from '../../../../lib/webhooks';
+import { withdrawConsent } from '../../../../lib/consent-service';
+import { ConsentInputError, NEWSLETTER_PURPOSE } from '../../../../lib/consent-ledger';
 
 /**
  * Take ONE person off the mailing list, as the operator.
@@ -52,11 +54,19 @@ export const POST: APIRoute = async ({ request, locals }) => {
     const email = String(row.email ?? '').trim().toLowerCase();
     await LocalDB.deleteSubscriber(id);
 
-    // The SAME event the public unsubscribe fires. An address removed here but
-    // left live at the ESP is exactly the "honoured on this site, not at the
-    // provider" shape that ends in a spam complaint — and the person would
-    // rightly say they asked and nothing happened.
-    void fireEvent('subscriber.unsubscribed', { email, unsubscribed_at: new Date().toISOString() });
+    // A WITHDRAWAL in the consent ledger, recorded as the operator's act. The
+    // shared path also removes any duplicate row for the address and fires
+    // the SAME `subscriber.unsubscribed` the public unsubscribe fires — an
+    // address removed here but left live at the ESP is exactly the "honoured
+    // on this site, not at the provider" shape that ends in a spam complaint.
+    // An address that is not a valid one (a hand-edited row) is still removed
+    // above; it simply cannot have a ledger.
+    try {
+      await withdrawConsent({ email, purpose: NEWSLETTER_PURPOSE, source: 'admin' });
+    } catch (err) {
+      if (!(err instanceof ConsentInputError)) throw err;
+      void fireEvent('subscriber.unsubscribed', { email, unsubscribed_at: new Date().toISOString() });
+    }
 
     return ApiResponseBuilder.success({ id, email });
   } catch (err) {

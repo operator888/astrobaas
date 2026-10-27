@@ -10,7 +10,8 @@
 
 import type { ShippingMethod, ShippingRate, ShippingZone } from './shipping';
 import type { Coupon, CouponKind } from './coupons';
-import { normalizeCouponCode } from './coupons';
+import { normalizeCouponCode, normalizeCouponEmail, COUPON_KINDS, VALUED_COUPON_KINDS } from './coupons';
+import { isCheckoutEmail } from './checkout-email';
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -135,7 +136,12 @@ export function normalizeShippingMethod(
 
 export function normalizeCoupon(
   raw: unknown,
-  opts: { partial?: boolean } = {},
+  /**
+   * `kind`: the STORED kind, for a partial edit — so a value-only edit is
+   * bounded as that kind, and a change between percent and fixed without a
+   * new value (which would reinterpret 500 cents as 5%) is refused.
+   */
+  opts: { partial?: boolean; kind?: CouponKind } = {},
 ): Parsed<Partial<Coupon>> {
   if (!raw || typeof raw !== 'object') return bad('Body must be a JSON object');
   const b = raw as Record<string, unknown>;
@@ -151,19 +157,51 @@ export function normalizeCoupon(
     return bad('code is required');
   }
 
-  if ('kind' in b || !opts.partial) {
-    const kind = b.kind;
-    if (kind !== 'percent' && kind !== 'fixed') return bad('kind must be "percent" or "fixed"');
+  // The plugin contract's names are ALIASES of the stored ones (see the note
+  // at the top of commerce/coupons.ts): `type` for `kind`, `expires_at` for
+  // `ends_at`, `max_redemptions` for `usage_limit`,
+  // `max_redemptions_per_email` for `usage_limit_per_customer`, `categories`
+  // for `category_slugs`, and a `conditions` object for the three
+  // restrictions. The stored name wins when a body sends both.
+  const cond = b.conditions && typeof b.conditions === 'object' && !Array.isArray(b.conditions)
+    ? b.conditions as Record<string, unknown> : {};
+  const ALIASES: Array<[string, string, Record<string, unknown>]> = [
+    ['kind', 'type', b],
+    ['ends_at', 'expires_at', b],
+    ['usage_limit', 'max_redemptions', b],
+    ['usage_limit_per_customer', 'max_redemptions_per_email', b],
+    ['category_slugs', 'categories', b],
+    ['category_slugs', 'categories', cond],
+    ['min_subtotal_cents', 'min_subtotal_cents', cond],
+    ['brands', 'brands', cond],
+  ];
+  const src: Record<string, unknown> = { ...b };
+  for (const [stored, alias, from] of ALIASES) {
+    if (!(stored in src) && alias in from) src[stored] = from[alias];
+  }
+
+  if ('kind' in src || !opts.partial) {
+    const kind = src.kind;
+    if (!(COUPON_KINDS as readonly unknown[]).includes(kind)) {
+      return bad(`kind must be one of ${COUPON_KINDS.map((k) => `"${k}"`).join(', ')}`);
+    }
     out.kind = kind as CouponKind;
   }
 
-  if ('value' in b || !opts.partial) {
-    const kind = out.kind ?? 'percent';
+  if (out.kind && !VALUED_COUPON_KINDS.includes(out.kind)) {
+    // bogo50, free_shipping and gift_product take no amount. Stored as 0 so a
+    // record read by an older build (which knows only percent/fixed) is worth
+    // nothing rather than whatever number was lying in `value`.
+    out.value = 0;
+  } else if (opts.partial && out.kind && opts.kind && out.kind !== opts.kind && !('value' in src)) {
+    return bad(`value is required when changing the kind to "${out.kind}"`);
+  } else if ('value' in src || !opts.partial) {
+    const kind = out.kind ?? opts.kind ?? 'percent';
     // A percentage is basis points and cannot exceed 100%; a fixed amount is
     // minor units. Sharing one field keeps the record small, so the bound
     // depends on the kind.
     const max = kind === 'percent' ? 10_000 : MAX_MONEY;
-    const value = intIn(b.value, 0, max);
+    const value = intIn(src.value, 0, max);
     if (value === null) {
       return bad(
         kind === 'percent'
@@ -174,23 +212,48 @@ export function normalizeCoupon(
     out.value = value;
   }
 
-  if ('enabled' in b) out.enabled = b.enabled === true;
+  if ('enabled' in src) out.enabled = src.enabled === true;
   else if (!opts.partial) out.enabled = true;
 
-  if ('description' in b) out.description = strIn(b.description, 300);
-  if ('min_subtotal_cents' in b) out.min_subtotal_cents = intIn(b.min_subtotal_cents, 0, MAX_MONEY);
-  if ('usage_limit' in b) out.usage_limit = intIn(b.usage_limit, 1, 1_000_000);
-  if ('usage_limit_per_customer' in b) out.usage_limit_per_customer = intIn(b.usage_limit_per_customer, 1, 10_000);
-  if ('free_shipping' in b) out.free_shipping = b.free_shipping === true;
+  if ('description' in src) out.description = strIn(src.description, 300);
+  if ('min_subtotal_cents' in src) out.min_subtotal_cents = intIn(src.min_subtotal_cents, 0, MAX_MONEY);
+  if ('usage_limit' in src) out.usage_limit = intIn(src.usage_limit, 1, 1_000_000);
+  if ('usage_limit_per_customer' in src) out.usage_limit_per_customer = intIn(src.usage_limit_per_customer, 1, 10_000);
+  if ('free_shipping' in src) out.free_shipping = src.free_shipping === true;
+  if ('single_use' in src) out.single_use = src.single_use === true;
+
+  if ('gift_product_id' in src) {
+    const v = src.gift_product_id;
+    if (v === null || v === '') out.gift_product_id = null;
+    else if (typeof v === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(v.trim())) out.gift_product_id = v.trim();
+    else return bad('gift_product_id must be a product id');
+  }
+  if (out.kind === 'gift_product' && !out.gift_product_id && !opts.partial) {
+    return bad('a gift_product coupon needs gift_product_id');
+  }
+
+  if ('email' in src) {
+    const v = src.email;
+    if (v === null || v === '') out.email = null;
+    else if (typeof v === 'string' && isCheckoutEmail(v.trim())) out.email = normalizeCouponEmail(v);
+    else return bad('email must be a valid email address');
+  }
+
+  if ('brands' in src) {
+    out.brands = Array.isArray(src.brands)
+      ? [...new Set(src.brands.filter((x): x is string => typeof x === 'string')
+          .map((x) => x.trim().replace(/\s+/g, ' ').slice(0, 120)).filter(Boolean))].slice(0, 200)
+      : [];
+  }
   // An AUTOMATIC rule applies with no code typed. `=== true` is right here and
   // not the settings-style leniency: this arrives as JSON from an admin form,
   // not from the settings table, so there is no string to tolerate — and the
   // safe default for "discount everybody without being asked" is off.
-  if ('automatic' in b) out.automatic = b.automatic === true;
+  if ('automatic' in src) out.automatic = src.automatic === true;
 
   for (const key of ['starts_at', 'ends_at'] as const) {
-    if (!(key in b)) continue;
-    const v = b[key];
+    if (!(key in src)) continue;
+    const v = src[key];
     if (v === null || v === '') { out[key] = null; continue; }
     const t = typeof v === 'string' ? Date.parse(v) : NaN;
     // An unparseable date must not become "no limit" — that would make an
@@ -207,14 +270,34 @@ export function normalizeCoupon(
       ? v.filter((x): x is string => typeof x === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(x.trim()))
          .map((x) => x.trim()).slice(0, 200)
       : [];
-  if ('product_ids' in b) out.product_ids = idList(b.product_ids);
-  if ('category_slugs' in b) {
-    out.category_slugs = Array.isArray(b.category_slugs)
-      ? b.category_slugs.filter((x): x is string => typeof x === 'string')
+  if ('product_ids' in src) out.product_ids = idList(src.product_ids);
+  if ('category_slugs' in src) {
+    out.category_slugs = Array.isArray(src.category_slugs)
+      ? src.category_slugs.filter((x): x is string => typeof x === 'string')
          .map((x) => x.trim().toLowerCase()).filter(Boolean).slice(0, 200)
       : [];
   }
 
   if (!opts.partial) out.used_count = 0;
   return { ok: true, value: out };
+}
+
+/**
+ * The rules that hold for a WHOLE coupon, whichever fields were just edited.
+ *
+ * `normalizeCoupon` in partial mode sees only the fields a PUT sent, so it
+ * cannot know that the stored coupon is a gift coupon with no gift, or that a
+ * new `ends_at` now precedes the stored `starts_at`. Callers that merge an
+ * edit into a stored record check the result here before writing it.
+ */
+export function checkCouponRecord(c: Partial<Coupon>): string | null {
+  if (!c.kind || !(COUPON_KINDS as readonly string[]).includes(c.kind)) return 'kind is required';
+  if (c.kind === 'gift_product' && !c.gift_product_id) return 'a gift_product coupon needs gift_product_id';
+  if (c.kind === 'percent' && (Number(c.value) < 0 || Number(c.value) > 10_000)) {
+    return 'value must be basis points between 0 and 10000 (1000 = 10%)';
+  }
+  if (c.starts_at && c.ends_at && Date.parse(c.starts_at) > Date.parse(c.ends_at)) {
+    return 'starts_at cannot be after ends_at';
+  }
+  return null;
 }

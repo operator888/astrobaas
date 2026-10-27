@@ -4,6 +4,7 @@ import { ApiResponseBuilder } from '../../../../lib/api-response';
 import { validate } from '../../../../lib/validate';
 import { setOrderStatus, ORDER_STATUSES } from '../../../../lib/commerce-service';
 import { canReadCommerce, canWriteCommerce } from '../../../../lib/auth';
+import { recordOrderEvent, withoutTimeline } from '../../../../lib/commerce/order-timeline';
 
 /** GET /api/orders/[id] — staff only. */
 export const GET: APIRoute = async ({ params, locals }) => {
@@ -15,7 +16,8 @@ export const GET: APIRoute = async ({ params, locals }) => {
     }
     const order = await LocalDB.getOrder(params.id!);
     if (!order) return ApiResponseBuilder.notFound('Order');
-    return ApiResponseBuilder.success(order);
+    // The stored timeline is read through /timeline, not smuggled into this.
+    return ApiResponseBuilder.success(withoutTimeline(order));
   } catch (err) {
     console.error('Order get error:', err);
     return ApiResponseBuilder.serverError('Failed to load order');
@@ -45,22 +47,45 @@ export const PUT: APIRoute = async ({ params, request, locals }) => {
       staff_note: { type: 'string', max: 2000, optional: true },
     });
     if (!result.ok) return ApiResponseBuilder.validationError('Invalid order update', result.errors);
+    // `validate` reads an empty string as "not sent", so a staff note could
+    // never be CLEARED: the screen emptied the box on blur, said nothing, and
+    // the old text came back on reload. Clearing is a real edit — and one the
+    // timeline records — so an explicit '' is honoured for this field.
+    if (body && typeof body === 'object' && (body as Record<string, unknown>).staff_note === '') {
+      (result.value as Record<string, unknown>).staff_note = '';
+    }
+    // What each note was BEFORE this save, so the timeline records a change
+    // and not a re-save of the same text (the screen saves on blur).
+    const before = (result.value.note !== undefined || result.value.staff_note !== undefined)
+      ? await LocalDB.getOrder(params.id!)
+      : null;
     if (result.value.note !== undefined) {
-      await LocalDB.updateOrder(params.id!, { note: result.value.note });
+      const saved = await LocalDB.updateOrder(params.id!, { note: result.value.note });
+      // The customer's own words: that it was edited, never what they said.
+      if (saved && (before?.note ?? '') !== result.value.note) {
+        await recordOrderEvent(saved.id, { event: 'note.customer_edited', actor: session.id });
+      }
     }
     if (result.value.staff_note !== undefined) {
-      await LocalDB.updateOrder(params.id!, { staff_note: result.value.staff_note });
+      const saved = await LocalDB.updateOrder(params.id!, { staff_note: result.value.staff_note });
+      if (saved && (before?.staff_note ?? '') !== result.value.staff_note) {
+        await recordOrderEvent(saved.id, {
+          event: result.value.staff_note ? 'note.staff_updated' : 'note.staff_cleared',
+          actor: session.id,
+          text: result.value.staff_note || undefined,
+        });
+      }
     }
     if (result.value.status) {
       const res = await setOrderStatus(params.id!, result.value.status as any, session.id);
       // 409 here means the stock a reopened order needs is gone — a real
       // conflict the caller can act on, not a malformed request.
       if (!res.ok) return ApiResponseBuilder.error(res.status, res.message);
-      return ApiResponseBuilder.success(res.value, 'Order updated');
+      return ApiResponseBuilder.success(withoutTimeline(res.value), 'Order updated');
     }
     const order = await LocalDB.getOrder(params.id!);
     if (!order) return ApiResponseBuilder.notFound('Order');
-    return ApiResponseBuilder.success(order, 'Order updated');
+    return ApiResponseBuilder.success(withoutTimeline(order), 'Order updated');
   } catch (err) {
     console.error('Order update error:', err);
     return ApiResponseBuilder.serverError('Failed to update order');

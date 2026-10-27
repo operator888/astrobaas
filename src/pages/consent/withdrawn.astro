@@ -1,0 +1,33 @@
+---
+import PublicLayout from '../../layouts/PublicLayout.astro';
+import { routeHref } from '../../lib/locale-links';
+
+/**
+ * Where a consent-withdrawal link lands (`GET /api/consent/withdraw`).
+ *
+ * Links nowhere off-site: the URL that got here carried a signed token holding
+ * an email address, and an outbound link could leak it in a Referer header.
+ */
+const ok = Astro.url.searchParams.get('ok') === '1';
+const title = ok ? 'Your consent has been withdrawn' : 'That link did not work';
+---
+
+<PublicLayout title={title} description="Consent">
+  <meta slot="head" name="robots" content="noindex, nofollow" />
+  <section class="max-w-2xl mx-auto px-4 py-20 text-center">
+    <h1 class="text-3xl font-bold text-gray-900 mb-4">{title}</h1>
+    {ok ? (
+      <p class="text-gray-600">
+        We have recorded that you withdrew it, and we will not rely on it from now on.
+        A record that you gave it and withdrew it is kept, because we are required to
+        be able to show both.
+      </p>
+    ) : (
+      <p class="text-gray-600">
+        The link may have been altered in transit, or it has expired. Reply to any of
+        our emails and we will record the withdrawal by hand.
+      </p>
+    )}
+    <p class="mt-8"><a href={routeHref('/', Astro.locals.locale)} class="text-blue-600 hover:underline">Back to the site</a></p>
+  </section>
+</PublicLayout>

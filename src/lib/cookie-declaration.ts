@@ -39,6 +39,7 @@ import { CONSENT_COOKIE, CONSENT_MAX_AGE_DAYS } from './consent';
 import { SESSION_COOKIE, CSRF_COOKIE, PENDING_2FA_COOKIE, sessionTtlMs } from './auth';
 import { configuredAnalytics } from './analytics';
 import type { AnalyticsProvider } from './analytics';
+import { ATTRIBUTION_COOKIE, ATTRIBUTION_MAX_AGE_DAYS, resolveAttributionEnabled } from './commerce/attribution';
 
 /** One row of the declaration. */
 export interface CookieDeclarationEntry {
@@ -152,6 +153,30 @@ export function firstPartyCookies(): CookieDeclarationEntry[] {
   ];
 }
 
+/**
+ * The campaign-attribution cookie (commerce/attribution.ts).
+ *
+ * Separate from `firstPartyCookies()` because it is CONDITIONAL on this
+ * install: it exists only while the shop is on and the merchant has not
+ * switched attribution off, and the declaration includes it exactly then. Its
+ * category is `marketing` — it is written only after that consent — and the
+ * lifetime is derived from the constant the loader uses.
+ */
+export function attributionCookieEntry(): CookieDeclarationEntry {
+  return {
+    name: ATTRIBUTION_COOKIE,
+    provider: 'This site',
+    category: 'marketing',
+    purpose:
+      'Remembers which advertising campaign or link brought you here (the campaign tags and ad click '
+      + 'id in the address you arrived at), so an order you place can be credited to it. It stays on '
+      + 'this site; it is not sent to any advertising platform.',
+    lifetime: humanMs(ATTRIBUTION_MAX_AGE_DAYS * 86_400_000),
+    firstParty: true,
+    setWhen: 'Only after you allow the “marketing” category, and only when you arrive through a campaign link.',
+  };
+}
+
 /** Cookie facts attached to an analytics provider. See `PROVIDER_COOKIES`. */
 export interface ProviderCookieFacts {
   cookies: { name: string; purpose: string; lifetime: string; firstParty: boolean }[];
@@ -200,6 +225,13 @@ export const PROVIDER_COOKIES: Record<string, ProviderCookieFacts> = {
     // and the operator has to add whatever they put in the container.
     cookies: [],
     cookieless: false,
+  },
+  'google-ads': {
+    vendorControlled: true,
+    cookieDocsUrl: 'https://business.safety.google/adscookies/',
+    cookies: [
+      { name: '_gcl_au', purpose: 'Remembers an ad click so a later purchase can be counted as a conversion for that ad.', lifetime: '3 months', firstParty: true },
+    ],
   },
   'meta-pixel': {
     vendorControlled: true,
@@ -295,7 +327,9 @@ export function buildCookieDeclaration(
 ): CookieDeclaration {
   const map: Record<string, unknown> = {};
   for (const s of settings) map[s.key] = s.value;
-  const firstParty = firstPartyCookies();
+  // The attribution cookie through the SAME resolver `/consent.js` and the
+  // checkout route read, so "declared" and "can be set" are one question.
+  const firstParty = [...firstPartyCookies(), ...(resolveAttributionEnabled(map) ? [attributionCookieEntry()] : [])];
   const providers: DeclaredProvider[] = [];
 
   // `configuredAnalytics`, NOT a second reading of the same settings keys. It is

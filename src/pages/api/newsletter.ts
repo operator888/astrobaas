@@ -7,18 +7,36 @@ import { makeConfirmToken, confirmUrl, confirmEmail } from '../../lib/newsletter
 import { sendEmail, emailChannelActive } from '../../lib/email';
 import { emailTemplateKey } from '../../lib/email-templates';
 import { allowRecipient, NEWSLETTER_CONFIRM_BUDGET } from '../../lib/recipient-throttle';
+import { DEFAULT_NEWSLETTER_CONSENT, textHash } from '../../lib/consent-ledger';
 
 // Public endpoint (anonymous). Middleware still enforces CSRF + rate limiting.
 export const POST: APIRoute = async ({ request, locals }) => {
   try {
     await LocalDB.init();
     const body = await request.json().catch(() => null);
-    const result = validate<{ email: string; hp_url?: string; pow_token?: string }>(body, {
+    const result = validate<{
+      email: string; hp_url?: string; pow_token?: string; consent_text?: string; consent_version?: string;
+    }>(body, {
       email: { type: 'string', min: 3, max: 200, pattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/ },
       hp_url: { type: 'string', max: 200, optional: true }, // honeypot
       pow_token: { type: 'string', max: 5000, optional: true }, // proof-of-work, if enabled
+      // The wording the visitor was shown, for the consent ledger. A storefront
+      // that shows its own sends both; core's forms send neither and the
+      // default wording is recorded. Only its hash is kept.
+      consent_text: { type: 'string', min: 1, max: 5000, optional: true },
+      consent_version: { type: 'string', min: 1, max: 64, optional: true },
     });
     if (!result.ok) return ApiResponseBuilder.validationError('Invalid email', result.errors);
+    // Both or neither: a text with no version cannot be told apart from the next
+    // edit of it, and a version with no text proves nothing.
+    if ((result.value.consent_text === undefined) !== (result.value.consent_version === undefined)) {
+      return ApiResponseBuilder.validationError('Invalid consent', {
+        consent_text: 'consent_text and consent_version are sent together, or not at all',
+      });
+    }
+    const consent = result.value.consent_text !== undefined
+      ? { version: result.value.consent_version as string, text_hash: textHash(result.value.consent_text) }
+      : { version: DEFAULT_NEWSLETTER_CONSENT.version, text_hash: textHash(DEFAULT_NEWSLETTER_CONSENT.text) };
 
     // The SHARED gate, which is also where this form gains a form-shaped rate
     // limit it never had. A mailing list stuffed with fake addresses is a
@@ -74,7 +92,7 @@ export const POST: APIRoute = async ({ request, locals }) => {
     if (await allowRecipient(NEWSLETTER_CONFIRM_BUDGET, email)) {
       void sendEmail(confirmEmail(
         email,
-        confirmUrl(origin, makeConfirmToken(email)),
+        confirmUrl(origin, makeConfirmToken(email, consent)),
         typeof siteTitle === 'string' ? siteTitle : undefined,
         tpl,
       )).catch((err) => {

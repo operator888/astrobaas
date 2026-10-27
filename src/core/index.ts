@@ -47,6 +47,20 @@ export type {
   OrderItem,
   OrderStatus,
   Customer,
+  StockStatus,
+  StockStatusInfo,
+  // Invoice / credit-memo records, which an issuer plugin receives.
+  InvoiceDocument,
+  InvoiceRecord,
+  CreditMemoRecord,
+  InvoiceRecordLine,
+  InvoiceVatRow,
+  InvoiceParty,
+  InvoiceIssuerState,
+  InvoiceLineTaxTreatment,
+  ProductDownload,
+  DownloadEntitlement,
+  DownloadLogEntry,
 } from './models';
 
 // ---- Storage contract ----
@@ -55,6 +69,10 @@ export type { Storage } from './storage';
 // ---- Plugin system ----
 export type { Plugin, FilterFn, ActionFn, PluginSettings, OrderLineExtras } from '../lib/plugin-system';
 export { PluginManager, pluginManager, PLUGIN_HOOKS } from '../lib/plugin-system';
+/** The value PLUGIN_HOOKS.TAX_ID_VERDICT filters, and its statuses. */
+export type { TaxIdVerdict, TaxIdVerdictStatus, TaxRate } from '../lib/commerce/tax';
+// What an INVOICE_ISSUERS plugin implements (see PLUGIN_DEVELOPMENT.md).
+export type { InvoiceIssuer, InvoiceIssueResult, InvoiceIssueContext, InvoiceIssuersFilterContext, LateIssueOutcome } from '../lib/commerce/invoice-records';
 
 // ---- Author helpers (define* identity functions for type inference) ----
 export { definePlugin, defineTheme } from './define';
@@ -153,6 +171,14 @@ export type { ApiResult, ApiFetchOptions } from '../lib/apiClient';
 // a caller that should be going through the API.
 export { fireEvent, webhookMatches, webhookBody, WEBHOOK_EVENTS } from '../lib/webhooks';
 export { signWebhook, newWebhookSecret } from '../lib/auth';
+// A plugin's DECLARED events (`webhookEvents`), checked against the declaration
+// and the core namespaces. Compiled plugins use `host.webhooks.emit`, which is
+// this bound to their own ids; a bundled plugin passes its id.
+export { emitPluginWebhookEvent, allPluginWebhookEvents } from '../lib/plugin-platform/webhook-events';
+
+// ---- Who a request is for (X-Client-IP / X-Client-UA on API-key requests only) ----
+export { requestClient } from '../lib/client-address';
+export type { RequestClient } from '../lib/client-address';
 
 // ---- Email (pluggable transport; send notifications, provide a transport) ----
 export { sendEmail, getEmailTransport, setEmailTransport, consoleTransport, webhookTransport, emailChannelActive, emailChannelLabel } from '../lib/email';
@@ -172,6 +198,16 @@ export { createPluginStore } from '../lib/plugin-platform/store';
 // A plugin's own settings — the record the admin edits. Scoped to an id, so
 // a plugin cannot read its neighbour's by reaching for LocalDB.getPlugins().
 export { getPluginSettings, getPluginSetting } from '../lib/plugin-platform/settings';
+// The shapes `host.catalog` hands a compiled plugin (src/plugins/external.ts).
+// Types only: a compiled plugin reaches the catalogue through the host it is
+// handed, never through an import.
+export type {
+  PluginCatalog, CatalogProduct, CatalogBrand, CatalogIterateOptions,
+} from '../lib/plugin-platform/catalog';
+// The shapes `host.coupons` takes and returns. Types only, for the same reason.
+export type {
+  PluginCoupons, IssueCouponInput, IssuedCoupon, CouponStatus,
+} from '../lib/plugin-platform/coupons';
 export type { PluginStore, PluginListOptions } from '../lib/plugin-platform/store';
 export { LocalDB } from '../lib/localdb';
 

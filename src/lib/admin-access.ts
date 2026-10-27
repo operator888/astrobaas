@@ -64,6 +64,10 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
   // customer records) regardless of the page being reachable.
   { href: '/admin/orders', prefix: '/admin/orders', label: 'Orders', roles: ['admin', 'manager'] },
   { href: '/admin/customers', prefix: '/admin/customers', label: 'Customers', roles: ['admin', 'manager'] },
+  // Admin only: the same rule POST/PUT/DELETE /api/coupons enforce. A coupon
+  // decides what a customer is charged, and the list of live codes is exactly
+  // what a leaked session should not hand out.
+  { href: '/admin/coupons', prefix: '/admin/coupons', label: 'Coupons', roles: ['admin'] },
   { href: '/admin/messages', prefix: '/admin/messages', label: 'Messages', roles: ['admin'] },
   { href: '/admin/themes', prefix: '/admin/themes', label: 'Themes', roles: ['admin'] },
   // Admin only, because the menu is saved through the settings endpoint and
@@ -121,6 +125,11 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
 const EXTRA_RULES: readonly Pick<AdminNavItem, 'prefix' | 'roles'>[] = [
   // The profile screen is every staff member's own account.
   { prefix: '/admin/profile', roles: STAFF },
+  // The product-review queue (C-35). Reached from the collection link the
+  // sidebar shows while reviews are on (admin-nav `contentTypeNavFor`), so it
+  // has no NAV row. Same roles as the `manage_catalog` capability that guards
+  // its API (/api/reviews), so the screen and its endpoints agree.
+  { prefix: '/admin/reviews', roles: ['admin', 'editor', 'manager'] },
 ];
 
 /**

@@ -23,6 +23,7 @@ import type { Storage } from '../core/storage';
 import { brandKey, normalizeBrand, relatedBrandPairs, summarizeBrands } from './commerce/brand';
 import type { SavedAddress, ThemeConfig } from '../core/models';
 import { defaultLocale } from './i18n';
+import { migrateSubscribersToLedger } from './consent-ledger';
 
 export interface Migration {
   /** Version the DB is AT after this migration applies. Ascending, gap-free. */
@@ -604,6 +605,23 @@ export const MIGRATIONS: Migration[] = [
           possibly_related: related,
         });
       }
+    },
+  },
+  {
+    version: 16,
+    name: 'subscribers-into-consent-ledger',
+    // The subscriber export now reads the consent ledger: only contacts whose
+    // newsletter consent is granted AND confirmed. Every subscriber who joined
+    // before the ledger existed did confirm (a row was only ever created by the
+    // double-opt-in click), but nothing recorded it — so without this the
+    // export would drop the whole existing list the day the ledger arrives.
+    //
+    // Each is recorded as ONE confirmed grant, `source: 'migration'`, under the
+    // `pre-ledger` wording, which says plainly that the original text was not
+    // kept. Idempotent: an address that already has any newsletter row is
+    // skipped. Append-only, like every other ledger write.
+    async up(storage) {
+      await migrateSubscribersToLedger(storage);
     },
   },
 ];

@@ -45,10 +45,18 @@ import type {
   PaymentEventClaim,
   PaymentEventClaimOptions,
   RefundAppend,
+  OrderTagsWrite,
+  OrderTimelineWrite,
+  OrderInvoiceRecordsWrite,
+  OrderFieldWrite,
+  OrderCasField,
   IdempotencyClaim,
+  CouponClaimOptions,
 } from '../../core/storage';
+import { ORDER_CAS_FIELDS, COUPON_EMAIL_KEY_RE } from '../../core/storage';
 import { SlugTakenError } from './slug-taken';
 import type {
+  InvoiceDocument,
   ShippingMethodRecord,
   CouponRecord,
   Post,
@@ -62,6 +70,7 @@ import type {
   ContactMessage,
   Subscriber,
   ConsentReceipt,
+  ConsentLedgerRow,
   EmailLogEntry,
   PluginRecord,
   CustomEntity,
@@ -327,6 +336,33 @@ export class SqlStorage implements Storage, LocalSqliteHolder {
       // security events that log is for.
       ddl.push('CREATE TABLE IF NOT EXISTS consent_receipts (id TEXT PRIMARY KEY, ts TEXT NOT NULL, data TEXT NOT NULL)');
       ddl.push('CREATE INDEX IF NOT EXISTS idx_consent_ts ON consent_receipts (ts)');
+      // The consent ledger: APPEND-ONLY proof of who agreed to what (see
+      // src/lib/consent-ledger.ts). `seq` is the write order, which is what
+      // "the latest row" means — timestamps collide when a grant and its
+      // confirmation are written in the same millisecond. Never pruned.
+      ddl.push('CREATE TABLE IF NOT EXISTS consent_ledger (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, email TEXT NOT NULL, purpose TEXT NOT NULL, ts TEXT NOT NULL, data TEXT NOT NULL)');
+      ddl.push('CREATE INDEX IF NOT EXISTS idx_consent_ledger_email ON consent_ledger (email, purpose, seq)');
+      ddl.push('CREATE INDEX IF NOT EXISTS idx_consent_ledger_purpose ON consent_ledger (purpose, seq)');
+      // Append-only, enforced by the DATABASE and not only by the absence of a
+      // method: a row cannot be deleted at all, and the only UPDATE allowed is
+      // the erasure's — the address becomes `sha256:…` (once), and the decision,
+      // version, text hash, times and source stay exactly as they were.
+      ddl.push("CREATE TRIGGER IF NOT EXISTS consent_ledger_no_delete BEFORE DELETE ON consent_ledger BEGIN SELECT RAISE(ABORT, 'consent_ledger is append-only'); END");
+      ddl.push(
+        'CREATE TRIGGER IF NOT EXISTS consent_ledger_no_update BEFORE UPDATE ON consent_ledger '
+        + "WHEN NOT (NEW.email LIKE 'sha256:%' AND OLD.email NOT LIKE 'sha256:%' "
+        + 'AND NEW.seq = OLD.seq AND NEW.id = OLD.id AND NEW.purpose = OLD.purpose AND NEW.ts = OLD.ts '
+        + "AND json_extract(NEW.data, '$.email') IS NEW.email "
+        + "AND json_extract(NEW.data, '$.id') IS OLD.id "
+        + "AND json_extract(NEW.data, '$.purpose') IS OLD.purpose "
+        + "AND json_extract(NEW.data, '$.granted') IS json_extract(OLD.data, '$.granted') "
+        + "AND json_extract(NEW.data, '$.version') IS json_extract(OLD.data, '$.version') "
+        + "AND json_extract(NEW.data, '$.text_hash') IS json_extract(OLD.data, '$.text_hash') "
+        + "AND json_extract(NEW.data, '$.at') IS json_extract(OLD.data, '$.at') "
+        + "AND json_extract(NEW.data, '$.source') IS json_extract(OLD.data, '$.source') "
+        + "AND json_extract(NEW.data, '$.confirmed_at') IS json_extract(OLD.data, '$.confirmed_at')) "
+        + "BEGIN SELECT RAISE(ABORT, 'consent_ledger is append-only'); END",
+      );
       // The outbound email log. `recipient` is a column rather than a JSON
       // extract because the erasure path deletes by it, and that must not be a
       // full-table scan on a shop with a busy transactional mailer.
@@ -1011,45 +1047,78 @@ export class SqlStorage implements Storage, LocalSqliteHolder {
     return rec;
   }
   async updateCoupon(id: string, updates: Partial<CouponRecord>) {
-    const existing = await this.byId<CouponRecord>('coupons', id);
-    if (!existing) return null;
-    const updated = { ...existing, ...updates, id, updated_at: new Date().toISOString() };
-    await this.put('coupons', id, updated);
-    return updated;
+    // Partial and in SQL (patchRow), like updateOrder. The whole-row write
+    // this replaces read the coupon, merged the edit and wrote it ALL back, so
+    // a checkout's claimCouponUse landing in between had its count overwritten
+    // by the editor's stale copy — a one-use code could then be used again.
+    // Only the keys the caller names are written now; `used_count` is not one
+    // of them unless it is named.
+    const { id: _id, created_at: _c, ...patch } = updates as Partial<CouponRecord>;
+    return this.patchRow<CouponRecord>('coupons', id, { ...patch, updated_at: nowIso() });
   }
   deleteCoupon(id: string): Promise<boolean> {
     return this.del('coupons', id);
   }
 
   /**
-   * Storage.claimCouponUse as one conditional UPDATE: the limit is in the
-   * WHERE clause and the increment reads the count in the row being written,
-   * so of two claims on the last use exactly one matches.
+   * Storage.claimCouponUse as one conditional UPDATE: every limit is in the
+   * WHERE clause and every increment reads the count in the row being
+   * written, so of two claims on the last use exactly one matches. The
+   * per-email count rides in the same statement, under
+   * `$.redemptions_by_email."<key>"` (json_set creates the object on first
+   * use; the key is hex, checked against COUPON_EMAIL_KEY_RE, and bound as a
+   * parameter).
    */
-  async claimCouponUse(id: string): Promise<boolean> {
+  async claimCouponUse(id: string, opts: CouponClaimOptions = {}): Promise<boolean> {
     await this.ensureReady();
+    const emailPath = typeof opts.emailKey === 'string' && COUPON_EMAIL_KEY_RE.test(opts.emailKey)
+      ? `$.redemptions_by_email."${opts.emailKey}"` : null;
+    const used = `coalesce(json_extract(data, '$.used_count'), 0)`;
+    const args: InValue[] = [nowIso()];
+    let sets = `'$.used_count', ${used} + 1, '$.updated_at', ?`;
+    if (emailPath) {
+      sets += `, ?, coalesce(json_extract(data, ?), 0) + 1`;
+      args.push(emailPath, emailPath);
+    }
+    args.push(id);
+    let where = '';
+    if (!opts.force) {
+      // `single_use` caps the total at one whatever `usage_limit` says
+      // (effectiveUsageLimit in commerce/coupons.ts). JSON true extracts as 1.
+      where = `
+          AND (json_extract(data, '$.usage_limit') IS NULL OR ${used} < json_extract(data, '$.usage_limit'))
+          AND (coalesce(json_extract(data, '$.single_use'), 0) != 1 OR ${used} < 1)`;
+      if (emailPath && opts.perEmailLimit != null) {
+        where += `
+          AND coalesce(json_extract(data, ?), 0) < ?`;
+        args.push(emailPath, Math.max(0, Math.floor(opts.perEmailLimit)));
+      }
+    }
     const res = await this.exec(
       `UPDATE coupons
-          SET data = json_set(data,
-                '$.used_count', coalesce(json_extract(data, '$.used_count'), 0) + 1,
-                '$.updated_at', ?)
-        WHERE id = ?
-          AND (json_extract(data, '$.usage_limit') IS NULL
-               OR coalesce(json_extract(data, '$.used_count'), 0) < json_extract(data, '$.usage_limit'))`,
-      [nowIso(), id],
+          SET data = json_set(data, ${sets})
+        WHERE id = ?${where}`,
+      args,
     );
     return Number(res.rowsAffected ?? 0) > 0;
   }
 
-  async releaseCouponUse(id: string): Promise<void> {
+  async releaseCouponUse(id: string, opts: Pick<CouponClaimOptions, 'emailKey'> = {}): Promise<void> {
     await this.ensureReady();
+    const emailPath = typeof opts.emailKey === 'string' && COUPON_EMAIL_KEY_RE.test(opts.emailKey)
+      ? `$.redemptions_by_email."${opts.emailKey}"` : null;
+    const args: InValue[] = [nowIso()];
+    let sets = `'$.used_count', max(coalesce(json_extract(data, '$.used_count'), 0) - 1, 0), '$.updated_at', ?`;
+    if (emailPath) {
+      sets += `, ?, max(coalesce(json_extract(data, ?), 0) - 1, 0)`;
+      args.push(emailPath, emailPath);
+    }
+    args.push(id);
     await this.exec(
       `UPDATE coupons
-          SET data = json_set(data,
-                '$.used_count', max(coalesce(json_extract(data, '$.used_count'), 0) - 1, 0),
-                '$.updated_at', ?)
+          SET data = json_set(data, ${sets})
         WHERE id = ?`,
-      [nowIso(), id],
+      args,
     );
   }
 
@@ -1313,6 +1382,137 @@ export class SqlStorage implements Storage, LocalSqliteHolder {
     const updated = JSON.parse(String(row.data)) as Order;
     await this.recordChange('order', id, 'update', updated);
     return { outcome: 'appended', order: updated };
+  }
+
+  /**
+   * Storage.compareAndSetOrderTags as one conditional UPDATE.
+   *
+   * The WHERE clause carries what the caller read, so of two writers that read
+   * the same list exactly one matches a row; the other gets nothing back and
+   * re-reads. Three shapes of "what was read":
+   *
+   *  - absent  → `json_type(...) IS NULL`
+   *  - a list  → it is an array AND its text equals the minified JSON of what
+   *              was read. Both sides are rendered by SQLite (`json(?)`), so
+   *              the comparison does not depend on how JS escaped a string.
+   *  - junk    → anything stored that is not an array (a hand edit, a bad
+   *              import): "still not a list". Good enough to let the one
+   *              writer that saw it repair it.
+   *
+   * Only `tags` and `updated_at` are written (patchExpr), so a payment that
+   * lands between the read and this statement is untouched.
+   */
+  async compareAndSetOrderTags(id: string, expected: unknown, next: readonly string[]): Promise<OrderTagsWrite> {
+    return this.compareAndSetOrderArray(id, 'tags', expected, next);
+  }
+
+  /**
+   * Storage.compareAndSetOrderInvoiceRecords — the same conditional UPDATE as
+   * the tags above. The records are arrays of objects; both sides of the
+   * comparison are rendered by SQLite's json() from JSON text that was itself
+   * parsed from the row, so key order and number spelling agree.
+   */
+  async compareAndSetOrderInvoiceRecords(
+    id: string, expected: unknown, next: readonly InvoiceDocument[],
+  ): Promise<OrderInvoiceRecordsWrite> {
+    return this.compareAndSetOrderArray(id, 'invoice_records', expected, next);
+  }
+
+  /** The shared conditional UPDATE behind the two compare-and-set methods above. */
+  private async compareAndSetOrderArray(
+    id: string, field: 'tags' | 'invoice_records', expected: unknown, next: readonly unknown[],
+  ): Promise<OrderTagsWrite> {
+    await this.ensureReady();
+    const args: InValue[] = [];
+    const expr = this.patchExpr('data', { [field]: next.length ? [...next] : undefined, updated_at: nowIso() }, args);
+    const where: string[] = ['id = ?'];
+    const at = `$.${field}`;
+    args.push(id);
+    if (expected === undefined) {
+      where.push(`json_type(data, '${at}') IS NULL`);
+    } else if (Array.isArray(expected)) {
+      where.push(`json_type(data, '${at}') = 'array'`);
+      where.push(`json_extract(data, '${at}') = json(?)`);
+      args.push(JSON.stringify(expected));
+    } else {
+      where.push(`json_type(data, '${at}') IS NOT NULL`);
+      where.push(`json_type(data, '${at}') <> 'array'`);
+    }
+    const res = await this.exec(`UPDATE orders SET data = ${expr} WHERE ${where.join(' AND ')} RETURNING data`, args);
+    const row = res.rows[0];
+    if (!row) {
+      return (await this.byId<Order>('orders', id)) ? { outcome: 'changed' } : { outcome: 'missing' };
+    }
+    const updated = JSON.parse(String(row.data)) as Order;
+    await this.recordChange('order', id, 'update', updated, [field]);
+    return { outcome: 'applied', order: updated };
+  }
+
+  /**
+   * Storage.compareAndSetOrderField: the conditional UPDATE above, for any
+   * field on the closed list. The field name is checked against that list
+   * before it becomes part of a JSON path, so no caller can steer the SQL.
+   */
+  async compareAndSetOrderField(id: string, field: OrderCasField, expected: unknown, next: unknown): Promise<OrderFieldWrite> {
+    if (!(ORDER_CAS_FIELDS as readonly string[]).includes(field)) {
+      throw new TypeError(`compareAndSetOrderField: ${String(field)} is not a compare-and-set field`);
+    }
+    await this.ensureReady();
+    const args: InValue[] = [];
+    const expr = this.patchExpr('data', { [field]: next, updated_at: nowIso() }, args);
+    const path = `'$.${field}'`;
+    const where: string[] = ['id = ?'];
+    const at = `$.${field}`;
+    args.push(id);
+    if (expected === undefined) {
+      where.push(`json_type(data, ${path}) IS NULL`);
+    } else if (Array.isArray(expected)) {
+      where.push(`json_type(data, ${path}) = 'array'`);
+      where.push(`json_extract(data, ${path}) = json(?)`);
+      args.push(JSON.stringify(expected));
+    } else {
+      where.push(`json_type(data, ${path}) IS NOT NULL`);
+      where.push(`json_type(data, ${path}) <> 'array'`);
+    }
+    const res = await this.exec(`UPDATE orders SET data = ${expr} WHERE ${where.join(' AND ')} RETURNING data`, args);
+    const row = res.rows[0];
+    if (!row) {
+      return (await this.byId<Order>('orders', id)) ? { outcome: 'changed' } : { outcome: 'missing' };
+    }
+    const updated = JSON.parse(String(row.data)) as Order;
+    await this.recordChange('order', id, 'update', updated, [field]);
+    return { outcome: 'applied', order: updated };
+  }
+
+  /**
+   * Storage.compareAndSetOrderTimeline as one conditional UPDATE — the same
+   * three shapes of "what was read" as compareAndSetOrderTags (absent / a list
+   * compared as SQLite-rendered JSON / junk that is not a list), over the
+   * `timeline` field. Only `timeline` is written: not `updated_at`, and no
+   * change-feed row — it is not an edit of the order as the API presents it.
+   */
+  async compareAndSetOrderTimeline(id: string, expected: unknown, next: readonly unknown[]): Promise<OrderTimelineWrite> {
+    await this.ensureReady();
+    const args: InValue[] = [];
+    const expr = this.patchExpr('data', { timeline: next.length ? [...next] : undefined }, args);
+    const where: string[] = ['id = ?'];
+    args.push(id);
+    if (expected === undefined) {
+      where.push(`json_type(data, '$.timeline') IS NULL`);
+    } else if (Array.isArray(expected)) {
+      where.push(`json_type(data, '$.timeline') = 'array'`);
+      where.push(`json_extract(data, '$.timeline') = json(?)`);
+      args.push(JSON.stringify(expected));
+    } else {
+      where.push(`json_type(data, '$.timeline') IS NOT NULL`);
+      where.push(`json_type(data, '$.timeline') <> 'array'`);
+    }
+    const res = await this.exec(`UPDATE orders SET data = ${expr} WHERE ${where.join(' AND ')} RETURNING data`, args);
+    const row = res.rows[0];
+    if (!row) {
+      return (await this.byId<Order>('orders', id)) ? { outcome: 'changed' } : { outcome: 'missing' };
+    }
+    return { outcome: 'applied', order: JSON.parse(String(row.data)) as Order };
   }
 
   /**
@@ -1798,6 +1998,46 @@ export class SqlStorage implements Storage, LocalSqliteHolder {
     await this.ensureReady();
     const res = await this.exec('SELECT data FROM consent_receipts WHERE id = ?', [id]);
     return res.rows[0] ? (JSON.parse(String(res.rows[0].data)) as ConsentReceipt) : null;
+  }
+
+  /* ---------- consent ledger ---------- */
+  /** Plain INSERT: a duplicate id fails on the UNIQUE constraint instead of overwriting. */
+  async appendConsentRow(row: ConsentLedgerRow): Promise<ConsentLedgerRow> {
+    await this.ensureReady();
+    const copy = JSON.parse(JSON.stringify(row)) as ConsentLedgerRow;
+    await this.exec(
+      'INSERT INTO consent_ledger (id, email, purpose, ts, data) VALUES (?, ?, ?, ?, ?)',
+      [copy.id, copy.email, copy.purpose, copy.at, JSON.stringify(copy)],
+    );
+    return copy;
+  }
+  async getConsentRows(query: { email?: string; purpose?: string; limit?: number } = {}): Promise<ConsentLedgerRow[]> {
+    await this.ensureReady();
+    const where: string[] = [];
+    const args: InValue[] = [];
+    if (query.email !== undefined) { where.push('email = ?'); args.push(query.email); }
+    if (query.purpose !== undefined) { where.push('purpose = ?'); args.push(query.purpose); }
+    const cond = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+    const limited = query.limit !== undefined && Number.isFinite(query.limit) && query.limit > 0;
+    // The NEWEST n, returned oldest first like every other read of this table.
+    const sql = limited
+      ? `SELECT data FROM (SELECT seq, data FROM consent_ledger${cond} ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC`
+      : `SELECT data FROM consent_ledger${cond} ORDER BY seq ASC`;
+    if (limited) args.push(Math.floor(query.limit as number));
+    const res = await this.exec(sql, args);
+    return res.rows.map((r) => JSON.parse(String(r.data)) as ConsentLedgerRow);
+  }
+  async pseudonymiseConsentRows(email: string, replacement: string, erasedAt: string): Promise<number> {
+    await this.ensureReady();
+    const res = await this.exec('SELECT seq, data FROM consent_ledger WHERE email = ? ORDER BY seq', [email]);
+    let n = 0;
+    for (const r of res.rows) {
+      const { ip: _ip, ua: _ua, ...rest } = JSON.parse(String(r.data)) as ConsentLedgerRow;
+      const next: ConsentLedgerRow = { ...rest, email: replacement, erased_at: erasedAt };
+      await this.exec('UPDATE consent_ledger SET email = ?, data = ? WHERE seq = ?', [replacement, JSON.stringify(next), r.seq as InValue]);
+      n += 1;
+    }
+    return n;
   }
 
   /* ---------- plugins ---------- */

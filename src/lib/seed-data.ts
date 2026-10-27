@@ -258,6 +258,7 @@ export function makeDefaultData(): DatabaseSchema {
     webhookDeliveries: [],
     auditEvents: [],
     consentReceipts: [],
+    consentLedger: [],
     emailLog: [],
     products: [],
     brands: [],

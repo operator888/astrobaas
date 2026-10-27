@@ -1,0 +1,100 @@
+---
+/**
+ * Settings → Invoices: when an order's invoice RECORD is made, the optional
+ * internal reference, and which issuer — when more than one is active.
+ *
+ * The values shown come through `resolveInvoiceSettings`, the resolver the
+ * write path reads, so the form shows what will actually happen.
+ */
+import {
+  INVOICE_SETTING_KEYS, MAX_REFERENCE_FORMAT_LENGTH, resolveInvoiceSettings,
+} from '../../lib/commerce/invoice-records-rules';
+import { registeredInvoiceIssuers, issuerChain } from '../../lib/commerce/invoice-records';
+
+interface Props {
+  settings: Record<string, unknown>;
+}
+const { settings } = Astro.props;
+const values = resolveInvoiceSettings(settings);
+const issuers = registeredInvoiceIssuers(settings);
+const chain = issuerChain(values, issuers);
+const K = INVOICE_SETTING_KEYS;
+---
+<div id="set-invoices" class="scroll-mt-20">
+  <form id="invoices-form" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8 space-y-6">
+    <div>
+      <h2 class="text-lg font-semibold text-gray-900">Invoices</h2>
+      <p class="text-sm text-gray-500 mt-1">
+        Every order gets a frozen <strong>invoice record</strong> — its lines, the VAT per rate, the seller and
+        the buyer with their VAT ID — and every refund a <strong>credit memo</strong> against it. They are
+        records, not tax documents: AstroBaaS is not a fiscal device. The legal document is issued by an
+        issuer plugin (a myDATA provider, a Peppol access point, your POS), and its number is the only
+        document number a record ever carries.
+      </p>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for={K.recordOn}>Create the record when</label>
+        <select id={K.recordOn} name={K.recordOn} class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+          <option value="paid" selected={values.recordOn === 'paid'}>the order is paid (or completed)</option>
+          <option value="shipped" selected={values.recordOn === 'shipped'}>the order is shipped (or completed)</option>
+          <option value="manual" selected={values.recordOn === 'manual'}>only when I create it</option>
+        </select>
+        <p class="text-xs text-gray-500 mt-1">
+          Default: paid. A bank-transfer or cash-on-delivery order counts as paid once you mark it completed.
+        </p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for={K.referenceFormat}>Internal reference (optional)</label>
+        <input id={K.referenceFormat} name={K.referenceFormat} type="text" maxlength={MAX_REFERENCE_FORMAT_LENGTH}
+          value={values.referenceFormat ?? ''} placeholder="REF-{year}-{n}"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono" />
+        <p class="text-xs text-gray-500 mt-1">
+          A plain running number for your own bookkeeping, used only while no issuer is set up. It is printed
+          as an internal reference, <em>never</em> as an invoice number. Must contain <code>{'{n}'}</code>;
+          <code>{'{year}'}</code> is optional. Leave empty to switch it off.
+        </p>
+      </div>
+      <div class="sm:col-span-2">
+        <label class="block text-sm font-medium text-gray-700 mb-1" for={K.issuer}>Issuer</label>
+        <select id={K.issuer} name={K.issuer} class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+          <option value="" selected={!values.issuerId}>
+            {issuers.length === 0 ? 'None installed — records are not tax documents' : 'Automatic (the only active one)'}
+          </option>
+          {issuers.map((i) => <option value={i.id} selected={values.issuerId === i.id}>{i.label}</option>)}
+        </select>
+        <p class="text-xs text-gray-500 mt-1" id="invoice-issuer-status">
+          {chain.kind === 'chain' && `Records are issued through ${chain.issuers[0].label}.`}
+          {chain.kind === 'chain' && chain.issuers.length > 1
+            && ` When it declines a record ("not mine"), it goes to ${chain.issuers.slice(1).map((i) => i.label).join(', then ')}.`}
+          {chain.kind === 'problem' && chain.message}
+          {chain.kind === 'none' && 'No issuer plugin is active. Records and their PDFs say plainly that they are not tax documents.'}
+          {' '}One issuer per record, so nothing is ever reported twice: only a decline passes a record on, never a
+          failure. A record every issuer declines gets your internal reference, as with no issuer. Mark a record
+          "issued elsewhere" on the order when your POS already issued it.
+        </p>
+      </div>
+    </div>
+    <div class="flex items-center gap-3">
+      <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">Save invoice settings</button>
+      <span id="invoices-form-status" class="text-sm" role="status"></span>
+    </div>
+  </form>
+</div>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../lib/apiClient';
+  const form = document.getElementById('invoices-form');
+  form?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const status = document.getElementById('invoices-form-status');
+    // Every named control, read by NAME: a control added to the markup is
+    // saved without a second list to forget it in.
+    const payload = {};
+    for (const el of form.querySelectorAll('[name]')) payload[el.name] = el.value.trim();
+    const res = await api.post('/api/settings/update', payload);
+    status.textContent = res.ok ? 'Invoice settings saved.' : `Save failed: ${res.error}`;
+    status.className = res.ok ? 'text-sm text-green-600' : 'text-sm text-red-600';
+  });
+</script>

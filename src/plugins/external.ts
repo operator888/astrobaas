@@ -48,6 +48,16 @@ import type { Plugin } from '../lib/plugin-system';
 import { definePlugin, PLUGIN_HOOKS } from '../core/index';
 import { foldForSearch, transliterate } from '../lib/text-search';
 import { apiRangeSatisfied, MANIFEST_API_VERSION } from '../core/manifest';
+import {
+  createPluginStore, isValidPluginId,
+  type PluginDataBackend, type PluginStore,
+} from '../lib/plugin-platform/store';
+import { createPluginCatalog, type PluginCatalog } from '../lib/plugin-platform/catalog';
+import { createPluginCoupons, type PluginCoupons } from '../lib/plugin-platform/coupons';
+import { currencyExponent } from '../lib/money-format';
+import {
+  createPluginConsent, createPluginMail, type PluginConsent, type PluginMail,
+} from '../lib/plugin-platform/consent-mail';
 
 /**
  * What a factory-style external plugin is handed.
@@ -94,6 +104,120 @@ export interface PluginHost {
    * who changes a setting does not restart the site.
    */
   getPluginSettings: (pluginId: string) => Promise<Record<string, unknown>>;
+  /**
+   * Your plugin's namespaced store, usable OUTSIDE a route handler — from a
+   * filter, an action, a timer. The same records `ctx.store` and your
+   * migrations see (`createPluginStore(id, LocalDB)`), so all paths agree.
+   *
+   * Pass your own id, for the same reason as `getPluginSettings`. It must be a
+   * valid plugin id (letters, digits, `-`, `_`; no `@` or `/`), and an invalid
+   * one throws HERE, at the call, rather than on the first read.
+   *
+   * Synchronous: it returns the store at once and opens storage lazily on the
+   * first call, so a factory may build it before the database is ready.
+   */
+  createStore: (pluginId: string) => PluginStore;
+  /**
+   * Read-only product and brand reads. Every product in every status, as
+   * COPIES, with `stock_status` derived and staff-only custom fields removed.
+   * See `src/lib/plugin-platform/catalog.ts` for each rule and its reason.
+   */
+  catalog: PluginCatalog;
+  /**
+   * Issue, inspect and revoke discount codes — checked, priced and counted by
+   * the core's own coupon rules. See `src/lib/plugin-platform/coupons.ts`.
+   */
+  coupons: PluginCoupons;
+  /** The core's money rules, so a module cannot format a price differently. */
+  money: {
+    /** Decimal places for an ISO 4217 code: 0 (JPY), 3 (KWD) or 2. */
+    currencyExponent: (currency: string) => number;
+  };
+  /**
+   * Send one of YOUR declared webhook events (`webhookEvents` on the plugin)
+   * through the core's webhook delivery: same signature, log, retries and
+   * redeliver button as a core event.
+   *
+   * Rejects for an undeclared event, a core namespace (`order.*`,
+   * `coupon.*`, …), another plugin's event, an inactive plugin, or `data`
+   * that is not JSON or over 64 KB. Resolves once accepted, without waiting
+   * for delivery. Bound to the plugins THIS module returned: a module that
+   * returns several plugins may emit any of their events.
+   */
+  webhooks: {
+    emit: (event: string, data: unknown) => Promise<void>;
+  };
+  /**
+   * The consent ledger: `record`, `confirm` (double opt-in — confirms only when
+   * the latest row is a grant), `withdraw`. Append-only; a confirmed
+   * `newsletter` consent subscribes. See `src/lib/plugin-platform/consent-mail.ts`.
+   */
+  consent: PluginConsent;
+  /**
+   * Send one email through the configured core transport — never raw SMTP.
+   * `category: 'bulk'` only reaches confirmed newsletter contacts and always
+   * carries RFC 8058 one-click unsubscribe. See `consent-mail.ts`.
+   */
+  mail: PluginMail;
+}
+
+/**
+ * The host object every factory-style external plugin receives.
+ *
+ * Built in one place so the loader and the tests hand plugins the same thing.
+ *
+ * `owners` is filled by the loader AFTER the factory returns, with the ids of
+ * the plugins it produced — the factory runs before any id is known, so the
+ * host cannot be bound at construction. `webhooks.emit` reads it per call;
+ * until it is filled (or for a host nobody bound), every emit is refused.
+ */
+export function buildPluginHost(owners: Set<string> = new Set()): PluginHost {
+  return {
+    definePlugin,
+    PLUGIN_HOOKS,
+    text: { fold: foldForSearch, transliterate },
+    getPluginSettings: async (pluginId: string) => {
+      const { getPluginSettings } = await import('../lib/plugin-platform/settings');
+      return getPluginSettings(pluginId);
+    },
+    getSettings: async () => {
+      const { LocalDB } = await import('../lib/localdb');
+      const rows = await LocalDB.getSettings();
+      const map: Record<string, unknown> = Object.create(null);
+      for (const r of rows) map[r.key] = r.value;
+      return map;
+    },
+    createStore: (pluginId: string) => {
+      if (!isValidPluginId(pluginId)) {
+        throw new Error(
+          `createStore: invalid plugin id "${String(pluginId)}" — letters, digits, dash and underscore, `
+          + 'starting with a letter or digit (a package name such as "@acme/x" is not a plugin id)',
+        );
+      }
+      // LocalDB is imported lazily, as getSettings does: the factory runs while
+      // plugins load, and this module must not pull storage in at import time.
+      const db = () => import('../lib/localdb').then((m) => m.LocalDB);
+      const backend: PluginDataBackend = {
+        getPluginData: async (ns) => (await db()).getPluginData(ns),
+        getPluginDataRecord: async (ns, id) => (await db()).getPluginDataRecord(ns, id),
+        putPluginData: async (ns, id, data) => (await db()).putPluginData(ns, id, data),
+        deletePluginDataRecord: async (ns, id) => (await db()).deletePluginDataRecord(ns, id),
+        deletePluginData: async (ns) => (await db()).deletePluginData(ns),
+      };
+      return createPluginStore(pluginId, backend);
+    },
+    catalog: createPluginCatalog(),
+    coupons: createPluginCoupons(),
+    money: { currencyExponent },
+    webhooks: {
+      emit: async (event: string, data: unknown) => {
+        const { emitPluginWebhookEvent } = await import('../lib/plugin-platform/webhook-events');
+        return emitPluginWebhookEvent(owners, event, data);
+      },
+    },
+    consent: createPluginConsent(),
+    mail: createPluginMail(),
+  };
 }
 
 export interface ExternalLoadResult {
@@ -150,23 +274,10 @@ export async function loadExternalPlugins(
       const mod: unknown = await import(/* @vite-ignore */ target);
       const entry = (mod as { default?: unknown })?.default ?? mod;
 
+      // One host per module, bound below to the plugins this module returns.
+      const owners = new Set<string>();
       const resolved = typeof entry === 'function'
-        ? (entry as (host: PluginHost) => unknown)({
-          definePlugin,
-          PLUGIN_HOOKS,
-          text: { fold: foldForSearch, transliterate },
-          getPluginSettings: async (pluginId: string) => {
-            const { getPluginSettings } = await import('../lib/plugin-platform/settings');
-            return getPluginSettings(pluginId);
-          },
-          getSettings: async () => {
-            const { LocalDB } = await import('../lib/localdb');
-            const rows = await LocalDB.getSettings();
-            const map: Record<string, unknown> = Object.create(null);
-            for (const r of rows) map[r.key] = r.value;
-            return map;
-          },
-        })
+        ? (entry as (host: PluginHost) => unknown)(buildPluginHost(owners))
         : entry;
 
       // One module may carry SEVERAL plugins. That is what lets a customer who
@@ -204,6 +315,7 @@ export async function loadExternalPlugins(
         });
         if (usable.length === 0) continue;
       }
+      for (const pl of usable) owners.add(pl.id);
       plugins.push(...usable);
     } catch (err) {
       failed.push({ specifier, reason: err instanceof Error ? err.message : String(err) });

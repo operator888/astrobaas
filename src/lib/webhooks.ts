@@ -108,8 +108,24 @@ async function runWithRetries(deliveryId: string, wh: Webhook, event: string, bo
  * Deliver `event`+`data` to every active subscribed webhook. Fire-and-forget:
  * resolves once each target's FIRST attempt settles (retries run in background).
  * Callers should NOT await it before responding. No-op when nothing subscribes.
+ *
+ * Core call sites name their event literally (tests/webhook-events.test.mjs
+ * checks every one against WEBHOOK_EVENTS). Plugin events arrive through
+ * `deliverWebhookEvent` below, after src/lib/plugin-platform/webhook-events.ts
+ * has checked them — the same delivery, a different front door.
  */
 export async function fireEvent(event: string, data: unknown, now: number = Date.now()): Promise<void> {
+  return deliverWebhookEvent(event, data, now);
+}
+
+/**
+ * The delivery itself: subscriptions, signing, the log, retries, the staging
+ * gate. Shared by `fireEvent` (core events) and `host.webhooks.emit` (plugin
+ * events, validated by emitPluginWebhookEvent before they get here), so a
+ * plugin event is signed, logged, retried and redeliverable exactly like a
+ * core one. Not for direct use by a plugin: it checks nothing about the name.
+ */
+export async function deliverWebhookEvent(event: string, data: unknown, now: number = Date.now()): Promise<void> {
   // A staging clone arrives with production's webhook rows, because they are
   // DATA and the clone is a copy of the database. Refreshing staging would then
   // fire `order.created` at the real fulfilment partner from a test order —

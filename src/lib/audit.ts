@@ -74,6 +74,8 @@ export const AUDIT = {
   MEDIA_REPLACE: 'media.replace',
   PRIVACY_EXPORT: 'privacy.subject.export',
   PRIVACY_ERASE: 'privacy.subject.erase',
+  /** An administrator withdrew a person's consent from the consent ledger screen. */
+  CONSENT_WITHDRAW: 'privacy.consent.withdraw',
   CONTENT_IMPORT: 'content.import',
   POST_CREATE: 'post.create',
   POST_DUPLICATE: 'post.duplicate',
@@ -83,6 +85,12 @@ export const AUDIT = {
   PRODUCT_UPDATE: 'product.update',
   PRODUCT_DELETE: 'product.delete',
   PRODUCT_BULK_EDIT: 'product.bulk_edit',
+  /**
+   * A moderator approved, rejected, marked as spam, re-queued or deleted
+   * product reviews (C-35). One entry per request, naming every id and the
+   * action, so "who published that review?" has an answer.
+   */
+  REVIEW_MODERATE: 'review.moderate',
   SEARCH_POPULAR_CLEAR: 'search.popular_clear',
   // A category move or delete changes what every storefront menu and filter
   // shows, and a delete untags products — worth a line in the log.
@@ -127,6 +135,28 @@ export const AUDIT = {
   CURRENCY_RATES_UPDATE: 'currency.rates.update',
   /** A human departed from the tax engine on a placed order. */
   ORDER_TAX_OVERRIDE: 'order.tax.override',
+  /**
+   * Staff tags added to / removed from one order. The audit entry records HOW
+   * MANY, never the text: a tag is free text a staff member typed and may name a
+   * customer, and an audit trail is kept longer than the order's own data.
+   */
+  ORDER_TAGS_UPDATE: 'order.tags.update',
+  /** A tag renamed or removed on every order that carries it. Counts only. */
+  ORDER_TAGS_BULK: 'order.tags.bulk',
+  /**
+   * A staff comment added to an order's timeline. The entry records that one
+   * was written, never the text: a comment is free text and may name a person.
+   */
+  ORDER_TIMELINE_COMMENT: 'order.timeline.comment',
+  /**
+   * A person acted on an invoice or credit-memo record: created, finalised,
+   * cancelled a draft, credited one in full, marked it issued elsewhere, or
+   * sent it to the issuer again. Records made by a payment, shipment or
+   * refund are not audited here — the event that made them already is.
+   */
+  INVOICE_RECORD: 'order.invoice_record',
+  /** A staff action on a buyer's download entitlement: revoke, restore, reset the count, grant. */
+  ORDER_DOWNLOADS_UPDATE: 'order.downloads.update',
   /** Which merchant-declared product fields exist, and which are PUBLIC. */
   PRODUCT_FIELDS_UPDATE: 'product_fields.update',
 } as const;

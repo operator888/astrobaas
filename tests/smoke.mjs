@@ -96,10 +96,13 @@ async function startWebhookReceiver(respond) {
 
 /** Transpile + import the TypeScript SDK so the smoke run exercises the real client. */
 async function loadClient() {
-  const src = await fs.readFile(path.join(__here, '..', 'src/client/index.ts'), 'utf8');
-  const { code } = await transform(src, { loader: 'ts', format: 'esm' });
+  // Bundled: the client re-exports the variant picker rule from lib/, so it
+  // is no longer one self-contained file (the published pkg/ build bundles it).
   const tmp = path.join(os.tmpdir(), `astrobaas-client-smoke-${process.pid}.mjs`);
-  await fs.writeFile(tmp, code);
+  await build({
+    entryPoints: [path.join(__here, '..', 'src/client/index.ts')],
+    bundle: true, format: 'esm', platform: 'neutral', packages: 'external', outfile: tmp, logLevel: 'silent',
+  });
   const mod = await import(pathToFileURL(tmp).href);
   await fs.rm(tmp, { force: true });
   return mod;
@@ -4324,34 +4327,80 @@ async function main() {
         } else fail('comment published', 'a pending comment is readable');
       }
 
-      // A REVIEW, and the stamp a reviewer must not be able to send.
-      const faked = await fetch(`${BASE}/api/content/review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken, Cookie: `astrobaas_csrf=${csrfToken}` },
-        body: JSON.stringify({
-          product_id: 'no-such-product', author_name: 'A stranger',
+      // A REVIEW (C-35). Its one public door is POST /api/products/{ref}/reviews,
+      // with a proof of work that is ALWAYS required; the generic content
+      // door is shut for this type.
+      const anonH = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken, Cookie: `astrobaas_csrf=${csrfToken}` };
+      const sideDoor = await fetch(`${BASE}/api/content/review`, {
+        method: 'POST', headers: anonH,
+        body: JSON.stringify({ product_id: 'x', author_name: 'A', rating: 5, body: 'Side door' }),
+      });
+      if (sideDoor.status === 404) ok('reviews: the generic /api/content/review door is shut to strangers');
+      else fail('review side door open', `status=${sideDoor.status}`);
+
+      const reviewRun = Date.now().toString(36);
+      const madeP = await (await fetch(`${BASE}/api/products`, {
+        method: 'POST', headers: h,
+        body: JSON.stringify({ name: `Reviewed frames ${reviewRun}`, slug: `reviewed-frames-${reviewRun}`, price_cents: 1000, status: 'active', categories: [] }),
+      })).json().catch(() => null);
+      const reviewPid = madeP?.data?.id;
+      const submitReview = async (fields, withPow = true) => {
+        let pow = '';
+        if (withPow) {
+          const ch = await (await fetch(`${BASE}/api/captcha/challenge?surface=reviews`)).json().catch(() => null);
+          pow = ch?.data?.enabled ? solvePow(ch.data.token, ch.data.bits) : '';
+        }
+        return fetch(`${BASE}/api/products/${reviewPid}/reviews`, {
+          method: 'POST', headers: anonH, body: JSON.stringify({ ...fields, ...(pow ? { pow_token: pow } : {}) }),
+        });
+      };
+      if (!reviewPid) fail('review product', JSON.stringify(madeP)?.slice(0, 160));
+      else {
+        const noPow = await submitReview({ author_name: 'A', author_email: 'a@example.com', rating: 5, body: 'No proof' }, false);
+        if (noPow.status === 403) ok('reviews: no proof of work → 403 (always required)');
+        else fail('review without pow', `status=${noPow.status}`);
+
+        const faked = await submitReview({
+          author_name: 'A stranger', author_email: 'stranger@example.com',
           rating: 5, body: 'Best product ever.', verified_buyer: true,
-        }),
-      });
-      const fakedJson = await faked.json().catch(() => null);
-      if (faked.status === 201) ok('reviews: a stranger can leave one');
-      else fail('review submit', `status=${faked.status} ${JSON.stringify(fakedJson)?.slice(0, 160)}`);
+        });
+        const fakedJson = await faked.json().catch(() => null);
+        if (faked.status === 201 && fakedJson?.data?.received === true) ok('reviews: a stranger can leave one');
+        else fail('review submit', `status=${faked.status} ${JSON.stringify(fakedJson)?.slice(0, 160)}`);
 
-      const staffReviews = await (await fetch(`${BASE}/api/content/review`, { headers: h }))
-        .json().catch(() => null);
-      const mine = (staffReviews?.data || []).find((r) => r.data?.body === 'Best product ever.');
-      if (mine && mine.data.verified_buyer === undefined) {
-        ok('THE STAMP: a posted verified_buyer is DROPPED, not stored');
-      } else fail('verified_buyer forged', JSON.stringify(mine?.data)?.slice(0, 160));
+        const queue = await (await fetch(`${BASE}/api/reviews?status=pending&product_id=${reviewPid}`, { headers: h }))
+          .json().catch(() => null);
+        const mine = (queue?.data || []).find((r) => r.data?.body === 'Best product ever.');
+        if (mine && mine.data.verified_buyer === undefined) {
+          ok('THE STAMP: a posted verified_buyer is DROPPED, not stored');
+        } else fail('verified_buyer forged', JSON.stringify(mine?.data)?.slice(0, 160));
 
-      // An out-of-range rating is refused by the RULE, not by a route check.
-      const badRating = await fetch(`${BASE}/api/content/review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken, Cookie: `astrobaas_csrf=${csrfToken}` },
-        body: JSON.stringify({ product_id: 'p', author_name: 'A', rating: 9, body: 'Nine stars.' }),
-      });
-      if (badRating.status === 422) ok('reviews: a rating outside 1-5 is refused');
-      else fail('rating unbounded', `status=${badRating.status}`);
+        const before = await (await fetch(`${BASE}/api/products/${reviewPid}/reviews`)).json().catch(() => null);
+        if (before?.data?.reviews?.length === 0) ok('reviews: a pending review is NOT public');
+        else fail('pending review public', JSON.stringify(before?.data)?.slice(0, 160));
+
+        if (mine) {
+          const mod = await fetch(`${BASE}/api/reviews/moderate`, {
+            method: 'POST', headers: h, body: JSON.stringify({ ids: [mine.id], action: 'approve' }),
+          });
+          const afterRes = await fetch(`${BASE}/api/products/${reviewPid}/reviews`);
+          const afterText = await afterRes.text();
+          const after = JSON.parse(afterText);
+          if (mod.status === 200 && after?.data?.reviews?.length === 1 && after.data.aggregate?.count === 1) {
+            ok('reviews: approved through the queue, then listed with its aggregate');
+          } else fail('review approve', `mod=${mod.status} ${afterText.slice(0, 200)}`);
+          if (!afterText.includes('stranger@example.com')) ok('reviews: the public read never carries the email');
+          else fail('review email leaked', afterText.slice(0, 200));
+          const generic = await (await fetch(`${BASE}/api/content/review`)).text();
+          if (!generic.includes('stranger@example.com')) ok('reviews: nor does the generic public collection read');
+          else fail('review email leaked (generic)', generic.slice(0, 200));
+        }
+
+        // An out-of-range rating is refused by the RULE, not by a route check.
+        const badRating = await submitReview({ author_name: 'A', author_email: 'b@example.com', rating: 9, body: 'Nine stars.' });
+        if (badRating.status === 422) ok('reviews: a rating outside 1-5 is refused');
+        else fail('rating unbounded', `status=${badRating.status}`);
+      }
     }
 
     await fetch(`${BASE}/api/settings/update`, {
@@ -6200,6 +6249,83 @@ async function main() {
     if (hidden.status === 404) ok('draft products are not publicly readable');
     else fail('draft leak', `status=${hidden.status}`);
 
+    // --- staff CAN read a draft (the admin editor loads through this route) ---
+    //
+    // GET /api/products/{id} used to 404 every non-active product for everyone,
+    // staff included, while the LIST showed staff their drafts on ?all=true — so
+    // the admin editor could not open a draft product at all. The single route
+    // now applies the list's rule, from the same helper: staff AND ?all=true.
+    // Without the opt-in every caller gets the public answer, so a storefront
+    // calling with a staff-role key cannot render a draft by accident.
+    if (draft?.data?.id) {
+      const did = draft.data.id;
+      const cacheOf = (r) => r.headers.get('cache-control') ?? '';
+      const staffHdr = { Cookie: ch.Cookie };
+      const asAdmin = await fetch(`${BASE}/api/products/${did}?all=true`, { headers: staffHdr });
+      const aj = await asAdmin.json().catch(() => null);
+      if (asAdmin.status === 200 && aj?.data?.id === did && aj.data.status === 'draft') {
+        ok('staff can open a draft product by id (?all=true)');
+      } else fail('staff draft read by id', `status=${asAdmin.status} ${JSON.stringify(aj)?.slice(0, 140)}`);
+      const cc = cacheOf(asAdmin);
+      if (/no-store/.test(cc) && !/public|s-maxage/.test(cc) && !asAdmin.headers.get('etag')) {
+        ok('...and the staff copy is private, no-store (never shared-cacheable)');
+      } else fail('staff draft cache policy', `cache-control=${cc} etag=${asAdmin.headers.get('etag')}`);
+      const bySlugStaff = await fetch(`${BASE}/api/products/hidden-draft?all=true`, { headers: staffHdr });
+      if (bySlugStaff.status === 200) ok('staff can open a draft product by slug (?all=true)');
+      else fail('staff draft read by slug', `status=${bySlugStaff.status}`);
+      const staffNoOptIn = await fetch(`${BASE}/api/products/${did}`, { headers: staffHdr });
+      if (staffNoOptIn.status === 404) ok('without ?all=true even staff get the public answer (404)');
+      else fail('staff draft without opt-in', `status=${staffNoOptIn.status}`);
+
+      for (const q of ['', '?all=true']) {
+        const anon = await fetch(`${BASE}/api/products/${did}${q}`);
+        if (anon.status === 404 && !/public|s-maxage/.test(cacheOf(anon))) {
+          ok(`anonymous gets 404 for a draft by id${q ? ' even with ?all=true' : ''}, with no shared-cache policy`);
+        } else fail(`anonymous draft by id ${q}`, `status=${anon.status} cache-control=${cacheOf(anon)}`);
+      }
+
+      // An archived product follows the same rule as a draft.
+      const arch = await (await mkProduct({ name: 'Retired', slug: 'smoke-retired', price_cents: 500, status: 'archived' })).json().catch(() => null);
+      if (arch?.data?.id) {
+        const s = (await fetch(`${BASE}/api/products/${arch.data.id}?all=true`, { headers: staffHdr })).status;
+        const a = (await fetch(`${BASE}/api/products/${arch.data.id}?all=true`)).status;
+        if (s === 200 && a === 404) ok('archived products: staff 200, anonymous 404');
+        else fail('archived product visibility', `staff=${s} anon=${a}`);
+      } else fail('archived product setup', JSON.stringify(arch)?.slice(0, 120));
+
+      // API keys: the key's ROLE decides, after the middleware's scope gate
+      // has downgraded a key whose scopes do not name products to anonymous.
+      const mint = async (payload) => {
+        const r = await fetch(`${BASE}/api/keys`, { method: 'POST', headers: ch, body: JSON.stringify(payload) });
+        const j = await r.json().catch(() => null);
+        return r.status === 201 ? j?.data?.key : undefined;
+      };
+      const cases = [
+        ['an editor key scoped to products:read', { name: 'draft-read-products', role: 'editor', scopes: ['products:read'] }, 200],
+        ['an unscoped editor key', { name: 'draft-read-unscoped', role: 'editor' }, 200],
+        ['an editor key scoped to posts:read only', { name: 'draft-read-posts', role: 'editor', scopes: ['posts:read'] }, 404],
+        ['a viewer key scoped to products:read', { name: 'draft-read-viewer', role: 'viewer', scopes: ['products:read'] }, 404],
+      ];
+      for (const [label, payload, want] of cases) {
+        const key = await mint(payload);
+        if (!key) { fail(`mint ${label}`, 'no key'); continue; }
+        const bearer = { Authorization: `Bearer ${key}` };
+        const r = await fetch(`${BASE}/api/products/${did}?all=true`, { headers: bearer });
+        if (r.status === want) ok(`${label}: draft product with ?all=true → ${want}`);
+        else fail(`${label} draft read`, `expected ${want}, got ${r.status}`);
+        if (r.status === 200 && !/no-store/.test(cacheOf(r))) {
+          fail(`${label} cache policy`, `cache-control=${cacheOf(r)}`);
+        }
+        const plain = await fetch(`${BASE}/api/products/${did}`, { headers: bearer });
+        if (plain.status !== 404) fail(`${label} without opt-in`, `expected 404, got ${plain.status}`);
+        // The list must agree with the single route for the same caller.
+        const lj = await (await fetch(`${BASE}/api/products?all=true&limit=200`, { headers: bearer })).json().catch(() => null);
+        const listed = (lj?.data || []).some((p) => p.id === did);
+        if (listed === (r.status === 200)) ok(`${label}: the list agrees (?all=true ${listed ? 'includes' : 'omits'} the draft)`);
+        else fail(`${label} list/single disagreement`, `single=${r.status} listed=${listed}`);
+      }
+    } else fail('staff draft read setup', 'no draft product id');
+
     // --- slug uniqueness (regression: was only enforced on create) ---
     if (draft?.data?.id) {
       const dupe = await fetch(`${BASE}/api/products/${draft.data.id}`, {
@@ -6275,6 +6401,46 @@ async function main() {
       const onlyFeatured = await (await fetch(`${BASE}/api/products?featured=true`)).json().catch(() => null);
       if ((onlyFeatured?.data || []).every((p) => p.featured === true)) ok('?featured=true filters the catalogue');
       else fail('featured filter', 'non-featured product returned');
+
+      // `?featured=1` is what the typed client sends for `featured: true`. The
+      // route used to read only `true`, so it returned the WHOLE catalogue.
+      // A known non-featured product makes the check able to fail: `every`
+      // over an unfiltered list that happens to be all-featured proves nothing.
+      const plain = await (await mkProduct({ name: 'Smoke Unfeatured', slug: 'smoke-unfeatured', price_cents: 700, stock: 2 }))
+        .json().catch(() => null);
+      const plainId = plain?.data?.id;
+      const listed = async (qs) => (await (await fetch(`${BASE}/api/products?${qs}&limit=200`)).json().catch(() => null))?.data || [];
+      const f1 = await listed('featured=1');
+      const f0 = await listed('featured=0');
+      if (plainId && f1.some((p) => p.id === productId) && !f1.some((p) => p.id === plainId)
+        && f1.every((p) => p.featured === true)) ok('?featured=1 (the typed client\'s form) filters the catalogue');
+      else fail('featured=1 filter', `plain=${plainId} ids=${f1.map((p) => p.slug).join(',')}`);
+      if (f0.some((p) => p.id === plainId) && f0.some((p) => p.id === productId)) ok('?featured=0 applies no filter');
+      else fail('featured=0', `ids=${f0.map((p) => p.slug).join(',')}`);
+      if (plainId) {
+        const del = await fetch(`${BASE}/api/products/${plainId}`, { method: 'DELETE', headers: ch });
+        if (del.ok) ok('featured-flag fixture removed');
+        else fail('featured-flag cleanup', `status=${del.status}`);
+      }
+
+      // `?all=1` is what the typed client sends for a staff `all: true`. The
+      // route read only `all=true`, so the client never saw a draft.
+      const flagDraft = await (await mkProduct({ name: 'Smoke Flag Draft', slug: 'smoke-flag-draft', price_cents: 700, status: 'draft' }))
+        .json().catch(() => null);
+      const flagDraftId = flagDraft?.data?.id;
+      const asStaff = async (qs) => (await (await fetch(`${BASE}/api/products?${qs}&limit=200`, { headers: ch })).json().catch(() => null))?.data || [];
+      const staffAll1 = await asStaff('all=1');
+      const staffAll0 = await asStaff('all=0');
+      const anonAll1 = await listed('all=1');
+      if (flagDraftId && staffAll1.some((p) => p.id === flagDraftId)) ok('?all=1 (the typed client\'s form) shows staff the drafts');
+      else fail('all=1 staff', `draft=${flagDraftId} n=${staffAll1.length}`);
+      if (flagDraftId && !staffAll0.some((p) => p.id === flagDraftId) && !anonAll1.some((p) => p.id === flagDraftId)) ok('?all=0, and ?all=1 anonymously, do not');
+      else fail('all=0 / anon all=1', `staff0=${staffAll0.length} anon1=${anonAll1.length}`);
+      if (flagDraftId) {
+        const del = await fetch(`${BASE}/api/products/${flagDraftId}`, { method: 'DELETE', headers: ch });
+        if (del.ok) ok('all-flag fixture removed');
+        else fail('all-flag cleanup', `status=${del.status}`);
+      }
     }
 
     // --- `on_sale` is DERIVED on the API write path, not just on import ---
@@ -6369,6 +6535,156 @@ async function main() {
         })).json().catch(() => null);
         if (restocked?.data?.in_stock === true) ok('restocking through the API sets in_stock back to true');
         else fail('in_stock on update', `in_stock=${restocked?.data?.in_stock}`);
+
+        // Stock status — anonymous, so this also proves the middleware lets the
+        // route through (it is listed in PUBLIC_API_GET; a miss is a 401 here).
+        const sres = await fetch(`${BASE}/api/products/${oos.data.id}/stock-status`);
+        const sj = await sres.json().catch(() => null);
+        if (sres.status === 200 && sj?.data?.status === 'low-stock' && sj.data.available_qty === 4
+          && sj.data.threshold_qty === 5 && sj.data.purchasable === true) {
+          ok('stock-status: 4 units under the default threshold of 5 is low-stock, anonymously');
+        } else fail('stock-status low', `status=${sres.status} body=${JSON.stringify(sj?.data)}`);
+        const sbySlug = await (await fetch(`${BASE}/api/products/smoke-sold-out/stock-status`)).json().catch(() => null);
+        if (sbySlug?.data?.status === 'low-stock') ok('stock-status: resolves a slug as well as an id');
+        else fail('stock-status slug', JSON.stringify(sbySlug?.data));
+        const pj = await (await fetch(`${BASE}/api/products/${oos.data.id}`)).json().catch(() => null);
+        if (pj?.data?.stock_status?.status === 'low-stock') ok('the product itself carries the same stock_status');
+        else fail('stock_status embedded', JSON.stringify(pj?.data?.stock_status));
+        const lj = await (await fetch(`${BASE}/api/products?limit=100`)).json().catch(() => null);
+        const inList = (lj?.data ?? []).find((x) => x.id === oos.data.id);
+        if (inList?.stock_status?.status === 'low-stock') ok('the catalogue list carries stock_status too');
+        else fail('stock_status in list', JSON.stringify(inList?.stock_status));
+        for (const [qty, want] of [[6, 'in-stock'], [0, 'out-of-stock']]) {
+          await fetch(`${BASE}/api/products/${oos.data.id}`, {
+            method: 'PUT', headers: ch, body: JSON.stringify({ stock: qty }),
+          });
+          const again = await (await fetch(`${BASE}/api/products/${oos.data.id}/stock-status`)).json().catch(() => null);
+          if (again?.data?.status === want) ok(`stock-status follows the count: ${qty} units is ${want}`);
+          else fail(`stock-status ${qty}`, JSON.stringify(again?.data));
+        }
+        const missing = await fetch(`${BASE}/api/products/no-such-product-${Date.now()}/stock-status`);
+        if (missing.status === 404) ok('stock-status: an unknown product is 404');
+        else fail('stock-status 404', `status=${missing.status}`);
+
+        // A product with variants is judged on its variants. Product-level
+        // stock is left null, so the stored in_stock flag says "in stock".
+        const shirt = await (await fetch(`${BASE}/api/products`, {
+          method: 'POST', headers: ch,
+          body: JSON.stringify({
+            name: 'Smoke Sold Out Shirt', slug: 'smoke-sold-out-shirt', price_cents: 2000,
+            attributes: [{ name: 'Size', values: ['S', 'M'], visible: true }],
+            variants: [{ options: { Size: 'S' }, stock: 0 }, { options: { Size: 'M' }, stock: 0 }],
+          }),
+        })).json().catch(() => null);
+        if (shirt?.data?.id) {
+          const sv = await (await fetch(`${BASE}/api/products/${shirt.data.id}/stock-status`)).json().catch(() => null);
+          const pv = await (await fetch(`${BASE}/api/products/${shirt.data.id}`)).json().catch(() => null);
+          if (shirt.data.in_stock === true && sv?.data?.status === 'out-of-stock' && sv.data.purchasable === false
+            && sv.data.variants?.length === 2 && sv.data.variants.every((v) => v.status === 'out-of-stock')) {
+            ok('stock-status: every variant sold out reads out-of-stock although the stored in_stock says true');
+          } else fail('stock-status variants', `in_stock=${shirt.data.in_stock} body=${JSON.stringify(sv?.data)}`);
+          if (JSON.stringify(pv?.meta?.jsonld ?? '').includes('OutOfStock')) {
+            ok('the schema.org availability agrees: OutOfStock for a variable product with no variant left');
+          } else fail('jsonld availability', JSON.stringify(pv?.meta?.jsonld)?.slice(0, 200));
+        } else fail('create variable product', JSON.stringify(shirt)?.slice(0, 200));
+
+        // Colour swatches: stored per attribute value, read back on the public
+        // product API on every driver, and a bad colour or image is REFUSED
+        // with its name — never saved "fine" and silently dropped.
+        const swatched = await (await fetch(`${BASE}/api/products`, {
+          method: 'POST', headers: ch,
+          body: JSON.stringify({
+            name: 'Smoke Swatch Tee', slug: 'smoke-swatch-tee', price_cents: 2500,
+            attributes: [{
+              name: 'Colour', values: ['Red', 'Ivory'], visible: true, display: 'swatch',
+              swatches: { Red: { color: '#C00' }, Ivory: { color: '#fffff0', image: '/uploads/2026/10/ivory.webp' } },
+            }],
+            variants: [{ options: { Colour: 'Red' }, stock: 3 }, { options: { Colour: 'Ivory' }, stock: 0 }],
+          }),
+        })).json().catch(() => null);
+        if (swatched?.data?.id) {
+          const got = await (await fetch(`${BASE}/api/products/smoke-swatch-tee`)).json().catch(() => null);
+          const attr = got?.data?.attributes?.[0];
+          if (attr?.display === 'swatch' && attr.swatches?.Red?.color === '#cc0000'
+            && attr.swatches?.Ivory?.image === '/uploads/2026/10/ivory.webp' && attr.swatches?.Ivory?.color === '#fffff0') {
+            ok('swatches: stored per value and read back on the public product API, colour normalised to #rrggbb');
+          } else fail('swatches round-trip', JSON.stringify(attr));
+          const listed = await (await fetch(`${BASE}/api/products?search=Smoke%20Swatch%20Tee`)).json().catch(() => null);
+          const inList = (listed?.data ?? []).find((p) => p.slug === 'smoke-swatch-tee');
+          if (inList?.attributes?.[0]?.swatches?.Red?.color === '#cc0000') ok('swatches: the list route carries them too');
+          else fail('swatches in list', JSON.stringify(inList?.attributes ?? listed?.data?.length));
+          for (const [label, swatch] of [
+            ['a colour that is not hex', { color: 'red' }],
+            ['a javascript: image', { image: 'javascript:alert(1)' }],
+            ['an http image', { image: 'http://cdn.example.com/red.png' }],
+            ['a video as the image', { image: '/uploads/2026/10/red.mp4' }],
+          ]) {
+            const res = await fetch(`${BASE}/api/products/${swatched.data.id}`, {
+              method: 'PUT', headers: ch,
+              body: JSON.stringify({ attributes: [{ name: 'Colour', values: ['Red', 'Ivory'], swatches: { Red: swatch } }] }),
+            });
+            const body = await res.json().catch(() => null);
+            if (res.status === 400 && /swatch/i.test(JSON.stringify(body))) ok(`swatches: ${label} is refused with 400`);
+            else fail(`swatch refusal: ${label}`, `status=${res.status} ${JSON.stringify(body)?.slice(0, 200)}`);
+          }
+          const after = await (await fetch(`${BASE}/api/products/smoke-swatch-tee`)).json().catch(() => null);
+          if (after?.data?.attributes?.[0]?.swatches?.Red?.color === '#cc0000') ok('swatches: a refused save leaves the stored swatch alone');
+          else fail('swatch after refusal', JSON.stringify(after?.data?.attributes));
+        } else fail('create swatch product', JSON.stringify(swatched)?.slice(0, 200));
+      }
+
+      /* --- GROUPED PRODUCTS (core/grouped-products) ---------------------
+       *
+       * A group shows other products and is never a cart line itself. Over
+       * HTTP, through the middleware, on whichever driver this run uses:
+       * created by staff, read anonymously with the hidden member left out and
+       * a "from" price, refused as a quote line while its members quote as
+       * ordinary lines, and emptied of a member that is deleted.
+       */
+      {
+        const mk = async (body) => (await (await fetch(`${BASE}/api/products`, {
+          method: 'POST', headers: ch, body: JSON.stringify({ status: 'active', ...body }),
+        })).json().catch(() => null))?.data;
+        const ga = await mk({ name: 'Smoke Group A', slug: 'smoke-group-a', price_cents: 4000, stock: 3 });
+        const gb = await mk({ name: 'Smoke Group B', slug: 'smoke-group-b', price_cents: 2500 });
+        const gh = await mk({ name: 'Smoke Group Hidden', slug: 'smoke-group-hidden', price_cents: 100, catalog_visibility: 'hidden' });
+        const created = await fetch(`${BASE}/api/products`, {
+          method: 'POST', headers: ch,
+          body: JSON.stringify({
+            name: 'Smoke Kit', slug: 'smoke-kit', price_cents: 999, status: 'active',
+            type: 'grouped', grouped_product_ids: [ga?.id, gh?.id, gb?.id],
+          }),
+        });
+        const kit = (await created.json().catch(() => null))?.data;
+        if (created.status === 201 && kit?.type === 'grouped') ok('grouped: staff create a group of products');
+        else fail('grouped create', `status=${created.status} ${JSON.stringify(kit)?.slice(0, 160)}`);
+
+        const pub = (await (await fetch(`${BASE}/api/products/smoke-kit`)).json().catch(() => null))?.data;
+        if (pub?.grouped_products?.map((m) => m.slug).join() === 'smoke-group-a,smoke-group-b'
+          && pub.price_from_cents === 2500 && pub.price_cents === 2500 && !(pub.grouped_product_ids ?? []).includes(gh?.id)) {
+          ok('grouped: an anonymous read lists the visible members in order, "from" the cheapest, hidden one left out');
+        } else fail('grouped public read', JSON.stringify(pub)?.slice(0, 240));
+
+        const quote = (items) => fetch(`${BASE}/api/orders/quote`, { method: 'POST', headers: ch, body: JSON.stringify({ items }) });
+        const qGroup = await quote([{ product_id: kit?.id, qty: 1 }]);
+        const qGroupJ = await qGroup.json().catch(() => null);
+        if (qGroup.status === 400 && qGroupJ?.error?.reason === 'grouped-not-buyable') ok('grouped: the group itself is refused as a quote line');
+        else fail('grouped quote refusal', `status=${qGroup.status} ${JSON.stringify(qGroupJ)?.slice(0, 160)}`);
+        const qMembers = await (await quote([{ product_id: ga?.id, qty: 1 }, { product_id: gb?.id, qty: 2 }])).json().catch(() => null);
+        if (qMembers?.data?.subtotal_cents === 9000) ok('grouped: its members quote as ordinary lines');
+        else fail('grouped member quote', JSON.stringify(qMembers?.data)?.slice(0, 160));
+
+        const dup = await fetch(`${BASE}/api/products/${kit?.id}`, {
+          method: 'PUT', headers: ch, body: JSON.stringify({ grouped_product_ids: [ga?.id, ga?.id] }),
+        });
+        if (dup.status === 400) ok('grouped: a duplicate member is refused');
+        else fail('grouped duplicate', `status=${dup.status}`);
+
+        await fetch(`${BASE}/api/products/${gb?.id}`, { method: 'DELETE', headers: ch });
+        const after = (await (await fetch(`${BASE}/api/products/${kit?.id}`, { headers: ch })).json().catch(() => null))?.data;
+        if (after?.type === 'grouped' && after.grouped_product_ids?.length === 2 && !after.grouped_product_ids.includes(gb?.id)) {
+          ok('grouped: deleting a member takes it out of the group');
+        } else fail('grouped delete cascade', JSON.stringify(after?.grouped_product_ids));
       }
     }
 
@@ -6495,7 +6811,9 @@ async function main() {
         } else fail('address was parsed', JSON.stringify(legacyStored?.shipping_address)?.slice(0, 140));
 
         // The customer record seeded a book from the delivery address.
-        const cust = await (await fetch(`${BASE}/api/customers`, { headers: ch }))
+        // By email: the list is paged (50 by default), so "fetch everyone and
+        // find it" stops working once the smoke run has made 50 customers.
+        const cust = await (await fetch(`${BASE}/api/customers?search=${encodeURIComponent('addr@example.com')}`, { headers: ch }))
           .json().catch(() => null);
         const seeded = (cust?.data ?? []).find((c) => c.email === 'addr@example.com');
         if (seeded?.addresses?.length === 1 && seeded.addresses[0].line1 === 'Ερμού 15') {
@@ -6945,6 +7263,53 @@ async function main() {
         if (pay.status !== 403) ok('...and can open a payment session');
         else fail('guest payment start', 'still refused as CSRF');
 
+        // PRICED ADD-ONS (PLUGIN_HOOKS.ORDER_LINE_ADDONS) from a guest
+        // storefront, against the external fixture's `fixture-gift` add-on
+        // (350 cents): the quote and the order agree, the line freezes it,
+        // and a refused or malformed selection is a 400, never dropped.
+        {
+          const addonBasket = (addons, email) => JSON.stringify({
+            ...(email ? { email } : {}), items: [{ product_id: gp, qty: 2, addons }],
+          });
+          const aq = await fetch(`${BASE}/api/orders/quote`, {
+            method: 'POST', headers: { ...json, Origin: STORE }, body: addonBasket({ 'fixture-gift': ['wrap'] }),
+          });
+          const aqj = await aq.json().catch(() => null);
+          const aqLine = aqj?.data?.lines?.[0];
+          if (aq.status === 200 && aqLine?.unit_price_cents === 2850 && aqLine?.addons?.[0]?.label === 'Gift wrap' && aqj?.data?.subtotal_cents === 5700) {
+            ok('add-ons: the quote prices a plugin add-on into the line (2 × (2500 + 350))');
+          } else fail('add-ons quote', `status=${aq.status} ${JSON.stringify(aqj)?.slice(0, 200)}`);
+          const ao = await fetch(`${BASE}/api/orders`, {
+            method: 'POST', headers: { ...json, Origin: STORE }, body: addonBasket({ 'fixture-gift': ['wrap'] }, 'addons@example.com'),
+          });
+          const aoj = await ao.json().catch(() => null);
+          const listedAddons = await (await fetch(`${BASE}/api/orders`, { headers: ch })).json().catch(() => null);
+          const placed = (Array.isArray(listedAddons?.data) ? listedAddons.data : []).find((o) => o.number === aoj?.data?.number);
+          const line0 = placed?.items?.[0];
+          if (ao.status === 201 && aoj?.data?.subtotal_cents === aqj?.data?.subtotal_cents && aoj?.data?.total_cents === aqj?.data?.total_cents
+            && line0?.total_cents === 5700 && line0?.addons?.[0]?.id === 'wrap' && line0?.addons?.[0]?.unit_price_cents === 350) {
+            ok('...the order charges what the quote said and freezes the add-on on the line');
+          } else fail('add-ons order', `status=${ao.status} ${JSON.stringify(aoj)?.slice(0, 160)} line=${JSON.stringify(line0)?.slice(0, 200)}`);
+          const refused = await fetch(`${BASE}/api/orders`, {
+            method: 'POST', headers: { ...json, Origin: STORE }, body: addonBasket({ 'fixture-gift': ['ribbon'] }, 'addons2@example.com'),
+          });
+          const rj = await refused.json().catch(() => null);
+          if (refused.status === 400 && rj?.error?.reason === 'fixture.gift_unknown') ok('...a plugin refusal is a 400 with its own reason');
+          else fail('add-ons refusal', `status=${refused.status} ${JSON.stringify(rj)?.slice(0, 160)}`);
+          const unknown = await fetch(`${BASE}/api/orders/quote`, {
+            method: 'POST', headers: { ...json, Origin: STORE }, body: addonBasket({ engraving: ['x'] }),
+          });
+          const uj = await unknown.json().catch(() => null);
+          if (unknown.status === 400 && uj?.error?.reason === 'checkout.addons_unpriced') ok('...a selection no plugin priced is refused, not dropped');
+          else fail('add-ons unpriced', `status=${unknown.status} ${JSON.stringify(uj)?.slice(0, 160)}`);
+          const malformed = await fetch(`${BASE}/api/orders`, {
+            method: 'POST', headers: { ...json, Origin: STORE }, body: addonBasket(['wrap'], 'addons3@example.com'),
+          });
+          const mj = await malformed.json().catch(() => null);
+          if (malformed.status === 400 && mj?.error?.reason === 'checkout.addons_invalid') ok('...a malformed addons value is a 400 naming the problem');
+          else fail('add-ons shape', `status=${malformed.status} ${JSON.stringify(mj)?.slice(0, 160)}`);
+        }
+
         // The storefront's own forms, the same shape and the same fix.
         const contact = await fetch(`${BASE}/api/contact`, {
           method: 'POST', headers: { ...json, Origin: STORE },
@@ -7086,7 +7451,236 @@ async function main() {
           if ((back?.data?.note ?? '') === (target.note ?? '')) {
             ok('...without overwriting the customer\'s own note');
           } else fail('buyer note clobbered', `${target.note} -> ${back?.data?.note}`);
+
+          // --- staff tags: on this driver, over HTTP ---
+          const tagUrl = `${BASE}/api/orders/${target.id}/tags`;
+          const tagged = await fetch(tagUrl, { method: 'POST', headers: ch, body: JSON.stringify({ tag: 'Smoke VIP' }) });
+          const tj = await tagged.json().catch(() => null);
+          if (tagged.status === 200 && tj?.data?.tags?.[0]?.tag === 'Smoke VIP' && tj?.data?.max === 10) ok('tags: staff can add one');
+          else fail('tag add', `status=${tagged.status} ${JSON.stringify(tj)?.slice(0, 140)}`);
+
+          // Four different tags at once: every one must land.
+          const burst = await Promise.all(['t-a', 't-b', 't-c', 't-d'].map((tag) => fetch(tagUrl, {
+            method: 'POST', headers: ch, body: JSON.stringify({ tag }),
+          })));
+          const afterBurst = await (await fetch(tagUrl, { headers: ch })).json().catch(() => null);
+          const names = (afterBurst?.data?.tags ?? []).map((x) => x.tag).sort();
+          if (burst.every((r) => r.status === 200) && names.length === 5) ok('...four simultaneous adds all land');
+          else fail('tag burst', `${burst.map((r) => r.status)} ${JSON.stringify(names)}`);
+
+          const dup = await fetch(tagUrl, { method: 'POST', headers: ch, body: JSON.stringify({ tag: 'smoke vip' }) });
+          const dupJ = await dup.json().catch(() => null);
+          if (dup.status === 200 && dupJ?.data?.tags?.length === 5) ok('...a tag in another case is the same tag');
+          else fail('tag case', JSON.stringify(dupJ)?.slice(0, 140));
+
+          const over = await fetch(tagUrl, {
+            method: 'POST', headers: ch,
+            body: JSON.stringify({ tags: ['o1', 'o2', 'o3', 'o4', 'o5', 'o6'] }),
+          });
+          const afterOver = await (await fetch(tagUrl, { headers: ch })).json().catch(() => null);
+          if (over.status === 422 && afterOver?.data?.tags?.length === 5) ok('...past ten is refused whole and writes nothing');
+          else fail('tag limit', `status=${over.status} count=${afterOver?.data?.tags?.length}`);
+
+          const markup = await fetch(tagUrl, { method: 'POST', headers: ch, body: JSON.stringify({ tag: '<script>1</script>' }) });
+          if (markup.status === 422) ok('...markup in a tag is refused');
+          else fail('tag markup', `status=${markup.status}`);
+
+          const filtered = await (await fetch(`${BASE}/api/orders?tag=${encodeURIComponent('SMOKE vip')}`, { headers: ch })).json().catch(() => null);
+          if (filtered?.data?.length === 1 && filtered.data[0].id === target.id) ok('...the order list filters by tag, any case');
+          else fail('tag filter', `${filtered?.data?.length}`);
+
+          const counted = await (await fetch(`${BASE}/api/orders/tags`, { headers: ch })).json().catch(() => null);
+          if (counted?.data?.find((x) => x.tag === 'Smoke VIP')?.count === 1) ok('...and the counts route lists it');
+          else fail('tag counts', JSON.stringify(counted?.data)?.slice(0, 140));
+
+          // The screen: the badge, the filter bar and the autocomplete list are
+          // rendered, and filtering by ?tag= narrows the list to this order.
+          const screen = await fetch(`${BASE}/admin/orders?tag=${encodeURIComponent('smoke vip')}`, { headers: { Cookie: sessionCookie } });
+          const screenHtml = await screen.text();
+          if (screen.status === 200 && screenHtml.includes('order-tags-root') && screenHtml.includes('order-tag-suggestions')
+            && screenHtml.includes('Smoke VIP') && screenHtml.includes(String(target.number))) {
+            ok('...the Orders screen shows the badge, the filter bar and the suggestions');
+          } else fail('tags screen', `status=${screen.status}`);
+
+          const anonTags = await fetch(tagUrl);
+          const anonList = await fetch(`${BASE}/api/orders/tags`);
+          if (anonTags.status >= 401 && anonTags.status <= 404 && anonList.status >= 401 && anonList.status <= 404) {
+            ok('...and an anonymous caller reads none of it');
+          } else fail('tags public', `${anonTags.status}/${anonList.status}`);
+
+          const removed = await fetch(`${tagUrl}?tag=${encodeURIComponent('smoke VIP')}`, { method: 'DELETE', headers: ch });
+          const removedJ = await removed.json().catch(() => null);
+          if (removed.status === 200 && removedJ?.data?.tags?.length === 4) ok('...a tag can be removed');
+          else fail('tag remove', `status=${removed.status}`);
+          // Leave the order as it was found: later checks in this run read it.
+          for (const tag of ['t-a', 't-b', 't-c', 't-d']) {
+            await fetch(`${tagUrl}?tag=${tag}`, { method: 'DELETE', headers: ch });
+          }
+
+          // --- the order timeline: on this driver, over HTTP ---
+          const tlUrl = `${BASE}/api/orders/${target.id}/timeline`;
+          const tl = await (await fetch(tlUrl, { headers: ch })).json().catch(() => null);
+          const tlEvents = (tl?.data ?? []).map((x) => x.event);
+          if (tl?.success && tlEvents.includes('order.placed') && tlEvents.includes('tags.changed')
+            && tlEvents.includes('note.staff_updated') && tlEvents.includes('shipment.shipped')) {
+            ok('timeline: placed, the tag edits, the staff note and the shipment are all there');
+          } else fail('timeline events', JSON.stringify(tlEvents));
+          if ((tl?.data ?? []).every((x, i, arr) => i === 0 || arr[i - 1].at >= x.at)) ok('...newest first');
+          else fail('timeline order', JSON.stringify((tl?.data ?? []).map((x) => x.at)));
+
+          const tlShip = await (await fetch(`${tlUrl}?filter=shipments`, { headers: ch })).json().catch(() => null);
+          if (tlShip?.data?.length >= 1 && tlShip.data.every((x) => x.category === 'shipments')) ok('...?filter=shipments keeps only shipments');
+          else fail('timeline filter', JSON.stringify(tlShip?.data?.map((x) => x.event)));
+
+          const tlBad = await fetch(`${tlUrl}?filter=nonsense`, { headers: ch });
+          if (tlBad.status === 422) ok('...an unknown filter is refused, not read as "everything"');
+          else fail('timeline bad filter', `status=${tlBad.status}`);
+
+          const tlBurst = await Promise.all(['c-a', 'c-b', 'c-c', 'c-d'].map((text) => fetch(tlUrl, {
+            method: 'POST', headers: ch, body: JSON.stringify({ text }),
+          })));
+          const tlAfter = await (await fetch(`${tlUrl}?filter=notes&limit=200`, { headers: ch })).json().catch(() => null);
+          const comments = (tlAfter?.data ?? []).filter((x) => x.event === 'note.comment').map((x) => x.text).sort();
+          if (tlBurst.every((r) => r.status === 200) && JSON.stringify(comments) === JSON.stringify(['c-a', 'c-b', 'c-c', 'c-d'])) {
+            ok('...four simultaneous comments all land');
+          } else fail('timeline burst', `${tlBurst.map((r) => r.status)} ${JSON.stringify(comments)}`);
+
+          const tlOrder = await (await fetch(`${BASE}/api/orders/${target.id}`, { headers: ch })).json().catch(() => null);
+          const tlList = await (await fetch(`${BASE}/api/orders?limit=200`, { headers: ch })).text();
+          if (tlOrder?.success && !('timeline' in (tlOrder.data ?? {})) && !tlList.includes('"timeline"')) {
+            ok('...and the order endpoints do not carry it');
+          } else fail('timeline leaks into order', 'timeline key present');
+
+          const tlCsv = await fetch(`${tlUrl}?format=csv`, { headers: ch });
+          const tlCsvText = await tlCsv.text();
+          if (tlCsv.status === 200 && /text\/csv/.test(tlCsv.headers.get('content-type') ?? '') && tlCsvText.startsWith('at,event')) {
+            ok('...and exports as CSV');
+          } else fail('timeline csv', `status=${tlCsv.status}`);
+
+          const tlAnon = await fetch(tlUrl);
+          if (tlAnon.status >= 401 && tlAnon.status <= 404) ok('...and an anonymous caller reads none of it');
+          else fail('timeline public', `status=${tlAnon.status}`);
+
+          const tlScreen = await (await fetch(`${BASE}/admin/orders`, { headers: { Cookie: sessionCookie } })).text();
+          if (tlScreen.includes('class="order-timeline') && tlScreen.includes('data-tl-labels')) ok('...and the Orders screen has the Timeline section');
+          else fail('timeline screen', 'markup missing');
+          // --- invoice records: on this driver, over HTTP ---
+          //
+          // The unit suite forces the races in-process; this proves the
+          // routes, the middleware (the PDF's public door, the session gate)
+          // and the screen on the real server.
+          {
+            const recUrl = `${BASE}/api/orders/${target.id}/invoice-records`;
+            const burst = await Promise.all([1, 2, 3].map(() => fetch(recUrl, {
+              method: 'POST', headers: ch, body: JSON.stringify({ action: 'create', finalise: true }),
+            })));
+            const listedRec = await (await fetch(recUrl, { headers: ch })).json().catch(() => null);
+            const invs = (listedRec?.data?.records ?? []).filter((d) => d.kind === 'invoice');
+            if (burst.every((r) => r.status === 200 || r.status === 201) && invs.length === 1 && invs[0].status === 'final') {
+              ok('invoice records: three simultaneous "create final" make ONE final record');
+            } else fail('invoice record burst', `${burst.map((r) => r.status)} records=${invs.length}`);
+            if (invs[0]?.total_cents === target.total_cents && invs[0]?.lines?.length >= 1 && invs[0]?.state === 'final') {
+              ok('...frozen from the order as charged, with no issuer: state final');
+            } else fail('invoice record content', JSON.stringify(invs[0])?.slice(0, 160));
+            // Issuer seam v2: the issuer order is answered (none here), and each
+            // line's tax treatment is frozen — `standard` only where VAT was
+            // charged, absent where the order cannot say.
+            const treatmentsOk = (invs[0]?.lines ?? []).every((l) => (l.tax_rate_bp > 0 ? l.tax_treatment === 'standard' : l.tax_treatment === undefined));
+            if (Array.isArray(listedRec?.data?.issuer_chain) && listedRec.data.issuer_chain.length === 0 && invs[0]?.lines?.length >= 1 && treatmentsOk) {
+              ok('...with its issuer chain (empty) and each line\'s frozen tax treatment');
+            } else fail('invoice record issuer chain / tax treatment', JSON.stringify({ chain: listedRec?.data?.issuer_chain, lines: invs[0]?.lines })?.slice(0, 240));
+
+            const pdfPath = `${BASE}/api/invoice-records/${encodeURIComponent(invs[0]?.id ?? 'x')}/pdf`;
+            const staffPdf = await fetch(pdfPath, { headers: { Cookie: sessionCookie } });
+            const staffBody = Buffer.from(await staffPdf.arrayBuffer());
+            if (staffPdf.status === 200 && staffBody.subarray(0, 5).toString('latin1') === '%PDF-'
+              && (staffPdf.headers.get('content-type') ?? '').includes('application/pdf')) {
+              ok('...staff download its PDF');
+            } else fail('invoice record pdf (staff)', `status=${staffPdf.status}`);
+
+            const RR = await loadReceipt();
+            const token = new URL(RR.receiptUrl(BASE, target.id)).searchParams.get('token');
+            const buyerPdf = await fetch(`${pdfPath}?token=${encodeURIComponent(token)}`);
+            const anonPdf = await fetch(pdfPath);
+            const forgedPdf = await fetch(`${pdfPath}?token=not-a-real-token`);
+            if (buyerPdf.status === 200 && anonPdf.status === 404 && forgedPdf.status === 404) {
+              ok('...the buyer opens it with the receipt token; without one, or with a forged one, 404');
+            } else fail('invoice record pdf doors', `${buyerPdf.status}/${anonPdf.status}/${forgedPdf.status}`);
+
+            const anonList = await fetch(recUrl);
+            if (anonList.status >= 401 && anonList.status <= 404) ok('...and an anonymous caller cannot list the records');
+            else fail('invoice records public', `status=${anonList.status}`);
+
+            const screen = await fetch(`${BASE}/admin/orders`, { headers: { Cookie: sessionCookie } });
+            const screenHtml = await screen.text();
+            if (screen.status === 200 && screenHtml.includes('invoice-records') && screenHtml.includes(`/api/invoice-records/${encodeURIComponent(invs[0]?.id ?? 'x')}/pdf`)) {
+              ok('...the Orders screen shows the record and its PDF link');
+            } else fail('invoice records screen', `status=${screen.status}`);
+          }
         }
+      }
+
+      // --- downloadable products: grant on paid, signed link, limit, catalogue ---
+      //
+      // On THIS driver, over HTTP, through the real server: a paid order line
+      // of a downloadable product gets an entitlement, the buyer's receipt-token
+      // list hands out a signed link, the link redirects once and is refused at
+      // the limit, and the anonymous catalogue never shows the file's URL.
+      {
+        const dlRes = await (await mkProduct({
+          name: 'Smoke Ebook', slug: 'smoke-ebook', price_cents: 900, status: 'active',
+          downloadable: true, virtual: true, download_limit: 1,
+          downloads: [{ name: 'Smoke Book', url: 'https://files.example.com/smoke-book.pdf' }],
+        })).json().catch(() => null);
+        const dlId = dlRes?.data?.id;
+        const anonP = await (await fetch(`${BASE}/api/products/${dlId}`)).json().catch(() => null);
+        if (dlId && anonP?.data?.downloads?.[0]?.name === 'Smoke Book' && !JSON.stringify(anonP).includes('files.example.com')) {
+          ok('downloads: the public catalogue names the file and hides its URL');
+        } else fail('downloads catalogue', JSON.stringify(anonP?.data?.downloads));
+
+        const placedDl = await (await fetch(`${BASE}/api/orders`, {
+          method: 'POST', headers: ch,
+          body: JSON.stringify({ email: 'dl-buyer@example.com', items: [{ product_id: dlId, qty: 1 }] }),
+        })).json().catch(() => null);
+        const listedDl = await (await fetch(`${BASE}/api/orders`, { headers: ch })).json().catch(() => null);
+        const dlOrder = (Array.isArray(listedDl?.data) ? listedDl.data : []).find((o) => o.number === placedDl?.data?.number);
+        const pendingEnts = (await (await fetch(`${BASE}/api/orders/${dlOrder?.id}/downloads`, { headers: ch })).json().catch(() => null))?.data?.entitlements;
+        await fetch(`${BASE}/api/orders/${dlOrder?.id}`, { method: 'PUT', headers: ch, body: JSON.stringify({ status: 'processing' }) });
+        const ents = (await (await fetch(`${BASE}/api/orders/${dlOrder?.id}/downloads`, { headers: ch })).json().catch(() => null))?.data?.entitlements;
+        if (Array.isArray(pendingEnts) && pendingEnts.length === 0 && ents?.length === 1 && ents[0].download_limit === 1) {
+          ok('downloads: nothing before payment, one entitlement once the order is processing');
+        } else fail('downloads grant', `${JSON.stringify(pendingEnts)} → ${JSON.stringify(ents)?.slice(0, 160)}`);
+
+        const R = await loadReceipt();
+        const buyer = await (await fetch(`${BASE}/api/downloads?receipt=${encodeURIComponent(R.makeReceiptToken(dlOrder?.id))}`)).json().catch(() => null);
+        const href = buyer?.data?.[0]?.files?.[0]?.href;
+        if (href && /\/api\/downloads\/[^/]+$/.test(href) && !JSON.stringify(buyer).includes('files.example.com')) {
+          ok('downloads: the buyer list hands out a signed link, never the URL');
+        } else fail('downloads buyer list', JSON.stringify(buyer)?.slice(0, 160));
+
+        const linkPath = href ? new URL(href, BASE).pathname : '/api/downloads/none';
+        const head = await fetch(`${BASE}${linkPath}`, { method: 'HEAD' });
+        if (head.status === 204) ok('downloads: HEAD on a link answers through the real middleware, without counting');
+        else fail('downloads HEAD', `status=${head.status}`);
+        const first = await fetch(`${BASE}${linkPath}`, { redirect: 'manual' });
+        const second = await fetch(`${BASE}${linkPath}`, { redirect: 'manual' });
+        const secondJ = await second.json().catch(() => null);
+        if (first.status === 302 && first.headers.get('location') === 'https://files.example.com/smoke-book.pdf'
+          && second.status === 403 && secondJ?.error?.reason === 'downloads.limit_reached') {
+          ok('downloads: the link redirects once, then the limit refuses it');
+        } else fail('downloads link', `${first.status} ${first.headers.get('location')} / ${second.status} ${JSON.stringify(secondJ?.error)}`);
+
+        const screenDl = await fetch(`${BASE}/admin/orders`, { headers: { Cookie: sessionCookie } });
+        const screenDlHtml = await screenDl.text();
+        if (screenDl.status === 200 && screenDlHtml.includes('order-downloads') && screenDlHtml.includes('data-action="reset"')) {
+          ok('downloads: the Orders screen shows the entitlement with its actions');
+        } else fail('downloads screen', `status=${screenDl.status}`);
+
+        await fetch(`${BASE}/api/orders/${dlOrder?.id}`, { method: 'PUT', headers: ch, body: JSON.stringify({ status: 'cancelled' }) });
+        const afterCancel = await fetch(`${BASE}${linkPath}`, { redirect: 'manual' });
+        const afterCancelJ = await afterCancel.json().catch(() => null);
+        if (afterCancel.status === 403 && afterCancelJ?.error?.reason === 'downloads.revoked') ok('downloads: cancelling the order revokes the link');
+        else fail('downloads revoke', `${afterCancel.status} ${JSON.stringify(afterCancelJ?.error)}`);
       }
 
       // --- "tell me when it's back" ---
@@ -7417,6 +8011,33 @@ async function main() {
         if (card && card.reference_price_cents === onSale?.data?.reference_price_cents) {
           ok('...and the list route agrees with the product route');
         } else fail('list vs product reference', `${card?.reference_price_cents} vs ${onSale?.data?.reference_price_cents}`);
+
+        // SORT, over the real server: price_asc really is ascending over every
+        // product, composes with paging, and an unknown value is refused.
+        {
+          const sorted = await (await fetch(`${BASE}/api/products?sort=price_asc&limit=200`)).json().catch(() => null);
+          const prices = (Array.isArray(sorted?.data) ? sorted.data : []).map((p) => p.price_cents);
+          if (prices.length > 1 && prices.every((v, i) => i === 0 || prices[i - 1] <= v) && sorted?.meta?.sort === 'price_asc') {
+            ok('sort: ?sort=price_asc returns the catalogue cheapest first and echoes meta.sort');
+          } else fail('sort price_asc', `${prices.slice(0, 8).join()} sort=${sorted?.meta?.sort}`);
+
+          const page1 = await (await fetch(`${BASE}/api/products?sort=price_asc&limit=1&offset=0`)).json().catch(() => null);
+          const page2 = await (await fetch(`${BASE}/api/products?sort=price_asc&limit=1&offset=1`)).json().catch(() => null);
+          if (page1?.data?.[0]?.id === sorted?.data?.[0]?.id && page2?.data?.[0]?.id === sorted?.data?.[1]?.id
+            && page1?.meta?.total === sorted?.meta?.total && page1?.meta?.hasMore === true) {
+            ok('sort: pages of a sorted list continue one another, with the same total');
+          } else fail('sort paging', `${page1?.data?.[0]?.id} ${page2?.data?.[0]?.id} total=${page1?.meta?.total}/${sorted?.meta?.total}`);
+
+          const badSort = await fetch(`${BASE}/api/products?sort=cheapest`);
+          const badBody = await badSort.json().catch(() => null);
+          if (badSort.status === 422 && Array.isArray(badBody?.error?.details?.sort)) {
+            ok('sort: an unknown value is a 422 naming the allowed values');
+          } else fail('sort unknown value', `status=${badSort.status}`);
+
+          const postPrice = await fetch(`${BASE}/api/search?q=hello&sort=price_asc`);
+          if (postPrice.status === 422) ok('sort: price_asc on blog search is a 422, not ignored');
+          else fail('sort on posts', `status=${postPrice.status}`);
+        }
 
         // The recovery toggle is now settable, and coerced at the door.
         const setRec = await fetch(`${BASE}/api/settings/update`, {
@@ -9062,6 +9683,53 @@ async function main() {
         if (r?.data?.coupon?.ok === false && r.data.coupon.reason === reason) {
           ok(`a rejected coupon reports "${reason}" so the UI can explain`);
         } else fail('coupon rejection', `${code} -> ${JSON.stringify(r?.data?.coupon)}`);
+        // ...and the stable contract code beside it (coupons v2).
+        const refusal = { 'minimum-not-met': 'coupon.min_subtotal', expired: 'coupon.expired', 'not-found': 'coupon.not_found' }[reason];
+        if (r?.data?.coupon?.refusal === refusal) ok(`...with the stable refusal code ${refusal}`);
+        else fail('coupon refusal code', `${code} -> ${JSON.stringify(r?.data?.coupon)}`);
+      }
+
+      // --- coupons v2 through the running server: bogo50 and an email-bound code ---
+      {
+        const made = await mkCoupon({ code: 'SMOKEBOGO', type: 'bogo50' });
+        const qb = await (await quote({ items: [{ product_id: vatId, qty: 2 }], coupon_code: 'smokebogo' })).json().catch(() => null);
+        // Two of the same unit: the second is half price (half of the 2480 a 10% code measured).
+        if (made.status === 201 && qb?.data?.coupon?.kind === 'bogo50' && qb.data.discount_cents === 1240) {
+          ok('a bogo50 coupon halves the second unit');
+        } else fail('bogo50 coupon', `create=${made.status} quote=${JSON.stringify(qb?.data?.coupon)} discount=${qb?.data?.discount_cents}`);
+        const one = await (await quote({ items: [{ product_id: vatId, qty: 1 }], coupon_code: 'SMOKEBOGO' })).json().catch(() => null);
+        if (one?.data?.coupon?.refusal === 'coupon.not_applicable') ok('...and refuses a single unit as not applicable');
+        else fail('bogo50 single unit', JSON.stringify(one?.data?.coupon));
+
+        await mkCoupon({ code: 'SMOKEMINE', kind: 'percent', value: 1000, email: 'Mine@Example.com', single_use: true });
+        const other = await (await quote({ items: [{ product_id: vatId, qty: 1 }], coupon_code: 'SMOKEMINE', email: 'other@example.com' })).json().catch(() => null);
+        const mine = await (await quote({ items: [{ product_id: vatId, qty: 1 }], coupon_code: 'SMOKEMINE', email: 'MINE@example.com' })).json().catch(() => null);
+        if (other?.data?.coupon?.refusal === 'coupon.email_mismatch' && mine?.data?.coupon?.ok === true) {
+          ok('an email-bound code works only for its email, in any case');
+        } else fail('email-bound coupon', `other=${JSON.stringify(other?.data?.coupon)} mine=${JSON.stringify(mine?.data?.coupon)}`);
+
+        // The storefront's narrow key (#166's `coupons:validate`) PRICES a real
+        // basket with #167's email-bound code — the gap #167 left open "until
+        // the scope grammar merges". A posts:read key is the contrast.
+        const mint = async (name, scopes) => (await (await fetch(`${BASE}/api/keys`, {
+          method: 'POST', headers: ch, body: JSON.stringify({ name, role: 'author', scopes }),
+        })).json().catch(() => null))?.data ?? null;
+        const cv = await mint('integrate-coupons-validate', ['coupons:validate']);
+        const pr = await mint('integrate-posts-read', ['posts:read']);
+        const keyedQuote = (key) => fetch(`${BASE}/api/orders/quote`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: [{ product_id: vatId, qty: 1 }], coupon_code: 'SMOKEMINE', email: 'mine@example.com' }),
+        });
+        const kq = cv?.key ? await keyedQuote(cv.key) : null;
+        const kqj = kq ? await kq.json().catch(() => null) : null;
+        if (kq?.status === 200 && kqj?.data?.coupon?.ok === true && kqj.data.discount_cents === 248 && kqj.data.total_cents === 2232) {
+          ok('a coupons:validate key quotes a basket with an email-bound 10% code (discount 248 of 2480)');
+        } else fail('COUPONS:VALIDATE QUOTE', `status=${kq?.status} ${JSON.stringify(kqj?.data ?? kqj)?.slice(0, 200)}`);
+        const pq = pr?.key ? await keyedQuote(pr.key) : null;
+        if (pq?.status === 403) ok('...and a posts:read key is refused on the same quote (403)');
+        else fail('posts:read quote', `status=${pq?.status}`);
+        for (const k of [cv, pr]) if (k?.id) await fetch(`${BASE}/api/keys/${k.id}`, { method: 'DELETE', headers: ch });
       }
       // A rejected code must not silently become an order at full price.
       const badCouponOrder = await fetch(`${BASE}/api/orders`, {
@@ -9386,6 +10054,119 @@ async function main() {
       if (couponOrder.status === 400 && couponErr.reason === 'checkout.coupon_invalid' && !/expire/i.test(couponErr.message ?? '')) {
         ok('coupons: an anonymous checkout with a dead code is 400 checkout.coupon_invalid, without saying why');
       } else fail('coupon checkout oracle', `status=${couponOrder.status} ${JSON.stringify(couponErr)}`);
+
+      // -- checkout consent (core/terms-conditions-checkbox) --
+      // Off by default: an unanswered box must not refuse a storefront that
+      // has never heard of it. tests/checkout-terms.test.mjs proves the rest on
+      // all three drivers; this is the real stack in front of it.
+      const termsOff = await placeAnon(basket('terms-off@example.com'));
+      const termsOffJson = await termsOff.clone().json().catch(() => null);
+      if (termsOff.status === 201 && termsOffJson?.data && !('terms_accepted' in termsOffJson.data)) {
+        ok('terms: with the requirement off (the default) an unanswered checkout is placed, and its response is unchanged');
+      } else fail('terms off by default', `status=${termsOff.status} ${JSON.stringify(termsOffJson)?.slice(0, 160)}`);
+      const termsBadUrl = await settings({ checkout_terms_url: 'javascript:alert(1)' });
+      if (termsBadUrl.status === 400) ok('terms: a javascript: link is refused by the settings API');
+      else fail('terms url validation', `status=${termsBadUrl.status}`);
+      const termsSet = await settings({ checkout_terms_required: true, checkout_terms_label: 'I agree to the Store Terms', checkout_terms_url: '/terms' });
+      if (termsSet.status !== 200) fail('terms settings save', `status=${termsSet.status}`);
+      const termsRefused = await placeAnon(basket('terms-no@example.com'));
+      const termsErr = await errOf(termsRefused);
+      if (termsRefused.status === 400 && termsErr.reason === 'checkout.terms_not_accepted') {
+        ok('terms: with the requirement on, an unanswered checkout is 400 checkout.terms_not_accepted');
+      } else fail('terms refusal', `status=${termsRefused.status} ${JSON.stringify(termsErr)}`);
+      const termsStock = await stockOf();
+      const termsOk = await placeAnon({ ...basket('terms-yes@example.com'), terms_accepted: true });
+      const termsOkJson = await termsOk.clone().json().catch(() => null);
+      const termsOrder = (await listOrders()).find((o) => o.email === 'terms-yes@example.com');
+      if (termsOk.status === 201 && termsOkJson?.data?.terms_accepted === true && termsOrder?.terms_accepted === true
+        && typeof termsOrder?.terms_accepted_at === 'string' && Number.isFinite(Date.parse(termsOrder.terms_accepted_at))) {
+        ok('terms: an accepted checkout is 201 and the order records terms_accepted and a server timestamp');
+      } else fail('terms accepted', `status=${termsOk.status} order=${JSON.stringify({ a: termsOrder?.terms_accepted, at: termsOrder?.terms_accepted_at })}`);
+      if ((await stockOf()) === termsStock - 1) ok('terms: ...and only the accepted order took stock');
+      else fail('terms stock', `${termsStock} -> ${await stockOf()}`);
+      const termsPublic = (await (await fetch(`${BASE}/api/settings/get`, { headers: { Origin: STORE } })).json().catch(() => null))?.data ?? {};
+      if (termsPublic.checkout_terms_required === true && termsPublic.checkout_terms_label === 'I agree to the Store Terms'
+        && termsPublic.checkout_terms_url === '/terms') {
+        ok('terms: an anonymous storefront can read the requirement, the label and the link');
+      } else fail('terms public settings', JSON.stringify(termsPublic)?.slice(0, 200));
+      const termsStaff = await placeStaff(basket('terms-staff@example.com'));
+      if (termsStaff.status === 201) ok('terms: a staff-placed order is never refused for the box');
+      else fail('terms staff exempt', `status=${termsStaff.status}`);
+      await settings({ checkout_terms_required: false, checkout_terms_label: '', checkout_terms_url: '' });
+
+      // -- campaign attribution (core/conversion-tracking-attribution) --
+      // tests/conversion-attribution.test.mjs proves the rules on all three
+      // drivers and runs the served loader; this is the real stack in front.
+      {
+        const served = await (await fetch(`${BASE}/consent.js`)).text();
+        const consentVersion = Number(served.match(/var VERSION = (\d+);/)?.[1]);
+        const consentCookie = (granted) => `astrobaas_consent=${encodeURIComponent(JSON.stringify({ v: consentVersion, t: Date.now(), granted }))}`;
+        const at = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+        const rec = { v: 1, first: { utm_source: 'google', utm_medium: 'cpc', utm_campaign: 'smoke-spring', at: at(86_400_000) }, last: { utm_source: 'newsletter', utm_medium: 'email', at: at(60_000) } };
+        const attrCookie = `astrobaas_attribution=${encodeURIComponent(JSON.stringify(rec))}`;
+        const orderOf = async (email) => (await listOrders()).find((o) => o.email === email);
+
+        if (/"attribution":\{"cookie":"astrobaas_attribution"/.test(served) && /function captureAttribution\(/.test(served)) {
+          ok('attribution: the served consent script carries the capture rules while the shop is on');
+        } else fail('attribution loader', 'no attribution config in /consent.js');
+
+        const viaBody = await placeAnon({ ...basket('attr-body@example.com'), attribution: { last: { utm_source: 'Google', utm_medium: 'CPC', utm_campaign: 'smoke', gclid: 'Cj0-smoke_1', at: at(60_000) } } });
+        const bodyOrder = await orderOf('attr-body@example.com');
+        if (viaBody.status === 201 && bodyOrder?.attribution?.last?.utm_source === 'google' && bodyOrder?.attribution?.first?.gclid === 'Cj0-smoke_1') {
+          ok('attribution: a storefront\'s body attribution is stored, normalised, as first and last');
+        } else fail('attribution body', `status=${viaBody.status} ${JSON.stringify(bodyOrder?.attribution)}`);
+
+        const bad = await placeAnon({ ...basket('attr-bad@example.com'), attribution: { last: { utm_source: 'x', referrer: 'https://mail.example/?email=a@b', at: at(1000) } } });
+        const badErr = await errOf(bad);
+        if (bad.status === 422 && Object.keys(badErr.details ?? {}).includes('attribution.last.referrer') && !(await orderOf('attr-bad@example.com'))) {
+          ok('attribution: an unknown key is a 422 naming it, and nothing is placed');
+        } else fail('attribution strict', `status=${bad.status} ${JSON.stringify(badErr)}`);
+
+        await placeAnon(basket('attr-cookie-yes@example.com'), { Cookie: `${consentCookie(['necessary', 'marketing'])}; ${attrCookie}` });
+        await placeAnon(basket('attr-cookie-no@example.com'), { Cookie: attrCookie });
+        await placeAnon(basket('attr-cookie-analytics@example.com'), { Cookie: `${consentCookie(['necessary', 'analytics'])}; ${attrCookie}` });
+        const yes = await orderOf('attr-cookie-yes@example.com');
+        const no = await orderOf('attr-cookie-no@example.com');
+        const analyticsOnly = await orderOf('attr-cookie-analytics@example.com');
+        if (yes?.attribution?.first?.utm_campaign === 'smoke-spring' && yes?.attribution?.last?.utm_source === 'newsletter') {
+          ok('attribution: with marketing consent the first-party cookie reaches the order');
+        } else fail('attribution cookie', JSON.stringify(yes?.attribution));
+        if (no && !('attribution' in no) && analyticsOnly && !('attribution' in analyticsOnly)) {
+          ok('attribution: without marketing consent the same cookie is ignored and the order has no attribution');
+        } else fail('ATTRIBUTION WITHOUT CONSENT', JSON.stringify({ no: no?.attribution, analytics: analyticsOnly?.attribution }));
+
+        // Paid-only counting is proven in the unit test; an order cannot be
+        // marked paid over HTTP without a payment provider, so this checks the
+        // route's shape and its door.
+        const today = new Date().toISOString().slice(0, 10);
+        const reportRes = await fetch(`${BASE}/api/orders/attribution?from=${today}&to=${today}&model=first`, { headers: { Cookie: sessionCookie } });
+        const report = (await reportRes.clone().json().catch(() => null))?.data;
+        if (reportRes.status === 200 && typeof report?.orders === 'number' && Array.isArray(report?.rows)) {
+          ok(`attribution report: staff get JSON (${report.orders} paid, ${report.attributed} attributed)`);
+        } else fail('attribution report', `status=${reportRes.status}`);
+        const csvRes = await fetch(`${BASE}/api/orders/attribution?format=csv`, { headers: { Cookie: sessionCookie } });
+        const csvText = await csvRes.text();
+        if (csvRes.status === 200 && /text\/csv/.test(csvRes.headers.get('content-type') || '') && csvText.startsWith('model,from,to,source,medium,campaign,orders,revenue,currency')) {
+          ok('attribution report: CSV export');
+        } else fail('attribution csv', `status=${csvRes.status} ${csvText.slice(0, 80)}`);
+        const reportAnon = await fetch(`${BASE}/api/orders/attribution`, { headers: { Origin: STORE } });
+        if (reportAnon.status === 401 || reportAnon.status === 403) ok('attribution report: anonymous callers are refused');
+        else fail('ATTRIBUTION REPORT LEAK', `status=${reportAnon.status}`);
+
+        const decl = (await (await fetch(`${BASE}/api/consent/cookies`)).json().catch(() => null))?.data?.cookies ?? [];
+        const row = decl.find((c) => c.name === 'astrobaas_attribution');
+        if (row?.category === 'marketing') ok('attribution: the cookie is declared, under marketing');
+        else fail('attribution declaration', JSON.stringify(row));
+
+        await settings({ attribution_enabled: false });
+        const offServed = await (await fetch(`${BASE}/consent.js`)).text();
+        await placeAnon({ ...basket('attr-off@example.com'), attribution: { last: { utm_source: 'google', at: at(1000) } } });
+        const off = await orderOf('attr-off@example.com');
+        if (/"attribution":null/.test(offServed) && off && !('attribution' in off)) {
+          ok('attribution: switched off, the loader ships no rules and the order keeps nothing');
+        } else fail('attribution switch', JSON.stringify(off?.attribution));
+        await settings({ attribution_enabled: true });
+      }
 
       // -- proof-of-work on checkout and magic-link --
       await settings({ captcha_surfaces: ['checkout', 'magic-link'] });
@@ -10118,6 +10899,30 @@ async function main() {
       else fail(`${p} authz`, `status=${anon.status}`);
     }
 
+    // --- GET /api/customers pages like GET /api/orders ---
+    // It used to ignore limit/offset and answer everyone with no meta, so the
+    // typed client's customers.page() saw one page holding the whole list.
+    {
+      const sh = { Cookie: `${sessionCookie}; astrobaas_csrf=${csrfToken}`, 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
+      for (const n of [1, 2, 3]) {
+        await fetch(`${BASE}/api/customers`, { method: 'POST', headers: sh, body: JSON.stringify({ email: `pgsmoke${n}@example.com`, name: `Paging ${n}` }) });
+      }
+      const get = async (q) => (await (await fetch(`${BASE}/api/customers${q}`, { headers: { Cookie: sessionCookie } })).json().catch(() => null)) ?? {};
+      const p1 = await get('?search=pgsmoke&limit=2');
+      if (p1.data?.length === 2 && p1.meta?.total === 3 && p1.meta?.limit === 2 && p1.meta?.hasMore === true && p1.meta?.page === 1) {
+        ok('GET /api/customers honours limit and reports total/hasMore');
+      } else fail('customers paging p1', JSON.stringify({ n: p1.data?.length, meta: p1.meta }));
+      const p2 = await get('?search=pgsmoke&limit=2&offset=2');
+      const both = [...(p1.data ?? []), ...(p2.data ?? [])].map((c) => c.email);
+      if (p2.data?.length === 1 && p2.meta?.hasMore === false && p2.meta?.offset === 2 && new Set(both).size === 3) {
+        ok('...and offset reaches the rest, each customer once');
+      } else fail('customers paging p2', JSON.stringify({ both, meta: p2.meta }));
+      const all = await get('');
+      if (all.meta?.limit === 50 && Array.isArray(all.data) && all.data.length <= 50 && all.meta?.total >= 3) {
+        ok('...and no limit means the orders default of 50, not everyone');
+      } else fail('customers default page', JSON.stringify(all.meta));
+    }
+
     // --- bulk import ---
     {
       const imp = await fetch(`${BASE}/api/commerce/import`, {
@@ -10145,6 +10950,207 @@ async function main() {
       });
       if (anonImp.status === 401 || anonImp.status === 403) ok('bulk import is staff-only');
       else fail('import authz', `status=${anonImp.status}`);
+    }
+  }
+
+  // 8z. Plugin game seams: named scopes, ctx.client, declared plugin webhook
+  // events, and the opt-in public order counter. Against the built server, so
+  // the middleware's real gates decide — and on every storage driver.
+  if (sessionCookie && csrfToken) {
+    const sh = {
+      Cookie: `${sessionCookie}; astrobaas_csrf=${csrfToken}`,
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': csrfToken,
+    };
+    const mintKey = async (body) => {
+      const r = await fetch(`${BASE}/api/keys`, { method: 'POST', headers: sh, body: JSON.stringify(body) });
+      return { status: r.status, data: (await r.json().catch(() => null))?.data ?? null };
+    };
+    const bearer = (key, extra = {}) => ({ Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...extra });
+    const SHOPPER = { 'X-Client-IP': '198.51.100.23', 'X-Client-UA': `ShopperBrowser/1 ${'x'.repeat(700)}` };
+
+    // --- scope grammar at the mint endpoint ---
+    const game = await mintKey({ name: 'seams-game', role: 'author', scopes: ['game:play'] });
+    const coupons = await mintKey({ name: 'seams-coupons', role: 'author', scopes: ['coupons:validate'] });
+    const stats = await mintKey({ name: 'seams-stats', role: 'author', scopes: ['stats:read'] });
+    const posts = await mintKey({ name: 'seams-posts', role: 'author', scopes: ['posts:read'] });
+    const unscoped = await mintKey({ name: 'seams-unscoped', role: 'author' });
+    if (game.status === 201 && coupons.status === 201 && stats.status === 201) ok('seams: game:play, coupons:validate and stats:read can be minted');
+    else fail('seams mint named scopes', JSON.stringify([game.status, coupons.status, stats.status]));
+    const badMint = await mintKey({ name: 'seams-bad', role: 'author', scopes: ['game:read'] });
+    if (badMint.status === 422) ok('seams: game:read is refused at mint (no such action on game)');
+    else fail('seams game:read mint', `status=${badMint.status}`);
+
+    // --- a bare-namespace plugin route declaring scope game:play ---
+    const play = (headers) => fetch(`${BASE}/api/fixturegame/play`, { method: 'POST', headers, body: '{}' });
+    if (game.data?.key && posts.data?.key && unscoped.data?.key) {
+      const r = await play(bearer(game.data.key, SHOPPER));
+      const j = await r.json().catch(() => null);
+      if (r.status === 200 && j?.played === true) ok('seams: a game:play key reaches a plugin route declaring scope game:play');
+      else fail('seams game:play route', `status=${r.status} ${JSON.stringify(j)?.slice(0, 160)}`);
+      if (j?.client?.ip === '198.51.100.23' && j?.client?.forwarded === true) ok('seams: on an API-key request ctx.client.ip is X-Client-IP');
+      else fail('seams ctx.client keyed ip', JSON.stringify(j?.client));
+      if (typeof j?.client?.ua === 'string' && j.client.ua.startsWith('ShopperBrowser/1') && j.client.ua.length === 512) ok('seams: ...and ctx.client.ua is X-Client-UA, capped at 512');
+      else fail('seams ctx.client keyed ua', `len=${j?.client?.ua?.length}`);
+
+      const garbage = await (await play(bearer(game.data.key, { 'X-Client-IP': 'not-an-ip' }))).json().catch(() => null);
+      if (garbage?.client?.ip && garbage.client.ip !== 'not-an-ip' && garbage.client.forwarded === false) ok('seams: a garbage X-Client-IP falls back to the real address');
+      else fail('seams garbage X-Client-IP', JSON.stringify(garbage?.client));
+
+      const denied = await play(bearer(posts.data.key));
+      if (denied.status === 403) ok('seams: a posts:read key is refused on the game:play route');
+      else fail('seams scope deny', `status=${denied.status}`);
+      const free = await play(bearer(unscoped.data.key));
+      if (free.status === 200) ok('seams: an unscoped key is unchanged (role governs)');
+      else fail('seams unscoped key', `status=${free.status}`);
+    }
+
+    // --- ctx.client is never forwarded for anonymous or cookie callers ---
+    {
+      const anon = await (await fetch(`${BASE}/api/plugin/test-platform/client`, { headers: SHOPPER })).json().catch(() => null);
+      if (anon?.client && anon.client.ip !== '198.51.100.23' && !String(anon.client.ua ?? '').startsWith('ShopperBrowser') && anon.client.forwarded === false) {
+        ok('seams: an ANONYMOUS request has X-Client-IP / X-Client-UA ignored');
+      } else fail('SEAMS ANON TRUSTED X-CLIENT', JSON.stringify(anon?.client));
+      const cookie = await (await fetch(`${BASE}/api/plugin/test-platform/client`, { headers: { Cookie: sessionCookie, ...SHOPPER } })).json().catch(() => null);
+      if (cookie?.client && cookie.client.ip !== '198.51.100.23' && cookie.client.forwarded === false) {
+        ok('seams: a COOKIE-SESSION request has X-Client-IP ignored');
+      } else fail('SEAMS COOKIE TRUSTED X-CLIENT', JSON.stringify(cookie?.client));
+    }
+
+    // --- a scope no key can hold is refused at registration ---
+    {
+      // As admin: a REGISTERED public route would answer 200; a refused one is
+      // an unknown path, 404 (anonymous would only ever see the 401 gate).
+      const r = await fetch(`${BASE}/api/plugin/test-platform/bad-scope`, { headers: { Cookie: sessionCookie } });
+      if (r.status === 404) ok('seams: a plugin route declaring game:read is refused at registration');
+      else fail('seams bad scope route', `status=${r.status}`);
+    }
+
+    // --- bare plugin routes: public and game:play served, core collision refused ---
+    {
+      const pub = await fetch(`${BASE}/api/fixturegame/campaigns/c1`);
+      const pj = await pub.json().catch(() => null);
+      if (pub.status === 200 && pj?.id === 'c1') ok('seams: a bare PUBLIC plugin route is served anonymously');
+      else fail('seams bare public route', `status=${pub.status}`);
+      // The game:play bare route is proven above (/api/fixturegame/play).
+      const clash = await fetch(`${BASE}/api/orders/fixturegame`);
+      const cj = await clash.text();
+      if (clash.status === 401 && !cj.includes('pwned')) ok('seams: a public game:play route on a CORE path is refused; core\'s gate stands');
+      else fail('SEAMS CORE PATH WIDENED', `status=${clash.status} ${cj.slice(0, 80)}`);
+      if (game.data?.key) {
+        const keyed = await fetch(`${BASE}/api/orders/fixturegame`, { headers: bearer(game.data.key) });
+        if (keyed.status === 403) ok('seams: ...and a game:play key is refused there (orders:read governs it)');
+        else fail('SEAMS GAME KEY ON CORE PATH', `status=${keyed.status}`);
+      }
+    }
+
+    // --- coupons:validate reaches the quote and nothing else ---
+    if (coupons.data?.key) {
+      const q = await fetch(`${BASE}/api/orders/quote`, { method: 'POST', headers: bearer(coupons.data.key), body: JSON.stringify({ items: [] }) });
+      if (q.status !== 403) ok(`seams: a coupons:validate key passes the scope gate on POST /api/orders/quote (status ${q.status})`);
+      else fail('seams coupons:validate quote', 'status=403');
+      if (posts.data?.key) {
+        // The contrast that makes the line above mean something.
+        const pq = await fetch(`${BASE}/api/orders/quote`, { method: 'POST', headers: bearer(posts.data.key), body: JSON.stringify({ items: [] }) });
+        if (pq.status === 403) ok('seams: ...where a posts:read key is refused (403)');
+        else fail('seams posts:read quote', `status=${pq.status}`);
+      }
+      const place = await fetch(`${BASE}/api/orders`, { method: 'POST', headers: bearer(coupons.data.key), body: JSON.stringify({ email: 'x@example.com', items: [] }) });
+      if (place.status === 403) ok('seams: ...but not POST /api/orders');
+      else fail('SEAMS COUPONS KEY PLACES ORDERS', `status=${place.status}`);
+    }
+
+    // --- declared plugin webhook events ---
+    const receiver = await startWebhookReceiver();
+    let hookId = null;
+    try {
+      const page = await (await fetch(`${BASE}/admin/webhooks`, { headers: { Cookie: sessionCookie } })).text();
+      if (page.includes('data-event="fixture.pinged"') && !page.includes('data-event="Not A Name"')) ok('seams: the admin webhook screen lists the declared plugin event');
+      else fail('seams admin webhook list', 'fixture.pinged missing or a refused name listed');
+
+      const reg = await fetch(`${BASE}/api/webhooks`, { method: 'POST', headers: sh, body: JSON.stringify({ url: receiver.url, events: ['fixture.pinged'] }) });
+      const rj = await reg.json().catch(() => null);
+      hookId = rj?.data?.id ?? null;
+      const secret = rj?.data?.secret;
+      const emit = (event) => fetch(`${BASE}/api/plugin/test-platform/emit`, { method: 'POST', headers: sh, body: JSON.stringify({ event, data: { n: 7 } }) });
+      const good = await emit('fixture.pinged');
+      if (good.status === 200) ok('seams: host.webhooks.emit accepts a declared event');
+      else fail('seams emit declared', `status=${good.status} ${await good.text()}`);
+      const d = await receiver.waitForMatching((b) => b?.event === 'fixture.pinged', 8000);
+      if (d?.data?.n === 7) ok('seams: the plugin event is delivered through the core webhook machinery');
+      else fail('seams plugin event delivery', JSON.stringify(d));
+      const raw = receiver.deliveries.find((x) => x.headers['x-astrobaas-event'] === 'fixture.pinged');
+      const want = secret && raw ? 'sha256=' + crypto.createHmac('sha256', secret).update(raw.body).digest('hex') : null;
+      if (raw && want && raw.headers['x-astrobaas-signature'] === want) ok('seams: ...signed with the webhook secret like a core event');
+      else fail('seams plugin event signature', String(raw?.headers?.['x-astrobaas-signature']));
+
+      for (const [event, why] of [['order.created', 'a core event'], ['coupon.redeemed', 'a core namespace'], ['fixture.undeclared', 'an undeclared event']]) {
+        const r = await emit(event);
+        if (r.status === 422) ok(`seams: host.webhooks.emit refuses ${why} (${event})`);
+        else fail(`SEAMS EMIT ${event}`, `status=${r.status}`);
+      }
+      // The deliveries log (core) recorded the plugin event like any other.
+      const log = await (await fetch(`${BASE}/api/webhooks/deliveries?webhook=${encodeURIComponent(hookId ?? '')}`, { headers: { Cookie: sessionCookie } })).json().catch(() => null);
+      const rows = Array.isArray(log?.data) ? log.data : [];
+      if (rows.some((x) => x.event === 'fixture.pinged')) ok('seams: the plugin event is in the delivery log');
+      else fail('seams delivery log', JSON.stringify(log)?.slice(0, 200));
+    } catch (e) {
+      fail('seams webhook integration', String(e?.stack || e));
+    } finally {
+      if (hookId) await fetch(`${BASE}/api/webhooks/${hookId}`, { method: 'DELETE', headers: sh });
+      await receiver.close();
+    }
+
+    // --- the public order counter ---
+    {
+      const URL_ = `${BASE}/api/stats/orders-this-month`;
+      const setStats = (patch) => fetch(`${BASE}/api/settings/update`, { method: 'POST', headers: sh, body: JSON.stringify(patch) });
+      await setStats({ public_order_stats_enabled: false, commerce_enabled: true });
+      const off = await fetch(URL_);
+      if (off.status === 404) ok('seams: /api/stats/orders-this-month is 404 while the setting is off');
+      else fail('SEAMS STATS ON BY DEFAULT', `status=${off.status}`);
+      const badTz = await setStats({ shop_timezone: 'Mars/Olympus' });
+      if (badTz.status === 400) ok('seams: an unknown shop_timezone is refused');
+      else fail('seams bad timezone', `status=${badTz.status}`);
+      await setStats({ public_order_stats_enabled: true, shop_timezone: 'UTC' });
+      const on = await fetch(URL_);
+      const oj = await on.json().catch(() => null);
+      const month = new Date().toISOString().slice(0, 7);
+      if (on.status === 200 && Number.isInteger(oj?.data?.count) && oj?.data?.month === month && Object.keys(oj.data).sort().join() === 'count,month') {
+        ok(`seams: the counter answers { count, month } when on (${oj.data.count} in ${month})`);
+      } else fail('seams stats on', `status=${on.status} ${JSON.stringify(oj)}`);
+      if (/public/.test(on.headers.get('cache-control') ?? '') && /max-age=60/.test(on.headers.get('cache-control') ?? '')) ok('seams: the counter is cacheable for a minute');
+      else fail('seams stats cache', String(on.headers.get('cache-control')));
+
+      // The same count, derived independently from the staff order list.
+      let all = [];
+      for (let offset = 0; offset < 5000; offset += 200) {
+        const pg = await (await fetch(`${BASE}/api/orders?limit=200&offset=${offset}`, { headers: { Cookie: sessionCookie } })).json().catch(() => null);
+        const rows = Array.isArray(pg?.data) ? pg.data : [];
+        all = all.concat(rows);
+        if (!pg?.meta?.hasMore) break;
+      }
+      const expected = all.filter((o) => o.payment_status === 'paid' && String(o.created_at).slice(0, 7) === month).length;
+      if (oj?.data?.count === expected) ok(`seams: the count equals the paid orders this month in the order list (${expected} of ${all.length})`);
+      else fail('seams stats count', `counter=${oj?.data?.count} list=${expected}`);
+
+      if (stats.data?.key) {
+        const keyed = await fetch(URL_, { headers: bearer(stats.data.key) });
+        // Public when on, so any key gets 200; that the scope itself grants it
+        // (rather than a downgrade to anonymous) is the unit test's to prove.
+        if (keyed.status === 200) ok('seams: a keyed storefront (stats:read) reads the counter');
+        else fail('seams stats:read key', `status=${keyed.status}`);
+      }
+      await setStats({ public_order_stats_enabled: false });
+      const offAgain = await fetch(URL_);
+      if (offAgain.status === 404) ok('seams: switching it off hides it again');
+      else fail('seams stats off again', `status=${offAgain.status}`);
+    }
+
+    // Leave no keys behind for later sections.
+    const keys = await (await fetch(`${BASE}/api/keys`, { headers: { Cookie: sessionCookie } })).json().catch(() => null);
+    for (const k of (Array.isArray(keys?.data) ? keys.data : [])) {
+      if (String(k.name ?? '').startsWith('seams-')) await fetch(`${BASE}/api/keys/${k.id}`, { method: 'DELETE', headers: sh });
     }
   }
 
@@ -12654,6 +13660,74 @@ async function main() {
           if (again.status === 404) ok('...and removing them again reports nothing to remove');
           else fail('subscriber double removal', `status=${again.status}`);
         }
+      }
+
+      // --- THE CONSENT LEDGER behind all of the above ---
+      //
+      // The click wrote two rows (the grant the signup made, and its
+      // confirmation), the operator's Remove appended a withdrawal, and the
+      // export — granted AND confirmed AND not withdrawn — followed each step.
+      if (csrfToken) {
+        const ah = { Cookie: `${sessionCookie}; astrobaas_csrf=${csrfToken}`, 'X-CSRF-Token': csrfToken };
+        const ledger = async () => (await (await fetch(
+          `${BASE}/api/consent/ledger?email=${encodeURIComponent(target)}`, { headers: ah },
+        )).json().catch(() => null))?.data?.rows ?? [];
+        const exported = async () => ((await (await fetch(
+          `${BASE}/api/newsletter/subscribers/export`, { headers: ah },
+        )).json().catch(() => null))?.data?.subscribers ?? []).map((c) => c.email);
+        const rows = await ledger();
+        const sources = rows.map((r) => `${r.source}:${r.granted}:${r.confirmed_at ? 'c' : '-'}`);
+        if (sources[0] === 'newsletter_form:true:-' && sources[1] === 'newsletter_confirm_link:true:c') {
+          ok('consent ledger: the confirmation click wrote the grant and its confirmation');
+        } else fail('consent ledger rows after confirm', JSON.stringify(sources));
+        if (rows.at(-1)?.granted === false && rows.at(-1)?.source === 'admin') {
+          ok('consent ledger: the operator\'s Remove APPENDED a withdrawal');
+        } else fail('consent ledger admin withdrawal', JSON.stringify(sources));
+        if (!(await exported()).includes(target)) ok('consent ledger: a withdrawn address is not exported');
+        else fail('consent export', 'a withdrawn address is still exported');
+        const anonLedger = await fetch(`${BASE}/api/consent/ledger?email=${encodeURIComponent(target)}`);
+        if (anonLedger.status === 401 || anonLedger.status === 403) ok('consent ledger: unreadable without a session');
+        else fail('consent ledger unguarded', `status=${anonLedger.status}`);
+
+        // The ORIGINAL confirmation link, opened again after they were removed
+        // (by them, or a mail scanner following links), must not put them back.
+        const before = (await ledger()).length;
+        const rejoin = await fetch(link[0], { redirect: 'manual' });
+        if (rejoin.status === 302 && /ok=0/.test(rejoin.headers.get('location') || '')
+          && (await ledger()).length === before && !(await exported()).includes(target)
+          && !(await readList()).includes(target)) {
+          ok('consent ledger: an old confirmation link opened after leaving re-subscribes nobody');
+        } else fail('stale confirmation link', `status=${rejoin.status} loc=${rejoin.headers.get('location')}`);
+
+        // RFC 8058 one-click with the REAL unsubscribe token the confirmed page
+        // handed over — a POST with no cookie and no CSRF header, exactly what a
+        // mail provider sends. Already withdrawn, so it is idempotent: 200, and
+        // still out of the list and the export.
+        const leaveTok = new URL(done.headers.get('location') || '/', BASE).searchParams.get('u') || '';
+        const oneClick = await fetch(`${BASE}/api/newsletter/unsubscribe?token=${encodeURIComponent(leaveTok)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'List-Unsubscribe=One-Click',
+        });
+        const afterRows = await ledger();
+        if (leaveTok && oneClick.status === 200 && afterRows.at(-1)?.granted === false) {
+          ok('consent ledger: a sessionless one-click unsubscribe with a real token is accepted');
+        } else fail('one-click withdrawal', `status=${oneClick.status} token=${!!leaveTok} last=${JSON.stringify(afterRows.at(-1))}`);
+        if (!(await readList()).includes(target) && !(await exported()).includes(target)) {
+          ok('...and they stay off the list and out of the export');
+        } else fail('one-click unsubscribe', 'still listed or exported');
+
+        const wdForged = await fetch(`${BASE}/api/consent/withdraw?token=forged`, { method: 'POST' });
+        if (wdForged.status === 200) ok('consent withdraw link: a forged token gets the same bare 200');
+        else fail('consent withdraw forged', `status=${wdForged.status}`);
+        // The link a person CLICKS is a GET with no session: it must reach the
+        // route (not the sign-in wall) and land on the public page.
+        const wdClick = await fetch(`${BASE}/api/consent/withdraw?token=forged`, { redirect: 'manual' });
+        const landing = wdClick.headers.get('location') || '';
+        const page = landing ? await fetch(new URL(landing, BASE)) : null;
+        if (wdClick.status === 302 && landing === '/consent/withdrawn?ok=0' && page?.status === 200) {
+          ok('consent withdraw link: a sessionless GET lands on the public withdrawn page');
+        } else fail('consent withdraw GET', `status=${wdClick.status} loc=${landing} page=${page?.status}`);
       }
     } else {
       fail('newsletter confirm link', 'no confirmation URL in the email');

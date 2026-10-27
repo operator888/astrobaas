@@ -36,6 +36,9 @@
  * accident — so it is explicit per route, per method, and visible in the admin.
  */
 
+import { isValidScope, SCOPE_FORMAT_HINT, SCOPED_RESOURCES, requiredScopeFor } from '../api-key-scopes';
+import type { RequestClient } from '../client-address';
+
 /** Methods a plugin route may claim. */
 export const PLUGIN_ROUTE_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
 export type PluginRouteMethod = (typeof PLUGIN_ROUTE_METHODS)[number];
@@ -126,6 +129,21 @@ export interface PluginRouteContext {
    * falls back to its defaults instead of 500ing.
    */
   settings: () => Promise<Record<string, unknown>>;
+  /**
+   * Who the request is FOR: the shopper's address and browser.
+   *
+   * On a request authenticated by an API key — a storefront server calling on
+   * a shopper's behalf — `X-Client-IP` and `X-Client-UA` name that shopper.
+   * Everywhere else (anonymous, a cookie session) those headers are ignored,
+   * because anyone can send them. The IP must parse as one IPv4/IPv6 address
+   * or the real address is used; the UA is capped at 512 characters.
+   *
+   * `ip` is the same identity the core rate limiter counts (`locals.ip`): an
+   * IPv4 address as-is, an IPv6 address grouped to its /64. `null` only when
+   * no address is known at all. `forwarded` is true when any value came from a
+   * forwarding header. See src/lib/client-address.ts.
+   */
+  client: RequestClient;
 }
 
 export type PluginRouteHandler = (ctx: PluginRouteContext) => Promise<Response> | Response;
@@ -165,7 +183,8 @@ export const RESERVED_API_PREFIXES: readonly string[] = [
  * The namespace core will never serve.
  *
  * Widening access — `public`, `csrf: 'exempt'`, or a declared API-key scope —
- * is confined to it, and that restriction is load-bearing rather than tidy.
+ * is confined to it (and to first-level names no core file serves, see
+ * CORE_API_NAMESPACES), and that restriction is load-bearing rather than tidy.
  *
  * The middleware decides CSRF and authentication BEFORE routing, so it asks
  * this registry about the raw request path. A plugin declaring
@@ -182,9 +201,61 @@ export const RESERVED_API_PREFIXES: readonly string[] = [
  */
 export const PLUGIN_ROUTE_NAMESPACE = '/api/plugin/';
 
+/**
+ * Every first-level name under `/api/` that a CORE route file serves.
+ *
+ * A storefront contract sometimes fixes bare paths — the campaign-games
+ * module must answer `/api/game/spin`, not `/api/plugin/campaign-games/spin`,
+ * because a shipped storefront already calls it. The reason widening is
+ * confined to `/api/plugin/` is that the middleware's gate must never be
+ * re-decided for a path CORE serves. A first segment no core file uses has
+ * the same property: there is no core handler under it for the declaration
+ * to loosen. So such a namespace may be widened too.
+ *
+ * Hand-kept, and checked against `src/pages/api/` by
+ * tests/plugin-game-seams.test.mjs: a core directory added without being
+ * listed here fails that test, rather than silently becoming a namespace a
+ * plugin could open. Adding a name here is always the safe direction — it
+ * only ever REFUSES a widening that used to be allowed, loudly, at boot.
+ */
+export const CORE_API_NAMESPACES: readonly string[] = Object.freeze([
+  '2fa', 'assistant', 'audit', 'auth', 'backup', 'brands', 'captcha', 'categories', 'commerce',
+  'consent', 'contact', 'content', 'content-types', 'coupons', 'customers', 'downloads',
+  'email-templates', 'forms', 'health', 'i18n', 'import', 'invoice-records', 'keys', 'legal',
+  'locales', 'media', 'messages', 'navigation', 'newsletter', 'not-found', 'operations', 'orders',
+  'payments', 'plugins', 'posts', 'privacy', 'product-bulk', 'product-categories', 'products',
+  'recovery', 'redirects', 'reviews', 'roles', 'search', 'settings', 'shipping-methods', 'stats',
+  'taxonomies', 'themes', 'transfer', 'users', 'webhooks',
+]);
+
+/**
+ * Names a plugin may never widen even though no core FILE uses them yet:
+ * every resource the API-key scope map path-maps (`/api/finance/…` would be
+ * answered `finance:write` by core's map, which wins over a plugin's declared
+ * scope), and the plugin namespace's own parent.
+ */
+const NEVER_WIDENABLE: ReadonlySet<string> = new Set([
+  ...CORE_API_NAMESPACES, ...SCOPED_RESOURCES, 'plugin',
+].map((s) => s.toLowerCase()));
+
 /** May this path be granted more than the default staff gate? */
 export function canWidenAccess(path: string): boolean {
-  return path.startsWith(PLUGIN_ROUTE_NAMESPACE);
+  if (typeof path !== 'string') return false;
+  if (path.startsWith(PLUGIN_ROUTE_NAMESPACE)) return true;
+  if (!path.startsWith('/api/')) return false;
+  // A bare namespace no core file serves. Compared case-insensitively, so a
+  // router that ever matched `/api/Orders` to the orders file could not be
+  // used to open a core handler by spelling.
+  const first = path.slice('/api/'.length).split('/')[0] ?? '';
+  if (!/^[a-z0-9][a-z0-9-]*$/i.test(first)) return false;
+  if (NEVER_WIDENABLE.has(first.toLowerCase())) return false;
+  // Asked of the scope map itself, not of a second list: some of its rules are
+  // PREFIX matches (`/api/coupons…`, `/api/shipping-methods…`), so
+  // `/api/coupons-plus/x` is answered `products:*` by core's map, which wins
+  // over a plugin's declared scope. A path core's map already governs is not
+  // a plugin's to widen.
+  for (const m of ['GET', 'POST']) if (requiredScopeFor(m, path) !== null) return false;
+  return true;
 }
 
 export interface RouteMatcher {
@@ -341,6 +412,17 @@ export function validateRoute(pluginId: string, route: PluginRoute): RouteValida
   const csrf: 'required' | 'exempt' = route.csrf === 'exempt' ? 'exempt' : 'required';
   const scope = typeof route.scope === 'string' && route.scope.trim() ? route.scope.trim() : undefined;
 
+  // A declared scope must be one an operator can MINT. `game:read` (no such
+  // action) or a typo would otherwise register fine and leave the route
+  // permanently unreachable for every scoped key — accepted, then silently
+  // useless. Refused here with the grammar named.
+  if (scope !== undefined && !isValidScope(scope)) {
+    return {
+      ok: false,
+      problem: `${where} declared scope "${scope}" on ${method} ${path}, which no API key can hold: ${SCOPE_FORMAT_HINT}.`,
+    };
+  }
+
   // Anything that widens a gate must live where core cannot own the path —
   // otherwise the declaration re-decides the gate on CORE's handler, which the
   // plugin never reaches. See PLUGIN_ROUTE_NAMESPACE.
@@ -354,10 +436,10 @@ export function validateRoute(pluginId: string, route: PluginRoute): RouteValida
     return {
       ok: false,
       problem: `${where} declared ${asked} on "${path}", which is outside `
-        + `"${PLUGIN_ROUTE_NAMESPACE}". The middleware decides authentication and CSRF `
-        + 'before routing, so that declaration would relax the gate on whatever CORE '
-        + `serves at that path. Move the route under ${PLUGIN_ROUTE_NAMESPACE}${pluginId}/ , `
-        + "or declare it 'staff'.",
+        + `"${PLUGIN_ROUTE_NAMESPACE}" and under a namespace core serves. The middleware decides `
+        + 'authentication and CSRF before routing, so that declaration would relax the gate on '
+        + `whatever CORE serves at that path. Move the route under ${PLUGIN_ROUTE_NAMESPACE}${pluginId}/ `
+        + "(or a first-level name core does not use), or declare it 'staff'.",
     };
   }
 
