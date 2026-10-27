@@ -7,7 +7,8 @@
  *    `finance:read` / `finance:write` so a website's key can create invoices
  *    and touch nothing else;
  *  - two deliberately public routes: the customer's document link (an
- *    unguessable token per document) and the signed inbound-sale webhook.
+ *    unguessable token per document) and the signed inbound webhooks (sales,
+ *    mirrored invoices, requests).
  *
  * Editors and authors are refused even though they are "staff": money is not
  * content.
@@ -29,6 +30,7 @@ import { contactDisplayName, addDays, addMonths } from './lib/format';
 import type { BankTransaction, Contact, DocumentType, Expense, FinanceDocument } from './lib/types';
 import { portalCsp, renderPortal } from './lib/portal';
 import { fullExport, integrityReport } from './lib/safety';
+import { getRequest, listRequests, requestToQuote, updateRequest, upsertRequest } from './lib/requests';
 
 const P = '/api/plugin/finance';
 
@@ -153,6 +155,7 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
         has_logo: !!company.logo_data_url,
         datev_ready: !!(company.datev_consultant_number && company.datev_client_number),
         unmatched_bank: unmatched,
+        requests_new: (await listRequests(fin, { state: 'new' })).length,
         dunning_due: dunning.length,
         top_customers: pnlYear.top_customers.slice(0, 5),
         recent: docs.slice(0, 8).map(publicDoc),
@@ -409,6 +412,25 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
       const res = await fin.inboundSale(await body(request), actor);
       return json({ ...publicDoc(res.document), created: res.created }, res.created ? 201 : 200);
     }, { description: 'Create (and optionally finalize/pay) an invoice for a sale from another system. Idempotent on source + external_id.' }),
+    r('POST', '/documents/mirror', async ({ fin, request, actor }) => {
+      const res = await fin.mirrorDocument(await body(request), actor);
+      return json({ ...publicDoc(res.document), created: res.created }, res.created ? 201 : 200);
+    }, { description: 'Mirror an invoice or cancellation another system issued (its number, totals and PDF kept). Idempotent on source + external_id.' }),
+
+    /* ------------------------------ requests inbox ------------------------------ */
+    r('GET', '/requests', async ({ fin, url }) => json(await listRequests(fin, { state: url.searchParams.get('state') ?? undefined, q: url.searchParams.get('q') ?? undefined })),
+      { description: 'Requests and orders from the website / customer portal. ?state=new|in_progress|quoted|done|dismissed|open|all&q=' }),
+    r('GET', '/requests/:id', async ({ fin, params }) => json(await getRequest(fin, params.id))),
+    r('POST', '/requests', async ({ fin, request, actor }) => {
+      const res = await upsertRequest(fin, await body(request), actor);
+      return json({ ...res.request, created: res.created }, res.created ? 201 : 200);
+    }, { description: 'Create or refresh a request / order from another system. Idempotent on source + external_id.' }),
+    r('PUT', '/requests/:id', async ({ fin, params, request, actor }) => json(await updateRequest(fin, params.id, await body(request), actor)),
+      { description: 'Set a request\'s inbox state (new, in_progress, quoted, done, dismissed) and note.' }),
+    r('POST', '/requests/:id/quote', async ({ fin, params, actor }) => {
+      const res = await requestToQuote(fin, params.id, actor);
+      return json({ request: res.request, quote: publicDoc(res.quote), created: res.created }, res.created ? 201 : 200);
+    }, { description: 'Turn a request into a contact and a quote draft with its items.' }),
   ];
 
   /* ------------------------------ public routes ------------------------------ */
@@ -499,18 +521,23 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
     },
   });
 
-  // Signed webhook for sales from other backends that cannot hold an API key
-  // safely (or prefer HMAC). Header: X-Finance-Signature: t=<unix>,v1=<hex>
-  // where v1 = HMAC-SHA256(FINANCE_INBOUND_SECRET, `${t}.${rawBody}`).
-  routes.push({
+  // Signed webhooks for backends that cannot hold an API key safely (or
+  // prefer HMAC): sales, mirrored invoices, requests. Header:
+  //   X-Finance-Signature: t=<unix>,v1=<hex>
+  // where v1 = HMAC-SHA256(FINANCE_INBOUND_SECRET, `${t}.${rawBody}`), and t
+  // within five minutes of now.
+  const signedRoute = (
+    path: string, description: string, actor: string,
+    run: (fin: Finance, input: Record<string, unknown>, actor: string) => Promise<{ data: unknown; created: boolean }>,
+  ): PluginRoute => ({
     method: 'POST',
-    path: `${P}/inbound/sale`,
+    path: `${P}${path}`,
     access: 'public',
     csrf: 'exempt',
-    description: 'HMAC-signed inbound sale (same body as POST /sales).',
+    description,
     handler: async (ctx) => {
       const secret = process.env.FINANCE_INBOUND_SECRET;
-      if (!secret) return fail('Inbound sales are not configured (FINANCE_INBOUND_SECRET).', 503, 'NOT_CONFIGURED');
+      if (!secret) return fail('Inbound webhooks are not configured (FINANCE_INBOUND_SECRET).', 503, 'NOT_CONFIGURED');
       const raw = await ctx.request.text();
       const header = ctx.request.headers.get('x-finance-signature') ?? '';
       const parts = Object.fromEntries(header.split(',').map((p) => p.trim().split('=') as [string, string]));
@@ -524,14 +551,28 @@ export function makeRoutes(depsFor: (ctx: PluginRouteContext) => Deps) {
       try { input = asObj(JSON.parse(raw)); } catch { return fail('Body is not JSON.'); }
       const fin = new Finance(ctx.store, depsFor(ctx));
       try {
-        const res = await fin.inboundSale(input, `inbound:${String(input.source ?? 'unknown').slice(0, 40)}`);
-        return json({ ...publicDoc(res.document), created: res.created }, res.created ? 201 : 200);
+        const res = await run(fin, input, `${actor}:${String(input.source ?? 'unknown').slice(0, 40)}`);
+        return json(res.data, res.created ? 201 : 200);
       } catch (e) {
         if (e instanceof FinanceError) return fail(e.message, e.status);
         throw e;
       }
     },
   });
+  routes.push(
+    signedRoute('/inbound/sale', 'HMAC-signed inbound sale (same body as POST /sales).', 'inbound', async (fin, input, actor) => {
+      const res = await fin.inboundSale(input, actor);
+      return { data: { ...publicDoc(res.document), created: res.created }, created: res.created };
+    }),
+    signedRoute('/inbound/invoice', 'HMAC-signed mirrored invoice / cancellation (same body as POST /documents/mirror).', 'mirror', async (fin, input, actor) => {
+      const res = await fin.mirrorDocument(input, actor);
+      return { data: { ...publicDoc(res.document), created: res.created }, created: res.created };
+    }),
+    signedRoute('/inbound/request', 'HMAC-signed request / order for the inbox (same body as POST /requests).', 'inbound', async (fin, input, actor) => {
+      const res = await upsertRequest(fin, input, actor);
+      return { data: { id: res.request.id, state: res.request.state, created: res.created }, created: res.created };
+    }),
+  );
   return routes;
 }
 
