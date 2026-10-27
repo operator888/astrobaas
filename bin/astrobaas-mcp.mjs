@@ -731,6 +731,24 @@ function financeTools() {
       inputSchema: { type: 'object', properties: { from: date, to: date }, additionalProperties: false },
       run: (a) => apiRequest('GET', `/api/plugin/finance/reports/zm?${new URLSearchParams(Object.entries(a).filter(([, v]) => v))}`),
     },
+    {
+      name: 'finance_list_requests',
+      description: 'The "Anfragen" inbox: requests and orders from the website and customer portal (contact / quote forms, cost calculator, portal orders). state: open (new + in progress, default), new, in_progress, quoted, done, dismissed, all.',
+      inputSchema: { type: 'object', properties: { state: { type: 'string', enum: ['open', 'new', 'in_progress', 'quoted', 'done', 'dismissed', 'all'] }, q: { type: 'string' } }, additionalProperties: false },
+      run: (a = {}) => apiRequest('GET', `/api/plugin/finance/requests${q({ state: 'open', ...a }, ['state', 'q'])}`),
+    },
+    {
+      name: 'finance_update_request',
+      description: 'Set a request\'s inbox state (new, in_progress, quoted, done, dismissed) and/or its internal note.',
+      inputSchema: { type: 'object', properties: { id, state: { type: 'string', enum: ['new', 'in_progress', 'quoted', 'done', 'dismissed'] }, note: { type: 'string' } }, required: ['id'], additionalProperties: false },
+      run: (a) => apiRequest('PUT', `/api/plugin/finance/requests/${encodeURIComponent(a.id)}`, { state: a.state, note: a.note }),
+    },
+    {
+      name: 'finance_request_to_quote',
+      description: 'Turn a request into a contact (found or created) and a quote DRAFT with the requested items; items without a price come in at 0,00 to be filled in. Asking twice returns the same quote.',
+      inputSchema: { type: 'object', properties: { id }, required: ['id'], additionalProperties: false },
+      run: (a) => apiRequest('POST', `/api/plugin/finance/requests/${encodeURIComponent(a.id)}/quote`),
+    },
   ];
 }
 
