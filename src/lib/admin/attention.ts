@@ -57,6 +57,7 @@
 
 import { canOpenAdminPage } from '../admin-access';
 import { TAX_KEYS } from '../commerce/tax';
+import { productStockStatus } from '../commerce/stock-status';
 import type { Role } from '../../core/models';
 
 export type Severity = 'broken' | 'unfinished' | 'worth-knowing';
@@ -117,6 +118,10 @@ export interface AttentionContext {
   schema?: { current: number; latest: number };
   products?: readonly {
     id: string; status?: string; in_stock?: boolean; name?: string;
+    /** With `variants`, lets the check see a variable product whose every variant sold out. */
+    stock?: number | null;
+    backorders?: string;
+    variants?: readonly { enabled?: boolean; stock?: number | null }[];
   }[];
   orders?: readonly {
     id: string; number?: string; status?: string;
@@ -137,6 +142,12 @@ export interface AttentionContext {
   posts?: readonly {
     id: string; title?: string; status?: string; publish_date?: string;
   }[];
+  /**
+   * Product reviews waiting for a moderator (C-35): how many, and when the
+   * oldest arrived. Absent when reviews are off — the dashboard reads the
+   * collection only when the setting says it exists.
+   */
+  pendingReviews?: { count: number; oldest?: string };
   /** Whether commerce is on at all — half these checks are meaningless without it. */
   commerceEnabled?: boolean;
   /**
@@ -318,6 +329,31 @@ export const ATTENTION_CHECKS: readonly AttentionCheck[] = [
   },
   {
     /*
+     * Product reviews waiting for a moderator (C-35).
+     *
+     * A review is invisible to shoppers until somebody approves it, so a
+     * queue nobody opens is a shop whose customers wrote reviews that never
+     * appeared — and a customer who wrote one and never saw it go up. Aged
+     * from the OLDEST waiting review, which is the customer waiting longest.
+     * Unfinished, not broken: nothing is wrong, something is waiting.
+     */
+    id: 'pending-reviews',
+    run: (ctx) => {
+      if (!ctx.commerceEnabled) return [];
+      const n = ctx.pendingReviews?.count ?? 0;
+      if (n <= 0) return [];
+      return [{
+        id: 'pending-reviews',
+        severity: 'unfinished',
+        params: { count: n },
+        action: { href: '/admin/reviews' },
+        since: ctx.pendingReviews?.oldest,
+        scope: 'shop',
+      }];
+    },
+  },
+  {
+    /*
      * Payment providers would send paying buyers to a page that does not
      * exist (S4.17).
      *
@@ -352,7 +388,13 @@ export const ATTENTION_CHECKS: readonly AttentionCheck[] = [
     run: (ctx) => {
       if (!ctx.commerceEnabled) return [];
       const stuck = (ctx.products ?? []).filter(
-        (p) => p.status === 'active' && p.in_stock === false,
+        // The stored flag, or the count read now: a product with variants
+        // keeps `in_stock: true` from its own (unused) count while every
+        // variant is sold out.
+        (p) => p.status === 'active' && (p.in_stock === false || (
+          Array.isArray(p.variants) && p.variants.length > 0
+          && productStockStatus(p as never, 0).status === 'out-of-stock'
+        )),
       );
       if (!stuck.length) return [];
       return [{

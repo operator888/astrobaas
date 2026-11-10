@@ -208,7 +208,11 @@ export async function receiptPdfBytes(
   for (const line of view.lines) {
     const nameLines = wrap(line.name, font, 10, nameWidth);
     const optionLines = line.options ? wrap(line.options, font, 8.5, nameWidth) : [];
-    room(13 * nameLines.length + 11 * optionLines.length + 8);
+    // Priced add-ons: one line each, the label wrapped, the amount beside it.
+    // `?? []`: a view built by an older caller has no add-ons field.
+    const addonLines = (line.addons ?? []).map((a) => ({ label: wrap(`+ ${a.label}`, font, 8.5, nameWidth - 70), amount: a.amount }));
+    const addonHeight = addonLines.reduce((h, a) => h + 11 * a.label.length, 0);
+    room(13 * nameLines.length + 11 * optionLines.length + addonHeight + 8);
 
     const rowTop = y;
     for (const l of nameLines) {
@@ -218,6 +222,13 @@ export async function receiptPdfBytes(
     for (const l of optionLines) {
       text(l, MARGIN, 8.5, MUTED);
       y -= 11;
+    }
+    for (const a of addonLines) {
+      textRight(a.amount, colQty - 10, 8.5, MUTED);
+      for (const l of a.label) {
+        text(l, MARGIN, 8.5, MUTED);
+        y -= 11;
+      }
     }
     // The numbers sit on the row's FIRST line, not its last: a two-line product
     // name would otherwise push its own price down next to the line below it.

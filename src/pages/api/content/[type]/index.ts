@@ -4,6 +4,7 @@ import { ApiResponseBuilder } from '../../../../lib/api-response';
 import { validate } from '../../../../lib/validate';
 import {
   getContentType, schemaForSubmission, contentTypeIsPublic, contentTypeAcceptsPublicWrites,
+  projectEntityForReader, canReadPrivateFields, privateFieldNames,
 } from '../../../../core/content-types';
 import { ensurePluginsBootstrapped } from '../../../../plugins';
 import { fireEvent } from '../../../../lib/webhooks';
@@ -11,8 +12,6 @@ import { publicSubmissionGate, spamFields } from '../../../../lib/public-submiss
 import { checkReferences, resolveMediaUrls } from '../../../../lib/content-refs';
 import { notifySubmission, submitterReplyTo } from '../../../../lib/submission-notify';
 import { visibleEntries, initialStatus, STATUS_KEY } from '../../../../core/moderation';
-import { boughtProduct } from '../../../../lib/commerce/order-lookup';
-import { REVIEWS_TYPE } from '../../../../core/builtin-collections';
 import { parseListPaging, pagingMeta, takePage } from '../../../../lib/list-paging';
 
 import {
@@ -77,7 +76,13 @@ export const GET: APIRoute = async ({ params, url, locals }) => {
     //    be one more thing to get right on three drivers;
     //  · applied AFTER the visibility filter, so a filter can never widen what
     //    a caller may see.
-    const declaredNames = new Set(def.fields.map((f) => f.name));
+    // A PRIVATE field is not filterable by anyone who may not read it: the
+    // projection below removes its value, but a filter that narrows on it is
+    // still a yes/no answer — `?where.author_email=x&where.product_id=p` would
+    // tell a stranger whether that address reviewed (and, with the verified
+    // badge, bought) that product. Ignored like an unknown name.
+    const hiddenFromCaller = canReadPrivateFields(locals.user?.role) ? new Set<string>() : new Set(privateFieldNames(def));
+    const declaredNames = new Set(def.fields.map((f) => f.name).filter((n) => !hiddenFromCaller.has(n)));
     const wheres: [string, string][] = [];
     for (const [key, value] of sp.entries()) {
       if (!key.startsWith('where.')) continue;
@@ -109,6 +114,11 @@ export const GET: APIRoute = async ({ params, url, locals }) => {
     // After paging, so a page of twenty costs one media read rather than the
     // whole collection's worth.
     items = await resolveMediaUrls(def, items as { data?: Record<string, unknown> }[]) as typeof items;
+    // Fields the type marks `private` (a commenter's or reviewer's email) are
+    // left out for anyone who is not content staff — the collection being
+    // public does not make every field of it public.
+    const privileged = canReadPrivateFields(locals.user?.role);
+    items = items.map((e) => projectEntityForReader(def, e as { data?: Record<string, unknown> }, privileged)) as typeof items;
 
     return ApiResponseBuilder.success(items, 'Entities retrieved successfully',
       pagingMeta(paging, items.length, total));
@@ -117,32 +127,6 @@ export const GET: APIRoute = async ({ params, url, locals }) => {
     return ApiResponseBuilder.serverError('Failed to fetch entities');
   }
 };
-
-/**
- * `{ verified_buyer: true }` when this review's author actually bought the
- * product, otherwise `{}`.
- *
- * Returns an object rather than a boolean so the caller spreads it: a
- * `verified_buyer: false` on every unverified review is a column of falses that
- * makes the true ones no easier to find, and it invites a reader to treat the
- * absence of proof as proof of absence.
- */
-async function verifiedBuyerStamp(
-  type: string,
-  values: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  if (type !== REVIEWS_TYPE) return {};
-  try {
-    const orders = await LocalDB.getOrders();
-    return boughtProduct(orders, values.author_email, values.product_id)
-      ? { verified_buyer: true }
-      : {};
-  } catch {
-    // A commerce read that fails must not lose the review. An unstamped review
-    // is the honest fallback: it claims nothing.
-    return {};
-  }
-}
 
 export const POST: APIRoute = async ({ params, request, locals }) => {
   try {
@@ -286,14 +270,9 @@ async function submitPublicly(
     // from the body: `_status` is reserved precisely so a submitter cannot
     // post their own approval.
     ...(def.moderated ? { [STATUS_KEY]: 'pending' } : {}),
-    // The verified-buyer stamp on a review (C-35). Server-side, always.
-    //
-    // `verified_buyer` is deliberately NOT a declared field, which is what
-    // makes this safe: `validate()` copies nothing it was not asked for, so a
-    // posted `verified_buyer: true` is already gone by the time we get here.
-    // It is the only field on a review that means anything on its own — a
-    // rating without it is a stranger's opinion.
-    ...(await verifiedBuyerStamp(type, result.value as Record<string, unknown>)),
+    // (Product reviews no longer arrive here: the type is staff-writable and
+    // strangers use POST /api/products/{ref}/reviews, which stamps
+    // `verified_buyer` server-side — see lib/reviews.ts.)
     // The spam score, and ONLY when there is something to say (C-79). Nothing
     // is rejected on it: the submission is stored and flagged so a person
     // decides. Rejecting on a heuristic means the one enquiry that mattered is

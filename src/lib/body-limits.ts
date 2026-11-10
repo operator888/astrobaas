@@ -34,9 +34,10 @@
  * why. The headroom is small and deliberate.
  */
 import { IMPORT_BODY_LIMIT, MAX_HTTP_WXR_BYTES } from './import/limits';
+import { FINANCE_UPLOAD_MAX_BYTES } from '../plugins/finance/lib/limits';
 import { MAX_VIDEO_SIZE } from './media/ingest';
 import { MAX_ARCHIVE_BYTES } from './backup/offsite';
-import { MAX_SUBMISSION_FILE_SIZE } from './media/private-files';
+import { MAX_SUBMISSION_FILE_SIZE, MAX_PRODUCT_FILE_SIZE } from './media/private-files';
 
 /** 2 MB for ordinary JSON bodies — and the floor a proxy must allow globally. */
 export const BODY_LIMIT_DEFAULT = 2 * 1024 * 1024;
@@ -112,6 +113,26 @@ export const BODY_LIMITS: readonly BodyLimitRule[] = [
     bytes: Math.ceil(MAX_SUBMISSION_FILE_SIZE * 1.2),
     derivesFrom: 'MAX_SUBMISSION_FILE_SIZE (src/lib/media/private-files.ts)',
     purpose: 'A file attached to a public form by an anonymous visitor',
+  },
+  {
+    location: '/api/downloads/upload',
+    match: (p) => p === '/api/downloads/upload',
+    // A product download is the goods themselves — an e-book, an album, an
+    // archive — so it gets the media library's video-sized ceiling, not the
+    // form door's 5 MB. Staff only.
+    bytes: Math.ceil(MAX_PRODUCT_FILE_SIZE * 1.1),
+    derivesFrom: 'MAX_PRODUCT_FILE_SIZE (src/lib/media/private-files.ts)',
+    env: 'DOWNLOAD_MAX_FILE_MB',
+    purpose: 'A merchant uploading a file to sell as a product download',
+  },
+  {
+    location: '/api/plugin/finance/upload/*',
+    match: (p) => /^\/api\/plugin\/finance\/upload\/[^/]+\/?$/.test(p),
+    // Staff-only: receipts, bank statements and e-invoices for the finance
+    // module. Raw bodies, so the headroom is for nothing but rounding.
+    bytes: Math.ceil(FINANCE_UPLOAD_MAX_BYTES * 1.2),
+    derivesFrom: 'FINANCE_UPLOAD_MAX_BYTES (src/plugins/finance/lib/limits.ts)',
+    purpose: 'A receipt, bank statement or e-invoice uploaded to the finance module',
   },
 ];
 

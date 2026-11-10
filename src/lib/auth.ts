@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { promisify } from 'node:util';
 import type { User, RevokedSession } from '../core/models';
 import { hasCapability, type RoleOverrides } from './capabilities';
+import { queryFlag } from './http/query-flags';
 
 const PBKDF2_ITERATIONS = 120_000;
 const PBKDF2_KEYLEN = 32;
@@ -116,6 +117,46 @@ export function canAuthorPosts(role: string | undefined): boolean {
 /** Create and edit products, product categories and brands. */
 export function canManageCatalog(role: string | undefined): boolean {
   return hasCapability(role, 'manage_catalog', capabilityOverrides());
+}
+
+/**
+ * Is this caller catalogue STAFF on the public product reads — allowed
+ * staff-only fields, and allowed to ask for drafts and archived products
+ * (see `includesUnpublishedProducts`)?
+ *
+ * One definition for `GET /api/products` and `GET /api/products/{id}`. The
+ * single-product route used to 404 every non-active product even for staff,
+ * while the list showed them on `?all=true`, so the admin editor (which loads
+ * through the single route) could not open a draft at all.
+ *
+ * `user` is `locals.user` AFTER the middleware: a cookie session, or a bearer
+ * key carrying its own role. A scoped key whose scopes do not name `products`
+ * has already been downgraded to anonymous (`null`) on these public GETs, so
+ * this needs no scope check of its own.
+ */
+export function canSeeUnpublishedProducts(user: { role?: string } | null | undefined): boolean {
+  return !!user && canManageCatalog(user.role);
+}
+
+/**
+ * Should THIS request include draft and archived products?
+ *
+ * Staff who ASK, with `?all=true`. Being staff is not enough on its own: a
+ * headless storefront's server often calls with an editor-role API key (for
+ * checkout), and if that key alone unlocked drafts, a storefront fetching
+ * `/api/products/<slug>` would render a draft or retired product to anyone who
+ * guessed the URL. The opt-in keeps the default response the public one for
+ * every caller, which is what the list route has always done.
+ */
+export function includesUnpublishedProducts(
+  user: { role?: string } | null | undefined,
+  params: URLSearchParams,
+): boolean {
+  // `1` as well as `true`: the typed client sends booleans as `1`
+  // (`products.list({ all: true })`), and before this helper the route only
+  // read `true`, so that client option silently did nothing. Read through
+  // `queryFlag`, so "true" has one definition (`src/lib/http/query-flags.ts`).
+  return canSeeUnpublishedProducts(user) && queryFlag(params, 'all');
 }
 
 /**

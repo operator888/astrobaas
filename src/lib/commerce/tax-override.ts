@@ -24,7 +24,7 @@
  */
 import type { OrderLineBreakdown, TaxOverride } from '../../core/models';
 import type { TaxSettings } from './tax';
-import { rateForClass, splitTax } from './tax';
+import { domesticTaxRates, rateForClass, splitTax } from './tax';
 
 export interface OverrideRequest {
   scope: 'order' | 'line';
@@ -50,7 +50,11 @@ function requestedRate(settings: TaxSettings, req: OverrideRequest): number | nu
   if (req.exempt === true) return 0;
   if (typeof req.tax_class === 'string' && req.tax_class.trim()) {
     const wanted = req.tax_class.trim().toLowerCase();
-    const known = settings.rates.some((r) => r.class === wanted);
+    // The SHOP's own country-wide rows only. Country-blind, this accepted a
+    // class only another country has (Austria's `reduced-2`) and charged its
+    // rate; a class that exists at home only as a territory row has no
+    // country-wide rate to apply either. Both are refused.
+    const known = domesticTaxRates(settings).some((r) => r.class === wanted && !r.postcodes);
     // An unknown class must NOT fall through to the default rate — that would
     // silently apply a different rate than the one the operator picked, on a
     // screen whose entire purpose is picking the rate deliberately.
@@ -96,6 +100,28 @@ export function applyTaxOverride(
     targets = [i];
   } else {
     targets = lines.map((_, i) => i);
+  }
+
+  /*
+   * A CLASS override applies the shop's own rate, so it is refused on a line
+   * taxed under another treatment. A German consumer's line (destination,
+   * 19%) overridden to `standard` would otherwise silently become Greek 24%,
+   * and a reverse-charge or export line would gain the home rate. `exempt`
+   * is still allowed: zero is zero in every jurisdiction. Re-rating such a
+   * line in its own country's table is a separate feature, not a fallback.
+   * Lines with no `tax_treatment` are domestic (every line written before
+   * destination resolution existed).
+   */
+  if (req.exempt !== true) {
+    const foreign = targets.find((i) => (lines[i].tax_treatment ?? 'domestic') !== 'domestic');
+    if (foreign !== undefined) {
+      const l = lines[foreign];
+      return {
+        ok: false,
+        error: `Line ${foreign} is taxed as ${l.tax_treatment}${l.tax_jurisdiction ? ` (${l.tax_jurisdiction})` : ''}; `
+          + 'a tax class override applies only to domestic lines. Use `exempt: true`, or override domestic lines one at a time.',
+      };
+    }
   }
 
   // The engine's answer on the FIRST targeted line, frozen into the record. One

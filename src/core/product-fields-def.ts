@@ -153,6 +153,10 @@ export function validateProductFieldDefs(raw: unknown): ProductFieldValidation {
       // dropped rather than carried as decoration that implies behaviour.
       step: undefined,
       showIf: undefined,
+      // A product field says who may read it through `visibility` above (staff
+      // by default); `private` is the custom-collection spelling of the same
+      // idea and is not a second switch here.
+      private: undefined,
     };
     // Drop the undefined keys so a stored definition is the minimum that
     // describes it, and two equal definitions serialise identically.

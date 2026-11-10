@@ -21,6 +21,7 @@
  */
 import type { Product } from '../../core/models';
 import { settingInt } from '../settings-map';
+import { productStockStatus } from './stock-status';
 
 /** The custom-entity type the rows live under. */
 export const WAITLIST_TYPE = 'stock_waitlist';
@@ -118,11 +119,18 @@ export function normaliseWaitlistEmail(raw: unknown): string | null {
  * is available whenever it is active; that is the same rule the catalogue uses.
  */
 export function isBackInStock(product: Pick<Product,
-  'status' | 'in_stock' | 'stock' | 'manage_stock' | 'catalog_visibility'> | null | undefined): boolean {
+  'status' | 'in_stock' | 'stock' | 'manage_stock' | 'catalog_visibility' | 'variants'> | null | undefined): boolean {
   if (!product) return false;
   if (product.status !== 'active') return false;
   if (product.catalog_visibility === 'hidden') return false;
   if (product.manage_stock === false) return true;
+  // A product with variants sells from its VARIANTS; its own `stock` is null
+  // and its stored `in_stock` is true while every variant is sold out, which
+  // used to make a sold-out shirt "already back" (signups silently dropped,
+  // and the sweep treated it as available). Same helper as the badge.
+  if (Array.isArray(product.variants) && product.variants.length > 0) {
+    return productStockStatus(product, 0).status !== 'out-of-stock';
+  }
   if (typeof product.stock === 'number') return product.stock > 0;
   return product.in_stock === true;
 }

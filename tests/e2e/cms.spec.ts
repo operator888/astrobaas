@@ -1,4 +1,5 @@
-import { test, expect, type BrowserContext, type Page } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+import { adminLogin, ADMIN_PASSWORD } from './lib/session';
 
 /**
  * Browser e2e for the core CMS flows. Drives real DOM interaction (forms,
@@ -7,9 +8,9 @@ import { test, expect, type BrowserContext, type Page } from '@playwright/test';
  */
 
 /**
- * Session cookies from the first real login, reused by every later test.
+ * One admin session for the whole e2e suite (lib/session.ts), not one per test.
  *
- * Playwright gives each test a fresh browser context, so without this the suite
+ * Playwright gives each test a fresh browser context, so without it the suite
  * logs in once per test — and the login throttle (10 attempts per 15 minutes
  * per IP + email, middleware.ts) starts returning 429 partway through. That is
  * the throttle working correctly: seventeen logins from one address with one
@@ -17,11 +18,9 @@ import { test, expect, type BrowserContext, type Page } from '@playwright/test';
  * would mean shipping a security control the tests do not actually exercise.
  *
  * So the suite behaves like a user instead: authenticate once, keep the
- * session. The login FORM is still tested for real — the cache is cold when
- * the "login works" test runs, because it is the first test that calls this.
+ * session. The login FORM is still tested for real: "admin is protected and
+ * login works" below fills it itself, whatever the shared session holds.
  */
-type SessionCookies = Awaited<ReturnType<BrowserContext['cookies']>>;
-let cachedCookies: SessionCookies | null = null;
 
 /**
  * `goto` that cannot be aborted by a navigation already in flight.
@@ -59,31 +58,13 @@ async function go(page: Page, url: string) {
 }
 
 /**
- * Must match `ADMIN_PASSWORD` in playwright.config.ts.
- *
- * It is not `admin` on purpose. This suite runs the BUILT server, where
- * `isProductionRuntime()` is true, so /login refuses the published default
- * outright (D2-7). Using a real password here keeps that refusal armed for the
- * test that asserts it.
+ * The suite's shared admin session (lib/session.ts), whose ADMIN_PASSWORD must
+ * match playwright.config.ts. It is not `admin` on purpose. This suite runs the
+ * BUILT server, where `isProductionRuntime()` is true, so /login refuses the
+ * published default outright (D2-7). Using a real password keeps that refusal
+ * armed for the test that asserts it.
  */
-const ADMIN_PASSWORD = 'e2e-admin-not-the-default';
-
-async function login(page: Page) {
-  if (cachedCookies) {
-    await page.context().addCookies(cachedCookies);
-    await page.goto('/admin');
-    // The session may have expired or the server restarted; fall through to a
-    // real login rather than leaving the test on the sign-in page.
-    if (!page.url().includes('/login')) return;
-    cachedCookies = null;
-  }
-  await page.goto('/login');
-  await page.fill('input[name="email"]', 'admin@local');
-  await page.fill('input[name="password"]', ADMIN_PASSWORD);
-  await page.click('button[type="submit"]');
-  await page.waitForURL('**/admin');
-  cachedCookies = await page.context().cookies();
-}
+const login = (page: Page) => adminLogin(page);
 
 test('public home renders the site title', async ({ page }) => {
   await page.goto('/');
@@ -94,7 +75,12 @@ test('public home renders the site title', async ({ page }) => {
 test('admin is protected and login works', async ({ page }) => {
   await page.goto('/admin');
   await expect(page).toHaveURL(/\/login/); // redirected
-  await login(page);
+  // The real form, deliberately not the shared session: this is the one test
+  // whose subject IS signing in. It costs one sign-in of the throttle budget.
+  await page.fill('input[name="email"]', 'admin@local');
+  await page.fill('input[name="password"]', ADMIN_PASSWORD);
+  await page.click('button[type="submit"]');
+  await page.waitForURL('**/admin');
   await expect(page).toHaveURL(/\/admin$/);
 });
 
@@ -280,31 +266,50 @@ test('create a post and see it published on the public blog', async ({ page }) =
 test('switch theme color in the customizer and see it applied (SSR)', async ({ page }) => {
   await login(page);
   await page.goto('/admin/themes');
+  // Put the colour back afterwards. It is site-wide and the admin uses it too
+  // (`.bg-blue-600` is `var(--primary-color)`, global.css), so leaving #ff0055
+  // behind failed product-reviews' axe check (white on #ff0055 is 3.9:1) in a
+  // later spec, depending on file order rather than on that page.
+  const original = await page.inputValue('#primary-color-text');
+  expect(original).toMatch(/^#[0-9a-fA-F]{6}$/);
   // Set a distinctive primary color and save.
-  await page.fill('#primary-color-text', '#ff0055');
-  /*
-   * The save handler POSTs, flashes "saved", and only THEN reloads, on a 600ms
-   * setTimeout (src/pages/admin/themes/index.astro:548). A sleep has to cover
-   * the request plus that timer plus the render, and 1500ms was a guess at all
-   * three.
-   *
-   * Waiting on the POST alone would be worse than the sleep, not better: it
-   * returns 600ms BEFORE the reload starts, which is the collision, not the
-   * cure. The reload is itself an observable navigation, so wait for that.
-   * Registered before the click, because it is the only navigation this click
-   * produces and registering after would be its own race.
-   */
-  const themeReloaded = page.waitForEvent('framenavigated', {
-    predicate: (f) => f === page.mainFrame(),
-    timeout: 10_000,
-  });
-  await page.click('#save-theme-changes');
-  await themeReloaded;
-  await go(page, '/');
-  const root = await page.evaluate(() =>
-    getComputedStyle(document.documentElement).getPropertyValue('--primary-color').trim(),
-  );
-  expect(root.toLowerCase()).toBe('#ff0055');
+  try {
+    await page.fill('#primary-color-text', '#ff0055');
+    /*
+     * The save handler POSTs, flashes "saved", and only THEN reloads, on a 600ms
+     * setTimeout (src/pages/admin/themes/index.astro:548). A sleep has to cover
+     * the request plus that timer plus the render, and 1500ms was a guess at all
+     * three.
+     *
+     * Waiting on the POST alone would be worse than the sleep, not better: it
+     * returns 600ms BEFORE the reload starts, which is the collision, not the
+     * cure. The reload is itself an observable navigation, so wait for that.
+     * Registered before the click, because it is the only navigation this click
+     * produces and registering after would be its own race.
+     */
+    const themeReloaded = page.waitForEvent('framenavigated', {
+      predicate: (f) => f === page.mainFrame(),
+      timeout: 10_000,
+    });
+    await page.click('#save-theme-changes');
+    await themeReloaded;
+    await go(page, '/');
+    const root = await page.evaluate(() =>
+      getComputedStyle(document.documentElement).getPropertyValue('--primary-color').trim(),
+    );
+    expect(root.toLowerCase()).toBe('#ff0055');
+  } finally {
+    // In `finally`, so a failure above does not leak the colour into later specs.
+    await page.goto('/admin/themes');
+    await page.fill('#primary-color-text', original);
+    const restored = page.waitForEvent('framenavigated', { predicate: (f) => f === page.mainFrame(), timeout: 10_000 });
+    await page.click('#save-theme-changes');
+    await restored;
+    await go(page, '/');
+    expect((await page.evaluate(() =>
+      getComputedStyle(document.documentElement).getPropertyValue('--primary-color').trim())).toLowerCase())
+      .toBe(original.toLowerCase());
+  }
 });
 
 test('activate a plugin and see its filter affect rendered content', async ({ page }) => {

@@ -115,6 +115,15 @@ cms.example.com {
 		reverse_proxy 127.0.0.1:3002
 	}
 
+	@download_upload path /api/downloads/upload
+	handle @download_upload {
+		# <- MAX_PRODUCT_FILE_SIZE * 1.1 (src/lib/media/private-files.ts, DOWNLOAD_MAX_FILE_MB)
+		request_body {
+			max_size 111MB
+		}
+		reverse_proxy 127.0.0.1:3002
+	}
+
 	@backup_import path /api/backup/import
 	handle @backup_import {
 		# <- MAX_ARCHIVE_BYTES * 1.1 (src/lib/backup/offsite.ts)
@@ -139,6 +148,16 @@ cms.example.com {
 		# <- MAX_SUBMISSION_FILE_SIZE * 1.2 (src/lib/media/private-files.ts)
 		request_body {
 			max_size 6MB
+		}
+		reverse_proxy 127.0.0.1:3002
+	}
+
+	# Receipts, bank statements and e-invoices for the finance module (staff only).
+	@finance_upload path_regexp finance_upload ^/api/plugin/finance/upload/[^/]+/?$
+	handle @finance_upload {
+		# <- FINANCE_UPLOAD_MAX_BYTES * 1.2 (src/plugins/finance/lib/limits.ts)
+		request_body {
+			max_size 18MB
 		}
 		reverse_proxy 127.0.0.1:3002
 	}

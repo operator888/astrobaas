@@ -19,6 +19,10 @@ export const webhooks = {
   // {all} and {prefix} are code samples supplied by the page, not translated.
   'admin.webhooks.eventsHint': 'Χωρισμένα με κόμμα. Χρησιμοποιήστε {all} για όλα ή μπαλαντέρ της μορφής {prefix}.',
   'admin.webhooks.register': 'Καταχώριση webhook',
+  'admin.webhooks.coreEvents': 'Συμβάντα πυρήνα',
+  'admin.webhooks.pluginEvents': 'Συμβάντα από ενεργά πρόσθετα',
+  'admin.webhooks.fromPlugin': 'από {plugin}',
+  'admin.webhooks.noPluginEvents': 'Κανένα ενεργό πρόσθετο δεν δηλώνει συμβάντα webhook.',
 
   // Webhook table
   'admin.webhooks.colUrl': 'URL',

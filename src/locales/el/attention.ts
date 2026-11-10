@@ -34,6 +34,10 @@ export const attention = {
   'admin.attention.flagged-orders.body': 'Οι ενδείξεις κινδύνου δεν απορρίπτουν ποτέ παραγγελία — ζητούν μόνο ανθρώπινο έλεγχο. Αυτές παραμένουν ανοιχτές.',
   'admin.attention.flagged-orders.action': 'Έλεγχος τους',
 
+  'admin.attention.pending-reviews.title': '{count} κριτικές περιμένουν έγκριση',
+  'admin.attention.pending-reviews.body': 'Οι πελάτες δεν βλέπουν μια κριτική μέχρι να εγκριθεί, και όποιος την έγραψε περιμένει να τη δει δημοσιευμένη.',
+  'admin.attention.pending-reviews.action': 'Έλεγχος κριτικών',
+
   'admin.attention.active-out-of-stock.title': '{count} προϊόντα εμφανίζονται αλλά είναι εξαντλημένα',
   'admin.attention.active-out-of-stock.body': 'Οι πελάτες τα βρίσκουν και δεν μπορούν να τα αγοράσουν. Σκόπιμο αν δέχεστε προπαραγγελίες· αλλιώς είναι αδιέξοδα στον κατάλογο.',
   'admin.attention.active-out-of-stock.action': 'Άνοιγμα καταλόγου',

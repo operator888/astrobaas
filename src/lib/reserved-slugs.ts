@@ -47,7 +47,7 @@
 const BUILT_IN_ROUTES = [
   '404', '500', 'about', 'admin', 'admin-i18n.js', 'api',
   'assistant-widget.js', 'assistant.js',
-  'blog', 'captcha.js', 'consent.js', 'contact', 'cookies', 'forgot-password', 'forms', 'healthz', 'legal',
+  'blog', 'captcha.js', 'consent', 'consent.js', 'contact', 'cookies', 'forgot-password', 'forms', 'healthz', 'legal',
   'llms.txt', 'login', 'metrics', 'newsletter', 'og', 'openapi.json', 'plugin-admin.js',
   'plugins.css', 'popup.js',
   'readyz', 'receipt', 'receipt.pdf', 'reset-password', 'robots.txt', 'rss.xml', 'showcase',

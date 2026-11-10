@@ -50,6 +50,9 @@
 import { signPurposeToken, verifyPurposeToken } from '../auth';
 import { isErased } from './order-lookup';
 import type { Order } from '../../core/models';
+import { lineAddonsForDisplay, type ReceiptAddon } from './line-addons-display';
+
+export type { ReceiptAddon };
 
 /**
  * Two years.
@@ -91,6 +94,12 @@ export interface ReceiptLine {
   vatRate: string | null;
   /** The variation bought, e.g. "Colour: Black · Size: M". Empty when simple. */
   options: string;
+  /**
+   * Priced add-ons on the line (`OrderItem.addons`), each with what it adds to
+   * THIS line — unit price × qty, already formatted. Already inside `total`;
+   * shown so the customer can see what they paid for. Empty when none.
+   */
+  addons: ReceiptAddon[];
 }
 
 export interface ReceiptView {
@@ -188,6 +197,7 @@ export function receiptView(
         // Frozen at purchase, so this is what they actually ordered.
         options: Object.entries(line.variant_options ?? {})
           .map(([k, v]) => `${k}: ${v}`).join(' · '),
+        addons: lineAddonsForDisplay(line, formatMoney),
       };
     }),
     // Shown only when they carry information. A "Discount: 0,00" row on every

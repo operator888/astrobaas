@@ -218,8 +218,11 @@ function resolveNginx(locations, path) {
     // Find the matcher naming this route, then the first max_size after it.
     const escaped = rule.location.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace('\\*', '[^/]+');
     const matcher = new RegExp(`(?:path|path_regexp)[^\\n]*${rule.location.includes('*') ? '' : escaped}`);
+    // A wildcard rule is written as a path_regexp; find the one naming the
+    // literal prefix before the `*` (`/api/forms/`, `/api/plugin/finance/upload/`).
+    const prefix = rule.location.split('*')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const idx = rule.location.includes('*')
-      ? live.search(/path_regexp[^\n]*\/api\/forms/)
+      ? live.search(new RegExp(`path_regexp[^\\n]*${prefix}`))
       : live.search(matcher);
     const next = sizes.find((s) => s.at > idx);
     check(

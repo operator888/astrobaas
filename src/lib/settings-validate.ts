@@ -17,13 +17,18 @@
  */
 
 import { validateSuggestSetting } from './search/suggest-settings';
+import { validateInvoiceSetting } from './commerce/invoice-records-rules';
 import { normaliseOrigin } from './site-url';
 import { validateRobotsBody } from './robots-txt';
 import { validateSynonyms } from './search/expander';
 import { validate } from './validate';
 import { settingRuleFor, type SettingGroup } from '../core/setting-groups';
 import { SHOP_CURRENCY_KEY } from './commerce-settings';
+import {
+  CHECKOUT_TERMS_KEYS, MAX_TERMS_LABEL_LENGTH, isTermsUrl,
+} from './commerce/checkout-terms';
 import { NAVIGATION_SETTING, validateNavigation, normaliseNavigation } from './navigation';
+import { PUBLIC_ORDER_STATS_KEY, SHOP_TIMEZONE_KEY, isValidTimeZone } from './commerce/order-stats';
 
 export interface SettingProblem {
   key: string;
@@ -89,6 +94,15 @@ const BOOLEAN_KEYS: ReadonlySet<string> = new Set([
   'orders_recovery_enabled',
   // The opt-in risk hold (hardening step 4): a stored "false" must read as off.
   'orders_risk_hold_enabled',
+  // Checkout consent. OFF unless the merchant turns it on, and a stored
+  // "false" must read as off — the box on the storefront is what it gates.
+  'checkout_terms_required',
+  // Publishing a verified buyer's review unmoderated (C-35). A stored "false"
+  // read with `!!` would publish every verified review unseen.
+  'reviews_auto_approve_verified',
+  // Campaign attribution. ON unless switched off, so a stored "false" must
+  // really read as off — it is a privacy switch.
+  'attribution_enabled',
   'popup_enabled',
   // Every reader of this one uses `!!value`, so the STRING "false" would be
   // truthy: an operator turning the toggle off through the API would take
@@ -98,6 +112,9 @@ const BOOLEAN_KEYS: ReadonlySet<string> = new Set([
   // would silently keep the outbound sweep running after the operator turned
   // it off — and this one makes requests to other people's servers.
   'link_check_external',
+  // Publishing the paid-order count. OFF unless switched on, and a stored
+  // "false" must read as off: it decides whether a business figure is public.
+  PUBLIC_ORDER_STATS_KEY,
 ]);
 
 /**
@@ -152,6 +169,12 @@ export function validateSetting(
     const r = validateSuggestSetting(key, value);
     if (r !== undefined) return r;
   }
+  // Settings → Invoices: when records are made, the internal reference's
+  // format, and which issuer. A typo here would otherwise read as the default.
+  {
+    const r = validateInvoiceSetting(key, value);
+    if (r !== undefined) return r;
+  }
 
   if (key === 'captcha_surfaces') {
     if (value === null || value === undefined || value === '') return null;
@@ -170,6 +193,27 @@ export function validateSetting(
     return /^[A-Za-z]{3}$/.test(value.trim())
       ? null
       : 'must be a three-letter ISO 4217 code, for example EUR, GBP or JPY';
+  }
+  // The checkbox text a storefront shows next to the box. Plain text: it is
+  // rendered into a page, so a stored value that could carry markup is refused
+  // here rather than relied on every storefront to escape.
+  if (key === CHECKOUT_TERMS_KEYS.label) {
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value !== 'string') return 'must be text';
+    if (value.length > MAX_TERMS_LABEL_LENGTH) return `must be at most ${MAX_TERMS_LABEL_LENGTH} characters`;
+    if (/[<>]/.test(value)) return 'must be plain text, without HTML';
+    return null;
+  }
+  if (key === CHECKOUT_TERMS_KEYS.url) {
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value === 'string' && isTermsUrl(value)) return null;
+    return 'must be a page on this site (starting with /) or an https:// address';
+  }
+  // The shop's timezone decides which month an order is counted in. A typo
+  // would otherwise fall back to UTC without a word.
+  if (key === SHOP_TIMEZONE_KEY) {
+    if (value === null || value === undefined || value === '') return null;
+    return isValidTimeZone(value) ? null : 'must be a timezone name such as Europe/Athens or UTC';
   }
   if (BOOLEAN_KEYS.has(key)) {
     if (value === null || value === undefined || value === '') return null;
@@ -227,6 +271,7 @@ export function normaliseSettingValue(key: string, value: unknown): unknown {
   if (key === SHOP_CURRENCY_KEY && typeof value === 'string' && value.trim()) {
     return value.trim().toUpperCase();
   }
+  if (key === SHOP_TIMEZONE_KEY && typeof value === 'string') return value.trim();
   if (BOOLEAN_KEYS.has(key)) {
     if (value === 'true' || value === '1') return true;
     if (value === 'false' || value === '0') return false;

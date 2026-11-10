@@ -24,6 +24,7 @@ export const chrome = {
   'admin.chrome.products': 'Προϊόντα',
   'admin.chrome.orders': 'Παραγγελίες',
   'admin.chrome.customers': 'Πελάτες',
+  'admin.chrome.coupons': 'Κουπόνια',
   'admin.chrome.media': 'Πολυμέσα',
   'admin.chrome.themes': 'Θέματα',
   'admin.chrome.users': 'Χρήστες',

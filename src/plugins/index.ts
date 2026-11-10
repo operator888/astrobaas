@@ -26,6 +26,7 @@ import type { PaymentProvider } from '../lib/payments/types';
 import type { ManualMethodDef } from '../lib/payments/registry';
 import type { PluginRoute, PluginAdminPage, PluginMigration } from '../lib/plugin-system';
 import { setPluginRoutes } from '../lib/plugin-platform/routes';
+import { setPluginWebhookEvents } from '../lib/plugin-platform/webhook-events';
 import { setPluginAdminPages, pluginAdminPageRoles } from '../lib/plugin-platform/admin-pages';
 import { setPluginAdminRoleResolver } from '../lib/admin-access';
 import { createPluginStore, runPluginMigrations } from '../lib/plugin-platform/store';
@@ -38,13 +39,14 @@ import smtp2go from './smtp2go';
 import consentBanner from './consent-banner';
 import aiAssistant from './ai-assistant';
 import popups from './popups';
+import finance from './finance';
 import { loadExternalPlugins, parsePluginSpecifiers } from './external';
 import { enabledBuiltinCollections } from '../core/builtin-collections';
 import { settingBool } from '../lib/settings-map';
 import { span } from '../lib/request-profile';
 import { RegistryRecheck, pluginRegistryFingerprint } from '../lib/plugin-platform/registry-recheck';
 
-export const BUNDLED_PLUGINS: Plugin[] = [readingTime, draftWatermark, productCatalog, printStyles, smtp2go, consentBanner, aiAssistant, popups];
+export const BUNDLED_PLUGINS: Plugin[] = [readingTime, draftWatermark, productCatalog, printStyles, smtp2go, consentBanner, aiAssistant, popups, finance];
 
 /**
  * The in-flight (or completed) bootstrap.
@@ -276,6 +278,14 @@ async function doBootstrap(): Promise<void> {
   setPluginRoutes(
     activePlugins.flatMap((p: Plugin) =>
       declared<PluginRoute>(p.routes, p.id, 'routes').map((route) => ({ pluginId: p.id, route }))),
+  );
+  // Declared webhook events, ACTIVE plugins only: a deactivated plugin's
+  // events stop being emittable and stop being offered on the webhook screen.
+  setPluginWebhookEvents(
+    activePlugins.map((p: Plugin) => ({
+      pluginId: p.id,
+      events: declared<unknown>(p.webhookEvents, p.id, 'webhookEvents'),
+    })),
   );
   setPluginAdminPages(
     activePlugins.flatMap((p: Plugin) =>

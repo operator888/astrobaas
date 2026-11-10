@@ -1,7 +1,14 @@
 ---
 import AdminLayout from '../../layouts/AdminLayout.astro';
+import { WEBHOOK_EVENTS } from '../../lib/webhook-util';
+import { allPluginWebhookEvents } from '../../lib/plugin-platform/webhook-events';
 
 const t = Astro.locals.t;
+// What an operator can subscribe to: the core's events, and every event an
+// ACTIVE plugin declared (`webhookEvents`). The input stays free text — a
+// `prefix.*` wildcard is not an event — and these are one-click additions.
+const coreEvents = [...WEBHOOK_EVENTS];
+const pluginEvents = allPluginWebhookEvents();
 ---
 
 <AdminLayout title={t('admin.webhooks.title')}>
@@ -33,6 +40,29 @@ const t = Astro.locals.t;
             the sentence has to wrap around them, and word order moves in German
             and Greek, so they are parameters rather than a split string. */}
         <p class="text-xs text-gray-400 mt-1" set:html={t('admin.webhooks.eventsHint', { all: '<code>*</code>', prefix: '<code>prefix.*</code>' })}></p>
+        <div id="event-catalogue" class="mt-3 grid gap-2">
+          <p class="text-xs font-medium text-gray-600">{t('admin.webhooks.coreEvents')}</p>
+          <div class="flex flex-wrap gap-1">
+            {coreEvents.map((e) => (
+              <button type="button" data-event={e}
+                class="px-2 py-0.5 rounded bg-gray-100 hover:bg-gray-200 text-xs font-mono text-gray-700">{e}</button>
+            ))}
+          </div>
+          <p class="text-xs font-medium text-gray-600 mt-1">{t('admin.webhooks.pluginEvents')}</p>
+          {pluginEvents.length > 0 ? (
+            <ul id="plugin-events" class="flex flex-wrap gap-2">
+              {pluginEvents.map(({ event, pluginId }) => (
+                <li class="flex items-center gap-1 text-xs text-gray-500">
+                  <button type="button" data-event={event}
+                    class="px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 font-mono text-blue-800">{event}</button>
+                  <span>{t('admin.webhooks.fromPlugin', { plugin: pluginId })}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p id="plugin-events-empty" class="text-xs text-gray-400">{t('admin.webhooks.noPluginEvents')}</p>
+          )}
+        </div>
       </div>
       <div>
         <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">{t('admin.webhooks.register')}</button>
@@ -209,6 +239,17 @@ const t = Astro.locals.t;
       try { await api('POST', `/api/webhooks/deliveries/${encodeURIComponent(id)}/redeliver`); loadDeliveries(); }
       catch (e) { alert(e.message); }
     }
+
+    // One click adds an event to the list, once.
+    $('event-catalogue')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-event]');
+      if (!btn) return;
+      const input = $('w-events');
+      const have = (input.value || '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (!have.includes(btn.dataset.event)) have.push(btn.dataset.event);
+      input.value = have.join(', ');
+      input.focus();
+    });
 
     $('reg-form').addEventListener('submit', async (e) => {
       e.preventDefault();

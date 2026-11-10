@@ -61,6 +61,23 @@ function makeStore(initial = {}) {
     writes: 0,
     mediaWrites: 0,
     pluginWrites: 0,
+    // v16 (subscribers into the consent ledger). Appends are counted apart
+    // from `writes`, which the older checks pin to user/theme edits.
+    subscribers: initial.subscribers ?? [],
+    consentLedger: initial.consentLedger ?? [],
+    ledgerAppends: 0,
+    async getSubscribers() {
+      return this.subscribers;
+    },
+    async getConsentRows(q = {}) {
+      return this.consentLedger.filter((r) => (q.email === undefined || r.email === q.email)
+        && (q.purpose === undefined || r.purpose === q.purpose));
+    },
+    async appendConsentRow(row) {
+      this.consentLedger.push(row);
+      this.ledgerAppends++;
+      return row;
+    },
     async getPlugins() {
       return this.plugins;
     },
@@ -194,6 +211,28 @@ function makeStore(initial = {}) {
   check('migration versions are unique + ascending', versions.every((v, i) => i === 0 || v > versions[i - 1]));
   check('every migration has a name + up()', MIGRATIONS.every((m) => typeof m.name === 'string' && typeof m.up === 'function'));
   check('LATEST equals the max migration version (>=1)', LATEST_SCHEMA_VERSION === Math.max(1, ...versions));
+}
+
+// ---- v16: existing subscribers become confirmed ledger rows, once ----
+{
+  const s = makeStore({
+    version: 15,
+    subscribers: [
+      { id: 's1', email: 'Old@Example.com', created_at: '2026-01-02T03:04:05.000Z' },
+      { id: 's2', email: 'kept@example.com', created_at: '2026-02-02T00:00:00.000Z' },
+    ],
+    consentLedger: [{ id: 'x', email: 'kept@example.com', purpose: 'newsletter', granted: false, version: 'v', text_hash: 'h', at: 't', source: 'admin' }],
+  });
+  await runMigrations(s);
+  const row = s.consentLedger.find((r) => r.email === 'old@example.com');
+  check('v16: a subscriber with no ledger row gets ONE confirmed migration row',
+    s.ledgerAppends === 1 && row?.source === 'migration' && row?.granted === true
+    && row?.confirmed_at === '2026-01-02T03:04:05.000Z' && row?.version === 'pre-ledger');
+  check('v16: an address already in the ledger (here: withdrawn) is never re-granted',
+    s.consentLedger.filter((r) => r.email === 'kept@example.com').length === 1);
+  s._version = 15;
+  await runMigrations(s);
+  check('v16: running it again writes nothing', s.ledgerAppends === 1);
 }
 
 // ---- fresh install (already stamped at LATEST) → no work ----

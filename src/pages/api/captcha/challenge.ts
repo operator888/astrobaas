@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { ApiResponseBuilder } from '../../../lib/api-response';
 import {
-  CAPTCHA_SURFACES, type CaptchaSurface, captchaEnabledFor, makeChallenge,
+  type CaptchaSurface, captchaEnabledFor, makeChallenge, isCaptchaSurface,
 } from '../../../lib/captcha';
 
 /**
@@ -21,7 +21,9 @@ export const prerender = false;
 
 export const GET: APIRoute = async ({ url }) => {
   const surface = String(url.searchParams.get('surface') ?? '');
-  if (!(CAPTCHA_SURFACES as readonly string[]).includes(surface)) {
+  // Toggleable surfaces AND the always-on ones (`reviews`): a surface whose
+  // check can never be off must still be one a widget can get a challenge for.
+  if (!isCaptchaSurface(surface)) {
     return ApiResponseBuilder.badRequest('Unknown captcha surface');
   }
   if (!(await captchaEnabledFor(surface as CaptchaSurface))) {

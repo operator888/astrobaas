@@ -61,6 +61,28 @@ export async function paymentMethods(): Promise<PaymentMethod[]> {
   return Array.isArray(data) ? data : [];
 }
 
+/**
+ * The shop's checkout consent box: whether it is required, what it says, and
+ * where the full terms live. Read from the public settings the CMS exposes for
+ * exactly this. An unreachable or silent CMS means NO box — never an invented
+ * requirement the server would not enforce.
+ */
+export interface TermsBox { required: boolean; label: string; url: string | null }
+export async function termsBox(): Promise<TermsBox | null> {
+  try {
+    const s = await cms.request<Record<string, unknown>>('GET', '/api/settings/get');
+    const required = s?.checkout_terms_required === true || s?.checkout_terms_required === 'true';
+    const label = typeof s?.checkout_terms_label === 'string' && s.checkout_terms_label.trim()
+      ? s.checkout_terms_label.trim() : 'I agree to the Terms & Conditions';
+    const url = typeof s?.checkout_terms_url === 'string' && s.checkout_terms_url.trim() ? s.checkout_terms_url.trim() : null;
+    // The box is shown when the shop requires it, or when it has published a
+    // terms link to agree to. Otherwise the checkout is exactly as it was.
+    return required || url ? { required, label, url } : null;
+  } catch {
+    return null;
+  }
+}
+
 /** What to show a shopper when a call fails — the CMS's own sentence if it sent one. */
 export function problem(err: unknown): string {
   if (err instanceof AstroBaasError) {

@@ -99,6 +99,25 @@ export const ANALYTICS_PROVIDERS: readonly AnalyticsProvider[] = [
     helpUrl: 'https://support.google.com/tagmanager/answer/6103696',
   },
   {
+    // Google Ads conversion tracking / remarketing. The same gtag.js as GA4,
+    // but its purpose is ADVERTISING, so it waits for marketing consent — not
+    // analytics. Keeping the two apart is the point of granular consent.
+    id: 'google-ads',
+    label: 'Google Ads',
+    category: 'marketing',
+    idLabel: 'Conversion ID',
+    idPlaceholder: 'AW-123456789',
+    idPattern: /^AW-\d{6,15}$/,
+    // Per Google's CSP guide for Google Ads (conversion + remarketing).
+    // `www.google.<ccTLD>` user-list pings are NOT listed: a wildcard TLD is
+    // impossible in CSP, so those beacons are blocked; conversions still count.
+    scriptOrigins: [GTM, 'https://www.googleadservices.com', 'https://googleads.g.doubleclick.net', 'https://pagead2.googlesyndication.com'],
+    connectOrigins: [GTM, 'https://www.google.com', 'https://www.googleadservices.com', 'https://googleads.g.doubleclick.net', 'https://pagead2.googlesyndication.com'],
+    imgOrigins: ['https://www.google.com', 'https://www.googleadservices.com', 'https://googleads.g.doubleclick.net', 'https://pagead2.googlesyndication.com'],
+    frameOrigins: ['https://td.doubleclick.net', 'https://www.googletagmanager.com'],
+    helpUrl: 'https://support.google.com/google-ads/answer/6095821',
+  },
+  {
     id: 'meta-pixel',
     label: 'Meta (Facebook) Pixel',
     category: 'marketing',
@@ -233,7 +252,7 @@ export function validateAnalyticsId(
 
   // Case-normalise only where the vendor's IDs are genuinely case-insensitive
   // prefixed codes. Domains and UUIDs keep their case handling in the pattern.
-  const normalised = /^(ga4|gtm|tiktok|fathom)$/.test(provider.id) ? trimmed.toUpperCase() : trimmed;
+  const normalised = /^(ga4|gtm|google-ads|tiktok|fathom)$/.test(provider.id) ? trimmed.toUpperCase() : trimmed;
 
   if (!provider.idPattern.test(normalised)) {
     return { ok: false, error: `${provider.label} ${provider.idLabel} should look like "${provider.idPlaceholder}"` };

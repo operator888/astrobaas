@@ -41,6 +41,7 @@
  */
 import { signPurposeToken, verifyPurposeToken } from './auth';
 import { renderEmailTemplate } from './email-templates';
+import { DEFAULT_NEWSLETTER_CONSENT, textHash } from './consent-ledger';
 
 /**
  * How long a confirmation link is good for.
@@ -50,9 +51,41 @@ import { renderEmailTemplate } from './email-templates';
  */
 export const CONFIRM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Sign a confirmation for this address. */
-export function makeConfirmToken(email: string): string {
-  return signPurposeToken('newsletter', { em: email.trim().toLowerCase() }, CONFIRM_TTL_MS);
+/**
+ * Sign a confirmation for this address.
+ *
+ * `consent` is the wording the person was shown at signup — its version label
+ * and the sha256 of its exact text (consent-ledger.ts). It rides in the signed
+ * link because the signup stores nothing: the ledger's GRANT row is written at
+ * the click, from these values, and the signature is what makes them the
+ * values the signup actually had. Only the HASH travels, never the text.
+ */
+export function makeConfirmToken(email: string, consent?: { version: string; text_hash: string }): string {
+  return signPurposeToken('newsletter', {
+    em: email.trim().toLowerCase(),
+    ...(consent ? { cv: consent.version, ch: consent.text_hash } : {}),
+  }, CONFIRM_TTL_MS);
+}
+
+/**
+ * The wording a confirmation link was minted for, or null for a bad token.
+ *
+ * A link minted before the ledger existed carries none; it is recorded under
+ * the default wording, which is what the forms showed then.
+ */
+export function readConfirmConsent(
+  token: string | undefined | null,
+): { version: string; text_hash: string; issued_at: string } | null {
+  const payload = verifyPurposeToken('newsletter', token);
+  if (!payload) return null;
+  // When the link was minted — the signup. Derived from the signed expiry, so
+  // it cannot be moved: it is what lets the click tell a fresh signup from an
+  // old link opened after the person had already left.
+  const issued_at = new Date(Number(payload.exp) - CONFIRM_TTL_MS).toISOString();
+  const v = typeof payload.cv === 'string' ? payload.cv : '';
+  const h = typeof payload.ch === 'string' && /^[0-9a-f]{64}$/.test(payload.ch) ? payload.ch : '';
+  if (v && h && v.length <= 64) return { version: v, text_hash: h, issued_at };
+  return { version: DEFAULT_NEWSLETTER_CONSENT.version, text_hash: textHash(DEFAULT_NEWSLETTER_CONSENT.text), issued_at };
 }
 
 /**
@@ -138,4 +171,36 @@ export function readUnsubscribeToken(token: string | undefined | null): string |
 export function unsubscribeUrl(origin: string, email: string): string {
   return `${origin.replace(/\/$/, '')}/api/newsletter/unsubscribe`
     + `?token=${encodeURIComponent(makeUnsubscribeToken(email))}`;
+}
+
+
+/* ---------- Withdrawing any consent ---------- */
+
+/**
+ * A withdrawal link for any purpose in the consent ledger.
+ *
+ * Its own token purpose — not `unsub`, not `newsletter` — so none of the three
+ * can be replayed as another, and bound to ONE purpose: a link that withdraws
+ * a game's terms must not also take somebody off the newsletter. A year, for
+ * the unsubscribe link's reason: a way out that has expired is worse than none.
+ */
+export function makeConsentWithdrawToken(email: string, purpose: string): string {
+  return signPurposeToken('consent-wd', { em: email.trim().toLowerCase(), pu: purpose }, UNSUBSCRIBE_TTL_MS);
+}
+
+/** The address and purpose a withdrawal token names, or null. */
+export function readConsentWithdrawToken(token: string | undefined | null): { email: string; purpose: string } | null {
+  const payload = verifyPurposeToken('consent-wd', token);
+  if (!payload) return null;
+  const email = typeof payload.em === 'string' ? payload.em.trim().toLowerCase() : '';
+  const purpose = typeof payload.pu === 'string' ? payload.pu : '';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 200) return null;
+  if (!/^[a-z][a-z0-9_.:-]{0,63}$/.test(purpose)) return null;
+  return { email, purpose };
+}
+
+/** The public withdrawal URL (POST, token in the query, like RFC 8058). */
+export function consentWithdrawUrl(origin: string, email: string, purpose: string): string {
+  return `${origin.replace(/\/$/, '')}/api/consent/withdraw`
+    + `?token=${encodeURIComponent(makeConsentWithdrawToken(email, purpose))}`;
 }

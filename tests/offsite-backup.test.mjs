@@ -53,6 +53,13 @@ await fs.writeFile(path.join(tmp, 'uploads', '2026', '08', 'a.png'), Buffer.from
 // One file over the ceiling, which must be REPORTED as skipped rather than
 // silently dropped or allowed to blow the archive up.
 await fs.writeFile(path.join(tmp, 'uploads', '2026', '08', 'huge.bin'), Buffer.alloc(11 * 1024 * 1024, 1));
+// The private bookkeeping archive: finance/ goes into the backup, other
+// private working files do not.
+process.env.PRIVATE_UPLOADS_DIR = path.join(tmp, 'private');
+await fs.mkdir(path.join(tmp, 'private', 'finance', 'ab'), { recursive: true });
+await fs.mkdir(path.join(tmp, 'private', 'exports'), { recursive: true });
+await fs.writeFile(path.join(tmp, 'private', 'finance', 'ab', 'fa_1.pdf'), Buffer.from('%PDF-receipt'));
+await fs.writeFile(path.join(tmp, 'private', 'exports', 'tmp.zip'), Buffer.from('working file'));
 
 const O = await load('src/lib/backup/offsite.ts', 'offsite');
 
@@ -434,6 +441,15 @@ const at = (iso) => new Date(iso);
     && O.backupDue({ ...c, everyHours: 0.25 }, built, t0 + 14 * 60_000) === false);
   check('everyHours=0 disables the schedule',
     O.backupDue({ ...c, everyHours: 0 }, null, t0) === false);
+}
+
+{
+  const p = await O.buildPayload({ ...process.env, DATABASE_URL: '' });
+  const body = p.ok ? JSON.parse(Buffer.from(p.body).toString('utf8')) : {};
+  const priv = (body.private_files ?? []).map((f) => f.path);
+  check('backup carries the bookkeeping archive (private uploads/finance)', priv.includes('finance/ab/fa_1.pdf'));
+  check('...and only that subtree, not other private working files', priv.every((x) => x.startsWith('finance/')));
+  check('...with the exact bytes', Buffer.from(body.private_files.find((f) => f.path === 'finance/ab/fa_1.pdf').base64, 'base64').toString() === '%PDF-receipt');
 }
 
 server.close();

@@ -26,11 +26,19 @@ const names = Object.fromEntries((await allProducts()).map((p) => [p.id, p.name]
 </Shop>
 
 <script>
-  import { readCart, setQty, clearCart, browserStorage, type CartLine } from '../lib/cart';
+  import { readCart, setQty, clearCart, browserStorage, addFromQuery, GROUP_FIELD_PREFIX, type CartLine } from '../lib/cart';
   import { cms, quote, problem, AstroBaasError, type Quote } from '../scripts/shop-api';
   import { formatMoney } from '../lib/money';
 
   const store = browserStorage();
+
+  // A grouped product's page is a plain form that lands here with
+  // `?add.<id>=<qty>` per member. Take those into the cart once, then drop the
+  // query so a reload does not add them again.
+  if (new URLSearchParams(location.search).toString().includes(GROUP_FIELD_PREFIX)) {
+    if (addFromQuery(store, location.search) > 0) document.dispatchEvent(new Event('cart:changed'));
+    history.replaceState(null, '', location.pathname);
+  }
   const status = document.querySelector<HTMLElement>('[data-cart-status]')!;
   const body = document.querySelector<HTMLElement>('[data-cart-body]')!;
   const tbody = document.querySelector<HTMLElement>('[data-cart-lines]')!;

@@ -27,8 +27,12 @@ function check(name, cond) {
 }
 
 /* ---- fake AstroBaaS backend ---- */
+// Every request URL the backend saw, so a test can assert the WIRE form a tool
+// sends — what the route reads — rather than only what came back.
+const seen = [];
 async function startFakeBackend() {
   const server = http.createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
     let raw = '';
     req.on('data', (c) => (raw += c));
     req.on('end', () => {
@@ -57,6 +61,8 @@ async function startFakeBackend() {
       }
       if (m === 'DELETE' && path.startsWith('/api/posts/'))
         return send(200, { success: true, data: null });
+      if (m === 'GET' && (path === '/api/products' || path === '/api/customers'))
+        return send(200, { success: true, data: [], meta: {} });
       if (m === 'PUT' && /^\/api\/content\/[^/]+\/[^/]+$/.test(path))
         return send(200, { success: true, data: { id: path.split('/').pop(), data: JSON.parse(raw || '{}') } });
       if (m === 'DELETE' && /^\/api\/content\/[^/]+\/[^/]+$/.test(path))
@@ -191,6 +197,41 @@ async function main() {
     const badRead = await mcp.request('resources/read', { uri: 'astrobaas://nope/x' });
     check('resources/read unknown URI → -32602', badRead.error?.code === -32602);
 
+    // ---- query flags: what each list tool puts on the wire ----
+    // The products route reads `featured` as a filter only when it is `true`;
+    // anything else means "no filter". So `featured: false` must not be sent —
+    // `featured=false` reads like "only non-featured" and silently returns all.
+    const wire = async (name, args, routePath) => {
+      seen.length = 0;
+      const r = await mcp.request('tools/call', { name, arguments: args });
+      const hit = seen.find((l) => l.startsWith(`GET ${routePath}`));
+      return { ok: !r.result?.isError, qs: hit ? new URLSearchParams(hit.split('?')[1] ?? '') : null };
+    };
+    {
+      const f = await wire('list_products', { featured: false, limit: 5 }, '/api/products');
+      check('list_products featured:false sends NO featured param (false = no filter)',
+        f.ok && f.qs && !f.qs.has('featured') && f.qs.get('limit') === '5');
+      const t = await wire('list_products', { featured: true }, '/api/products');
+      check('list_products featured:true sends featured=true, the value the route filters on',
+        t.ok && t.qs?.get('featured') === 'true');
+      const n = await wire('list_products', {}, '/api/products');
+      check('list_products with no featured sends no featured param', n.ok && n.qs && !n.qs.has('featured'));
+      const desc = (list.result?.tools || []).find((x) => x.name === 'list_products')
+        ?.inputSchema?.properties?.featured?.description ?? '';
+      check('list_products documents that featured:false is no filter', /false[^.]*no featured filter/i.test(desc));
+    }
+    // ---- list_customers pages like list_orders ----
+    {
+      const c = await wire('list_customers', { search: 'maria', limit: 10, offset: 20 }, '/api/customers');
+      check('list_customers sends search, limit and offset',
+        c.ok && c.qs?.get('search') === 'maria' && c.qs.get('limit') === '10' && c.qs.get('offset') === '20');
+      const d = await wire('list_customers', {}, '/api/customers');
+      check('list_customers with no arguments sends no query string', d.ok && d.qs && [...d.qs.keys()].length === 0);
+      const schema = (list.result?.tools || []).find((x) => x.name === 'list_customers')?.inputSchema?.properties ?? {};
+      check('list_customers accepts offset, so an agent can page past the first 50',
+        schema.offset?.type === 'integer' && schema.limit?.maximum === 200);
+    }
+
     // unknown method → method-not-found
     const badMethod = await mcp.request('frobnicate', {});
     check('unknown method → -32601', badMethod.error?.code === -32601);
@@ -250,8 +291,22 @@ async function main() {
       return walk(apiRoot, 0);
     };
 
+    // Plugin-owned routes are not files: they are declared in the plugin's
+    // routes module as r('METHOD', '/path', …) under /api/plugin/<id>/.
+    const pluginRoutes = [];
+    for (const dir of fs.readdirSync(path.join(apiRoot, '..', '..', 'plugins'))) {
+      const file = path.join(apiRoot, '..', '..', 'plugins', dir, 'routes.ts');
+      if (!fs.existsSync(file)) continue;
+      for (const m of fs.readFileSync(file, 'utf8').matchAll(/\br\('(GET|POST|PUT|PATCH|DELETE)',\s*'([^']+)'/g)) {
+        pluginRoutes.push({ method: m[1], re: new RegExp(`^plugin/${dir}${m[2].replace(/:[a-z_]+/g, '[^/]+').replace(/\//g, '\\/')}$`) });
+      }
+    }
+    const pluginRouteExists = (method, p) => pluginRoutes.some((r) => r.method === method && r.re.test(p.replace(/\*/g, 'x')));
     const missing = [];
-    for (const r of refs) if (!routeExists(r.path)) missing.push(`${r.method} /api/${r.path}`);
+    for (const r of refs) {
+      const ok = r.path.startsWith('plugin/') ? pluginRouteExists(r.method, r.path) : routeExists(r.path);
+      if (!ok) missing.push(`${r.method} /api/${r.path}`);
+    }
     check(`every MCP tool targets an existing route${missing.length ? ` (missing: ${missing.join(', ')})` : ''}`,
       missing.length === 0);
     check('the tool surface covers commerce, media and settings', (() => {

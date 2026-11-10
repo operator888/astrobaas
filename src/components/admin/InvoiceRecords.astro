@@ -1,0 +1,149 @@
+---
+/**
+ * One order's invoice and credit-memo RECORDS, on the orders screen.
+ *
+ * Each record shows its state — draft, final, issued (with the issuer's
+ * number), issued elsewhere, or a failed issue with the issuer's own message —
+ * and a PDF link. The controls are the only verbs a record has: create,
+ * finalise or cancel a draft, credit a final one in full (a correction), mark
+ * it issued elsewhere, send it to the issuer again. There is no edit: a final
+ * record is immutable.
+ *
+ * Its own component so the orders screen gains one line, not a block: other
+ * work on that screen (the order timeline) can land before or after this.
+ */
+import type { Order } from '../../core/models';
+import {
+  documentState, invoiceDocumentsOf, activeInvoice, canCreateInvoice, MAX_AUTO_ISSUE_ATTEMPTS, ISSUE_STALE_MS,
+} from '../../lib/commerce/invoice-records-rules';
+
+interface Props {
+  order: Order;
+  canWrite: boolean;
+  money: (cents: number, currency?: string) => string;
+  context: { issuer: string | null; problem: string | null };
+}
+
+const { order, canWrite, money, context } = Astro.props;
+const t = Astro.locals.t;
+const docs = invoiceDocumentsOf(order);
+const canCreate = canWrite && canCreateInvoice(docs) && !order.erased_at;
+
+const stateLabel: Record<string, string> = {
+  draft: t('admin.invoices.stateDraft'),
+  final: t('admin.invoices.stateFinal'),
+  cancelled: t('admin.invoices.stateCancelled'),
+  issuing: t('admin.invoices.stateIssuing'),
+  issued: t('admin.invoices.stateIssued'),
+  issue_failed: t('admin.invoices.stateIssueFailed'),
+  issued_elsewhere: t('admin.invoices.stateIssuedElsewhere'),
+};
+const stateClass: Record<string, string> = {
+  draft: 'bg-gray-100 text-gray-700',
+  final: 'bg-blue-100 text-blue-800',
+  cancelled: 'bg-gray-200 text-gray-500',
+  issuing: 'bg-amber-100 text-amber-800',
+  issued: 'bg-green-100 text-green-800',
+  issue_failed: 'bg-red-100 text-red-800',
+  issued_elsewhere: 'bg-teal-100 text-teal-800',
+};
+---
+<div class="invoice-records mt-3 border-t border-gray-100 pt-2" data-order={order.id}>
+  <div class="flex items-center gap-2 flex-wrap">
+    <span class="text-xs font-semibold uppercase tracking-wide text-gray-500">{t('admin.invoices.heading')}</span>
+    {canCreate && (
+      <>
+        <button type="button" class="invoice-action text-xs px-2 py-0.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"
+          data-action="create" data-finalise="false">{t('admin.invoices.create')}</button>
+        <button type="button" class="invoice-action text-xs px-2 py-0.5 rounded-lg border border-blue-300 text-blue-700 hover:bg-blue-50"
+          data-action="create" data-finalise="true" data-confirm={t('admin.invoices.finaliseConfirm')}>{t('admin.invoices.createFinal')}</button>
+      </>
+    )}
+  </div>
+  {docs.length === 0 ? (
+    <p class="text-xs text-gray-400 mt-1">{t('admin.invoices.none')}</p>
+  ) : (
+    <ul class="mt-1 space-y-1">
+      {docs.map((d) => {
+        const state = documentState(d);
+        return (
+          <li class="invoice-record text-xs text-gray-700 flex items-center gap-2 flex-wrap" data-record={d.id} data-state={state}>
+            <span class="font-medium">{d.kind === 'invoice' ? t('admin.invoices.kindInvoice') : t('admin.invoices.kindMemo')}</span>
+            <span class="font-mono text-gray-400">{d.id.slice(d.id.lastIndexOf('.') + 1)}</span>
+            <span class={`px-2 py-0.5 rounded-full ${stateClass[state] ?? 'bg-gray-100'}`}>{stateLabel[state] ?? state}</span>
+            <span>{money(d.kind === 'credit_memo' ? -d.total_cents : d.total_cents, d.currency || order.currency)}</span>
+            {d.kind === 'credit_memo' && (
+              <span class="text-gray-400">{t('admin.invoices.credits', { id: d.invoice_record_id.slice(d.invoice_record_id.lastIndexOf('.') + 1) })}</span>
+            )}
+            {state === 'issued' && d.issuer?.number && <span>{t('admin.invoices.issuerNumber', { number: d.issuer.number })}</span>}
+            {d.issued_externally?.number && <span>{t('admin.invoices.externalNumber', { number: d.issued_externally.number })}</span>}
+            {d.internal_reference && <span class="text-gray-500">{t('admin.invoices.internalReference', { ref: d.internal_reference })}</span>}
+            {state === 'issued' && d.issuer?.late && <span class="text-gray-500">{t('admin.invoices.issuedLate')}</span>}
+            {state === 'issue_failed' && d.issuer?.error && <span class="text-red-700">{d.issuer.error}</span>}
+            {state === 'issue_failed' && d.issuer?.retryable && (
+              <span class="invoice-retry text-amber-700">
+                {d.issuer.next_attempt_at
+                  ? t('admin.invoices.retryAt', { at: d.issuer.next_attempt_at.slice(0, 16).replace('T', ' ') + ' UTC', n: (d.issuer.attempts ?? 1) + 1, max: MAX_AUTO_ISSUE_ATTEMPTS })
+                  : t('admin.invoices.retryExhausted')}
+              </span>
+            )}
+            {state === 'final' && d.issuer?.status === 'declined' && (
+              <span class="invoice-declined text-gray-500">
+                {t('admin.invoices.declined', { reasons: (d.issuer.declined ?? []).map((x) => (x.id ? `${x.id}: ${x.reason}` : x.reason)).join('; ') })}
+              </span>
+            )}
+            {d.kind === 'invoice' && d.vat_complete === false && <span class="text-amber-700">{t('admin.invoices.vatIncomplete')}</span>}
+            <a class="invoice-pdf text-blue-600 hover:underline" href={`/api/invoice-records/${encodeURIComponent(d.id)}/pdf`} target="_blank" rel="noopener">{t('admin.invoices.pdf')}</a>
+            {canWrite && state === 'draft' && (
+              <>
+                <button type="button" class="invoice-action underline text-blue-700" data-action="finalise" data-record={d.id} data-confirm={t('admin.invoices.finaliseConfirm')}>{t('admin.invoices.finalise')}</button>
+                <button type="button" class="invoice-action underline text-gray-500" data-action="cancel" data-record={d.id}>{t('admin.invoices.cancel')}</button>
+              </>
+            )}
+            {canWrite && (state === 'final' || state === 'issue_failed' || (state === 'issuing' && Date.now() - Date.parse(d.issuer?.attempted_at ?? '') > ISSUE_STALE_MS)) && (
+              <button type="button" class="invoice-action underline text-gray-600" data-action="issued_externally" data-record={d.id} data-prompt={t('admin.invoices.markExternalPrompt')}>{t('admin.invoices.markExternal')}</button>
+            )}
+            {canWrite && (state === 'issue_failed' || (state === 'final' && d.issuer?.status === 'declined')) && (
+              <button type="button" class="invoice-action underline text-red-700" data-action="issue" data-record={d.id}>{t('admin.invoices.retry')}</button>
+            )}
+            {canWrite && d.kind === 'invoice' && d.status === 'final' && activeInvoice(docs)?.id === d.id && (
+              <button type="button" class="invoice-action underline text-purple-700" data-action="credit" data-record={d.id} data-confirm={t('admin.invoices.creditConfirm')}>{t('admin.invoices.credit')}</button>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  )}
+  {docs.length > 0 && (
+    <p class="text-xs text-gray-400 mt-1">
+      {context.issuer ? t('admin.invoices.issuerInUse', { issuer: context.issuer }) : (context.problem ?? t('admin.invoices.notTaxDocument'))}
+    </p>
+  )}
+</div>
+
+<script>
+  // @ts-nocheck
+  import { api } from '../../lib/apiClient';
+  // Dispatch on the data-action VALUE (the API's verb), never a translated label.
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest?.('.invoice-action');
+    if (!btn) return;
+    const box = btn.closest('.invoice-records');
+    if (btn.dataset.confirm && !confirm(btn.dataset.confirm)) return;
+    const body = { action: btn.dataset.action };
+    if (btn.dataset.record) body.record_id = btn.dataset.record;
+    if (btn.dataset.finalise) body.finalise = btn.dataset.finalise === 'true';
+    if (btn.dataset.prompt) {
+      const number = prompt(btn.dataset.prompt, '');
+      if (number === null) return;
+      if (number.trim()) body.number = number.trim();
+    }
+    btn.disabled = true;
+    const res = await api.post(`/api/orders/${encodeURIComponent(box.dataset.order)}/invoice-records`, body);
+    if (res.ok) location.reload();
+    else {
+      alert(res.error || window.t('admin.invoices.failed'));
+      btn.disabled = false;
+    }
+  });
+</script>

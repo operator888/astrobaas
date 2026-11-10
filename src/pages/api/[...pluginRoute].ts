@@ -4,6 +4,7 @@ import { getPluginSettings } from '../../lib/plugin-platform/settings';
 import { LocalDB } from '../../lib/localdb';
 import { ensurePluginsBootstrapped } from '../../plugins';
 import { resolvePluginRoute, pluginRouteExistsAtPath } from '../../lib/plugin-platform/routes';
+import { requestClient } from '../../lib/client-address';
 
 /**
  * Dispatch to a plugin-owned API route.
@@ -95,6 +96,8 @@ async function dispatch(context: Parameters<APIRoute>[0]): Promise<Response> {
       // Namespaced to the plugin that OWNS the route — see PluginRouteContext.
       store: createPluginStore(route.pluginId, LocalDB),
       settings: () => getPluginSettings(route.pluginId),
+      // Resolved once by the middleware; X-Client-* only count for an API key.
+      client: requestClient(locals),
     });
     if (!(res instanceof Response)) {
       console.error(

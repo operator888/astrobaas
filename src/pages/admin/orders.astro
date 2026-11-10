@@ -1,5 +1,7 @@
 ---
 import AdminLayout from '../../layouts/AdminLayout.astro';
+import InvoiceRecords from '../../components/admin/InvoiceRecords.astro';
+import { invoiceAdminContext } from '../../lib/commerce/invoice-records';
 import { summarisePrescription } from '../../core/models';
 import { LocalDB } from '../../lib/localdb';
 import { ORDER_STATUSES } from '../../lib/commerce-service';
@@ -8,7 +10,18 @@ import { getProvider } from '../../lib/payments/registry';
 import { canOpenAdminPage } from '../../lib/admin-access';
 import { canWriteCommerce } from '../../lib/auth';
 import { formatMoney } from '../../lib/money-format';
+import { touchSummary } from '../../lib/commerce/attribution';
 import { formatAddressOneLine, addressesEqual } from '../../lib/commerce/address';
+import { lineAddonsForDisplay } from '../../lib/commerce/line-addons-display';
+import {
+  countOrderTags, filterOrdersByTag, orderTagKey, orderTagsOf, orderTagColor,
+  ORDER_TAG_MAX_PER_ORDER, ORDER_TAG_MAX_LENGTH, type OrderTagColor,
+} from '../../lib/commerce/order-tags';
+import {
+  entitlementState, fileDownloadCount, isDownloadableProduct, orderGrantsDownloads,
+  type EntitlementState,
+} from '../../lib/commerce/download-entitlements';
+import type { Product } from '../../core/models';
 
 await LocalDB.init();
 const user = Astro.locals.user;
@@ -31,15 +44,63 @@ if (!canOpenAdminPage('/admin/orders', user?.role)) {
 const canWrite = canWriteCommerce(user?.role);
 const canRefund = user?.role === 'admin';
 const t = Astro.locals.t;
+// Which invoice issuer is in use, asked once for the whole list.
+const invoiceContext = await invoiceAdminContext();
 
-const orders = (await LocalDB.getOrders()).sort((a, b) => b.created_at.localeCompare(a.created_at));
+const allOrders = (await LocalDB.getOrders()).sort((a, b) => b.created_at.localeCompare(a.created_at));
+// `?tag=` narrows the LIST only. The three figures above it stay the shop's
+// totals: "open orders: 2" under a tag filter would read as the shop having two.
+const tagFilter = Astro.url.searchParams.get('tag');
+const orders = tagFilter ? filterOrdersByTag(allOrders, tagFilter) : allOrders;
+const tagCounts = countOrderTags(allOrders);
+// Which products sell files — read once, so a row can tell "no downloads yet"
+// (an order that predates the feature) from "nothing to download".
+const downloadableIds = new Set(
+  ((await LocalDB.getProducts()) as Product[]).filter((p) => isDownloadableProduct(p)).map((p) => p.id),
+);
+const hasDownloadLines = (o: (typeof allOrders)[number]) =>
+  (o.items ?? []).some((i) => !!i.product_id && downloadableIds.has(i.product_id));
+const dlStateClass: Record<EntitlementState, string> = {
+  active: 'bg-green-100 text-green-800',
+  expired: 'bg-gray-200 text-gray-700',
+  exhausted: 'bg-amber-100 text-amber-800',
+  revoked: 'bg-red-100 text-red-800',
+  inactive: 'bg-gray-100 text-gray-600',
+};
+const dlReasonLabel: Record<string, string> = {
+  refunded: t('admin.orders.downloadsReasonRefunded'),
+  cancelled: t('admin.orders.downloadsReasonCancelled'),
+  staff: t('admin.orders.downloadsReasonStaff'),
+  erased: t('admin.orders.downloadsReasonErased'),
+};
+const dlStateLabel: Record<EntitlementState, string> = {
+  active: t('admin.orders.downloadsStateActive'),
+  expired: t('admin.orders.downloadsStateExpired'),
+  exhausted: t('admin.orders.downloadsStateExhausted'),
+  revoked: t('admin.orders.downloadsStateRevoked'),
+  inactive: t('admin.orders.downloadsStateInactive'),
+};
+// Classes are spelled out so Tailwind sees them; the SERVER picks the colour
+// name from the tag (orderTagColor), so there is no colour input to abuse.
+const tagClass: Record<OrderTagColor, string> = {
+  red: 'bg-red-100 text-red-800',
+  orange: 'bg-orange-100 text-orange-800',
+  amber: 'bg-amber-100 text-amber-800',
+  green: 'bg-green-100 text-green-800',
+  teal: 'bg-teal-100 text-teal-800',
+  blue: 'bg-blue-100 text-blue-800',
+  indigo: 'bg-indigo-100 text-indigo-800',
+  purple: 'bg-purple-100 text-purple-800',
+  pink: 'bg-pink-100 text-pink-800',
+  gray: 'bg-gray-200 text-gray-700',
+};
 // The hardcoded el-GR here was one of five, and disagreed with the sale
 // email's formatMoney — the screen and the receipt stated the same total two
 // ways. The locale now follows the staff member reading it.
 const adminLocale = Astro.locals.uiLocale ?? undefined;
 const money = (cents: number, cur = 'EUR') => formatMoney(cents, { currency: cur, locale: adminLocale });
-const open = orders.filter((o) => o.status === 'pending' || o.status === 'processing').length;
-const revenue = orders.filter((o) => o.status === 'completed').reduce((n, o) => n + o.total_cents, 0);
+const open = allOrders.filter((o) => o.status === 'pending' || o.status === 'processing').length;
+const revenue = allOrders.filter((o) => o.status === 'completed').reduce((n, o) => n + o.total_cents, 0);
 // Payment status is tracked separately from fulfilment: "processing" says we
 // are working on it, "paid" says the money arrived. Showing only the first is
 // how orders get shipped unpaid, so both appear on every row.
@@ -87,6 +148,48 @@ const statusLabel: Record<string, string> = {
   failed: t('admin.orders.statusFailed'),
 };
 
+// Timeline (order-timeline.ts). Labels are looked up by the event CODE the API
+// returns; spelled out with literal keys so the i18n guard sees every one. A
+// code with no label (a plugin's `bulk.*`) falls back to the code itself.
+const timelineLabels: Record<string, string> = {
+  'order.placed': t('admin.orders.tlOrderPlaced'),
+  'order.abandoned': t('admin.orders.tlOrderAbandoned'),
+  'order.hold_expired': t('admin.orders.tlOrderHoldExpired'),
+  'status.changed': t('admin.orders.tlStatusChanged'),
+  'payment.started': t('admin.orders.tlPaymentStarted'),
+  'payment.captured': t('admin.orders.tlPaymentCaptured'),
+  'payment.failed': t('admin.orders.tlPaymentFailed'),
+  'payment.declined': t('admin.orders.tlPaymentDeclined'),
+  'payment.refunded': t('admin.orders.tlPaymentRefunded'),
+  'payment.needs_refund': t('admin.orders.tlPaymentNeedsRefund'),
+  'refund.issued': t('admin.orders.tlRefundIssued'),
+  'shipment.shipped': t('admin.orders.tlShipmentShipped'),
+  'shipment.tracking_updated': t('admin.orders.tlTrackingUpdated'),
+  'note.staff_updated': t('admin.orders.tlNoteStaffUpdated'),
+  'note.staff_cleared': t('admin.orders.tlNoteStaffCleared'),
+  'note.customer_edited': t('admin.orders.tlNoteCustomerEdited'),
+  'note.comment': t('admin.orders.tlNoteComment'),
+  'tags.changed': t('admin.orders.tlTagsChanged'),
+  'tax.override': t('admin.orders.tlTaxOverride'),
+  'email.recovery_sent': t('admin.orders.tlRecoverySent'),
+  'consent.terms_accepted': t('admin.orders.tlTermsAccepted'),
+  'consent.privacy_accepted': t('admin.orders.tlPrivacyAccepted'),
+};
+const timelineUi = {
+  actors: {
+    system: t('admin.orders.tlActorSystem'),
+    provider: t('admin.orders.tlActorProvider'),
+    customer: t('admin.orders.tlActorCustomer'),
+  },
+  loading: t('admin.orders.tlLoading'),
+  empty: t('admin.orders.tlEmpty'),
+  failed: t('admin.orders.tlFailed'),
+  more: t('admin.orders.tlMore'),
+  by: t('admin.orders.tlBy'),
+  declinedTimes: t('admin.orders.tlDeclinedTimes'),
+  commentFailed: t('admin.orders.tlCommentFailed'),
+};
+
 const statusColor: Record<string, string> = {
   pending: 'bg-amber-100 text-amber-800',
   processing: 'bg-blue-100 text-blue-800',
@@ -99,7 +202,7 @@ const statusColor: Record<string, string> = {
 ---
 
 <AdminLayout title={t('admin.orders.title')}>
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8" id="orders-root" data-tl-labels={JSON.stringify(timelineLabels)} data-tl-ui={JSON.stringify(timelineUi)} data-status-labels={JSON.stringify(statusLabel)} data-locale={adminLocale ?? ''}>
     <div class="mb-8">
       <h1 class="text-3xl font-bold text-gray-900">{t('admin.orders.title')}</h1>
       <p class="text-gray-600 mt-2">{t('admin.orders.subtitle')}</p>
@@ -107,7 +210,7 @@ const statusColor: Record<string, string> = {
 
     <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
       <div class="bg-white rounded-lg border border-gray-200 p-6">
-        <div class="text-2xl font-bold text-gray-900">{orders.length}</div>
+        <div class="text-2xl font-bold text-gray-900">{allOrders.length}</div>
         <div class="text-sm text-gray-600">{t('admin.orders.statTotal')}</div>
       </div>
       <div class="bg-white rounded-lg border border-gray-200 p-6">
@@ -120,9 +223,53 @@ const statusColor: Record<string, string> = {
       </div>
     </div>
 
+    {(tagCounts.length > 0 || tagFilter) && (
+      <div id="order-tags-root" class="mb-4" data-palette={JSON.stringify(tagClass)} data-max={ORDER_TAG_MAX_PER_ORDER}>
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-sm text-gray-600">{t('admin.orders.tagsFilter')}</span>
+          <a href="/admin/orders"
+            class:list={['px-2 py-0.5 rounded-full text-xs border', !tagFilter ? 'bg-gray-800 text-white border-gray-800' : 'border-gray-300 text-gray-700 hover:bg-gray-50']}>
+            {t('admin.orders.tagsAll')}: {allOrders.length}
+          </a>
+          {tagCounts.map((c) => (
+            <a href={`/admin/orders?tag=${encodeURIComponent(c.tag)}`}
+              class:list={['px-2 py-0.5 rounded-full text-xs', tagClass[c.color],
+                tagFilter && orderTagKey(c.tag) === orderTagKey(tagFilter.trim()) ? 'ring-2 ring-offset-1 ring-gray-700' : '']}>
+              {c.tag}: {c.count}
+            </a>
+          ))}
+        </div>
+        {tagFilter && (
+          <p class="text-sm text-gray-600 mt-2">
+            {t('admin.orders.tagsShowing', { tag: tagFilter })} ·
+            <a href="/admin/orders" class="text-blue-600 hover:underline">{t('admin.orders.tagsClear')}</a>
+          </p>
+        )}
+        <p class="text-xs text-gray-400 mt-1">{t('admin.orders.tagsPrivate')}</p>
+        {canWrite && tagCounts.length > 0 && (
+          <details class="mt-2 text-sm">
+            <summary class="cursor-pointer text-gray-600">{t('admin.orders.tagsManage')}</summary>
+            <ul class="mt-2 space-y-1">
+              {tagCounts.map((c) => (
+                <li class="flex items-center gap-2">
+                  <span class={`px-2 py-0.5 rounded-full text-xs ${tagClass[c.color]}`}>{c.tag}</span>
+                  <span class="text-xs text-gray-500">{c.count}</span>
+                  <button type="button" class="tag-rename text-xs text-blue-700 underline" data-tag={c.tag} data-count={c.count}>{t('admin.orders.tagRename')}</button>
+                  <button type="button" class="tag-delete text-xs text-red-700 underline" data-tag={c.tag} data-count={c.count}>{t('admin.orders.tagDelete')}</button>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
+    )}
+    <datalist id="order-tag-suggestions">
+      {tagCounts.map((c) => <option value={c.tag}>{c.count}</option>)}
+    </datalist>
+
     <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
       {orders.length === 0 ? (
-        <p class="p-6 text-sm text-gray-500">{t('admin.orders.empty')}</p>
+        <p class="p-6 text-sm text-gray-500">{tagFilter ? t('admin.orders.tagsNone') : t('admin.orders.empty')}</p>
       ) : (
         <ul class="divide-y divide-gray-200">
           {orders.map((o) => (
@@ -221,6 +368,12 @@ const statusColor: Record<string, string> = {
                     {o.items.map((i, lineIndex) => (
                       <li>
                         {i.qty} × {i.name} — {money(i.total_cents, o.currency)}
+                        {/* Priced add-ons, frozen at purchase and already
+                            inside the line total. The same reader as the
+                            receipt, so staff and customer see one list. */}
+                        {lineAddonsForDisplay(i, (c) => money(c, o.currency)).map((a) => (
+                          <span class="order-line-addon block ml-5 mt-0.5 text-xs text-gray-500">+ {a.label} — {a.amount}</span>
+                        ))}
                         {i.prescription && (
                           <span class="block ml-5 mt-0.5 font-mono text-xs text-indigo-700">
                             {t('admin.orders.prescription')} {summarisePrescription(i.prescription)}
@@ -246,6 +399,107 @@ const statusColor: Record<string, string> = {
                     ))}
                   </ul>
                   {o.note && <div class="text-xs text-gray-400 mt-2">{t('admin.orders.note', { note: o.note })}</div>}
+                  {/* What the buyer ANSWERED at checkout. Nothing at all when the
+                      order has no record (older order, import, staff-placed):
+                      absent is "unknown", and printing "not accepted" there
+                      would assert something nobody observed. */}
+                  {(o.terms_accepted !== undefined || o.privacy_accepted === true) && (
+                    <div class="text-xs text-gray-500 mt-1">
+                      {o.terms_accepted === true && (
+                        <span>{t('admin.orders.termsAccepted', { date: o.terms_accepted_at ? new Date(o.terms_accepted_at).toLocaleString() : '—' })}</span>
+                      )}
+                      {o.terms_accepted === false && <span>{t('admin.orders.termsDeclined')}</span>}
+                      {o.privacy_accepted === true && (
+                        <span>{o.terms_accepted !== undefined ? ' · ' : ''}{t('admin.orders.privacyAccepted')}</span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Campaign attribution. Present only when the customer granted
+                      marketing consent and arrived through a campaign link;
+                      nothing is printed otherwise, because "no campaign" and
+                      "no consent" cannot be told apart and neither is a fact
+                      about the order. Text only, escaped by the template. */}
+                  {o.attribution && (
+                    <div class="order-attribution text-xs text-gray-600 mt-2" data-attribution={o.id}>
+                      <div class="font-medium text-gray-700">{t('admin.orders.attribution')}</div>
+                      <dl class="mt-0.5 space-y-0.5">
+                        {(['first', 'last'] as const).map((which) => {
+                          const s = touchSummary(o.attribution![which]);
+                          return (
+                            <div class="flex flex-wrap gap-x-2">
+                              <dt class="text-gray-500">{t(which === 'first' ? 'admin.orders.attributionFirst' : 'admin.orders.attributionLast')}</dt>
+                              <dd class="min-w-0 break-all">
+                                <span class="text-gray-800">{s.headline}</span>
+                                <span class="text-gray-400"> · {new Date(s.at).toLocaleString()}</span>
+                                {s.details.length > 0 && <span class="text-gray-500"> · {s.details.join(' · ')}</span>}
+                              </dd>
+                            </div>
+                          );
+                        })}
+                      </dl>
+                    </div>
+                  )}
+
+                  {/* Staff tags. Text only — `{tag}` is escaped by the template and the
+                      client script below builds badges with textContent. */}
+                  <div class="order-tags mt-3 flex flex-wrap items-center gap-1" data-order={o.id} data-number={o.number}>
+                    {orderTagsOf(o).map((tag) => (
+                      <span class={`order-tag inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs ${tagClass[orderTagColor(tag)]}`}>
+                        <a href={`/admin/orders?tag=${encodeURIComponent(tag)}`} class="hover:underline">{tag}</a>
+                        {canWrite && (
+                          <button type="button" class="tag-remove leading-none opacity-60 hover:opacity-100"
+                            data-tag={tag} aria-label={t('admin.orders.tagRemove', { tag })}>×</button>
+                        )}
+                      </span>
+                    ))}
+                    {canWrite && (
+                      <>
+                        <input
+                          class="tag-input w-36 px-2 py-0.5 text-xs border border-gray-300 rounded"
+                          list="order-tag-suggestions"
+                          maxlength={ORDER_TAG_MAX_LENGTH}
+                          placeholder={t('admin.orders.tagInputPlaceholder')}
+                          aria-label={t('admin.orders.tagInputLabel', { number: String(o.number) })} />
+                        <button type="button" class="tag-add text-xs px-2 py-0.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50">
+                          {t('admin.orders.tagAdd')}
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  {/* The order's timeline: loaded when it is opened, so a list of
+                      fifty orders makes no timeline requests until someone asks.
+                      Built with textContent client-side (notes are free text). */}
+                  <details class="order-timeline mt-3" data-order={o.id} data-number={o.number} data-currency={o.currency}>
+                    <summary class="cursor-pointer text-xs text-gray-600">{t('admin.orders.tlTitle')}</summary>
+                    <div class="mt-2 border border-gray-200 rounded-lg p-3 bg-gray-50">
+                      <div class="flex flex-wrap items-center gap-2 mb-2">
+                        <label class="text-xs text-gray-600" for={`tl-filter-${o.id}`}>{t('admin.orders.tlFilter')}</label>
+                        <select id={`tl-filter-${o.id}`} class="tl-filter text-xs border border-gray-300 rounded px-1 py-0.5">
+                          <option value="">{t('admin.orders.tlFilterAll')}</option>
+                          <option value="status">{t('admin.orders.tlFilterStatus')}</option>
+                          <option value="payments">{t('admin.orders.tlFilterPayments')}</option>
+                          <option value="shipments">{t('admin.orders.tlFilterShipments')}</option>
+                          <option value="notes">{t('admin.orders.tlFilterNotes')}</option>
+                          <option value="other">{t('admin.orders.tlFilterOther')}</option>
+                        </select>
+                        <a class="tl-csv text-xs text-blue-700 underline"
+                          href={`/api/orders/${encodeURIComponent(o.id)}/timeline?format=csv`}>{t('admin.orders.tlExport')}</a>
+                      </div>
+                      <ol class="tl-list space-y-2 text-sm" aria-live="polite"></ol>
+                      <p class="tl-status text-xs text-gray-500 mt-1"></p>
+                      <button type="button" class="tl-more hidden text-xs text-blue-700 underline mt-1">{t('admin.orders.tlMore')}</button>
+                      {canWrite && (
+                        <div class="mt-2 flex flex-wrap items-start gap-2">
+                          <textarea class="tl-comment flex-1 min-w-[12rem] px-2 py-1 text-xs border border-gray-300 rounded" rows="2"
+                            maxlength="1000" placeholder={t('admin.orders.tlCommentPlaceholder')}
+                            aria-label={t('admin.orders.tlCommentLabel', { number: String(o.number) })}></textarea>
+                          <button type="button" class="tl-add text-xs px-2 py-1 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-100">{t('admin.orders.tlCommentAdd')}</button>
+                        </div>
+                      )}
+                    </div>
+                  </details>
 
                   {/* Fulfilment. Beside the status, never inside it: dispatch is
                       not a payment state, and an order can be processing and
@@ -274,6 +528,8 @@ const statusColor: Record<string, string> = {
                     </div>
                   )}
 
+                  <InvoiceRecords order={o} canWrite={canRefund} money={money} context={invoiceContext} />
+
                   {/* The SHOP's note. `note` above is the customer's words and is
                       cleared by an erasure; this is the shop's own record. */}
                   {canWrite && (
@@ -282,6 +538,87 @@ const statusColor: Record<string, string> = {
                       data-id={o.id}
                       rows="2"
                       placeholder={t('admin.orders.staffNotePlaceholder')}>{o.staff_note ?? ''}</textarea>
+                  )}
+
+                  {/* Download entitlements: what the buyer may download, how
+                      often they have, and from where. Staff only — the IP log
+                      is personal data and is never shown to the buyer. */}
+                  {((o.entitlements?.length ?? 0) > 0 || hasDownloadLines(o)) && (
+                    <section class="order-downloads mt-3 rounded-lg border border-gray-200 p-3 text-xs" data-order={o.id}
+                      aria-label={`${t('admin.orders.downloadsTitle')} ${o.number}`}>
+                      <h3 class="text-sm font-semibold text-gray-800 mb-2">{t('admin.orders.downloadsTitle')}</h3>
+                      {(o.entitlements?.length ?? 0) === 0 && (
+                        <div class="flex flex-wrap items-center gap-2">
+                          <span class="text-gray-500">{t('admin.orders.downloadsNone')}</span>
+                          {canWrite && orderGrantsDownloads(o) && (
+                            <button type="button" class="dl-action px-2 py-0.5 rounded border border-blue-300 text-blue-700 hover:bg-blue-50"
+                              data-action="grant">{t('admin.orders.downloadsGrant')}</button>
+                          )}
+                        </div>
+                      )}
+                      <ul class="space-y-3">
+                        {(o.entitlements ?? []).map((e) => {
+                          const state = entitlementState(e, o);
+                          return (
+                            <li class="entitlement" data-entitlement={e.id}>
+                              <div class="flex flex-wrap items-center gap-2">
+                                <span class="font-medium text-gray-900">{e.name}</span>
+                                <span class={`px-2 py-0.5 rounded-full ${dlStateClass[state]}`}>{dlStateLabel[state]}</span>
+                                <span class="text-gray-600">
+                                  {e.download_limit === null
+                                    ? t('admin.orders.downloadsCountUnlimited', { count: e.download_count })
+                                    : t('admin.orders.downloadsCount', { count: e.download_count, limit: e.download_limit })}
+                                </span>
+                                <span class="text-gray-500">
+                                  {e.expires_at
+                                    ? t('admin.orders.downloadsExpires', { date: new Date(e.expires_at).toLocaleDateString(adminLocale) })
+                                    : t('admin.orders.downloadsNoExpiry')}
+                                </span>
+                                {e.revoked_reason && (
+                                  <span class="text-red-700">{t('admin.orders.downloadsRevokedReason', { reason: dlReasonLabel[e.revoked_reason] ?? e.revoked_reason })}</span>
+                                )}
+                                {canWrite && (
+                                  <span class="flex gap-1">
+                                    {e.revoked_at ? (
+                                      <button type="button" class="dl-action px-2 py-0.5 rounded border border-gray-300 hover:bg-gray-50"
+                                        data-action="restore" data-entitlement={e.id}>{t('admin.orders.downloadsRestore')}</button>
+                                    ) : (
+                                      <button type="button" class="dl-action px-2 py-0.5 rounded border border-red-300 text-red-700 hover:bg-red-50"
+                                        data-action="revoke" data-entitlement={e.id}>{t('admin.orders.downloadsRevoke')}</button>
+                                    )}
+                                    {e.download_count > 0 && (
+                                      <button type="button" class="dl-action px-2 py-0.5 rounded border border-gray-300 hover:bg-gray-50"
+                                        data-action="reset" data-entitlement={e.id}>{t('admin.orders.downloadsReset')}</button>
+                                    )}
+                                  </span>
+                                )}
+                              </div>
+                              <p class="mt-1 text-gray-500">
+                                {e.files.map((f, i) => `${f.name} (${fileDownloadCount(e, i)}${e.download_limit === null ? '' : `/${e.download_limit}`})`).join(' · ')}
+                              </p>
+                              <details class="mt-1">
+                                <summary class="cursor-pointer text-gray-600">{t('admin.orders.downloadsLogTitle')} ({e.log?.length ?? 0})</summary>
+                                {(e.log?.length ?? 0) === 0 ? (
+                                  <p class="mt-1 text-gray-500">{t('admin.orders.downloadsLogEmpty')}</p>
+                                ) : (
+                                  <table class="mt-1 w-full">
+                                    <tbody>
+                                      {(e.log ?? []).slice().reverse().map((entry) => (
+                                        <tr class="border-t border-gray-100">
+                                          <td class="py-0.5 pr-2 tabular-nums">{new Date(entry.at).toLocaleString(adminLocale)}</td>
+                                          <td class="py-0.5 pr-2">{entry.file}</td>
+                                          <td class="py-0.5 font-mono text-gray-500">{entry.ip ?? '—'}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                )}
+                              </details>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </section>
                   )}
                 </div>
                 <div class="flex flex-col items-end gap-2 shrink-0">
@@ -346,6 +683,25 @@ const statusColor: Record<string, string> = {
     }
   });
 
+  // Download entitlements: revoke, restore, reset the count, or grant what a
+  // paid order is owed. The server decides; the page reloads to show it.
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.dl-action');
+    if (!btn) return;
+    const box = btn.closest('.order-downloads');
+    const action = btn.dataset.action;
+    if (action === 'revoke' && !confirm(window.t('admin.orders.downloadsRevokeConfirm'))) return;
+    if (action === 'reset' && !confirm(window.t('admin.orders.downloadsResetConfirm'))) return;
+    btn.disabled = true;
+    const res = await api.post(`/api/orders/${encodeURIComponent(box.dataset.order)}/downloads`,
+      { action, ...(btn.dataset.entitlement ? { entitlement_id: btn.dataset.entitlement } : {}) });
+    if (res.ok) location.reload();
+    else {
+      alert(res.error || window.t('admin.orders.downloadsFailed'));
+      btn.disabled = false;
+    }
+  });
+
   // Refunds move money out of the business, so the flow is deliberately
   // deliberate: the operator types the amount, sees exactly what will be sent
   // and to whom, and confirms. No one-click "refund everything".
@@ -359,6 +715,220 @@ const statusColor: Record<string, string> = {
     });
     if (res.ok) box.defaultValue = box.value;
     else alert(res.error || window.t('admin.orders.staffNoteFailed'));
+  });
+
+  // ---- Staff tags. Everything below builds nodes with textContent: a tag is
+  // free text somebody typed, so it is never concatenated into markup.
+  const tagRoot = document.getElementById('order-tags-root');
+  const palette = (() => { try { return JSON.parse(tagRoot?.dataset.palette ?? '{}'); } catch { return {}; } })();
+  const COLOR_FALLBACK = 'bg-gray-200 text-gray-700';
+
+  function renderTags(box, tags) {
+    box.querySelectorAll('.order-tag').forEach((n) => n.remove());
+    const anchor = box.querySelector('.tag-input') ?? null;
+    for (const item of tags) {
+      const badge = document.createElement('span');
+      badge.className = `order-tag inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs ${palette[item.color] ?? COLOR_FALLBACK}`;
+      const link = document.createElement('a');
+      link.className = 'hover:underline';
+      link.href = `/admin/orders?tag=${encodeURIComponent(item.tag)}`;
+      link.textContent = item.tag;
+      badge.appendChild(link);
+      if (anchor) {
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.className = 'tag-remove leading-none opacity-60 hover:opacity-100';
+        x.dataset.tag = item.tag;
+        x.setAttribute('aria-label', window.t('admin.orders.tagRemove', { tag: item.tag }));
+        x.textContent = '×';
+        badge.appendChild(x);
+      }
+      box.insertBefore(badge, anchor);
+    }
+  }
+
+  async function addTag(box) {
+    const input = box.querySelector('.tag-input');
+    const value = input.value.trim();
+    if (!value) return;
+    const res = await api.post(`/api/orders/${encodeURIComponent(box.dataset.order)}/tags`, { tag: value });
+    if (!res.ok) {
+      // The server's own sentence for the limit / bad characters; the
+      // translated one only when it sent nothing.
+      alert(res.error || window.t('admin.orders.tagFailed'));
+      return;
+    }
+    input.value = '';
+    renderTags(box, res.data.tags);
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const input = e.target.closest?.('.tag-input');
+    if (!input) return;
+    e.preventDefault();
+    addTag(input.closest('.order-tags'));
+  });
+
+  document.addEventListener('click', async (e) => {
+    const addBtn = e.target.closest('.tag-add');
+    if (addBtn) { await addTag(addBtn.closest('.order-tags')); return; }
+
+    const rm = e.target.closest('.tag-remove');
+    if (rm) {
+      const box = rm.closest('.order-tags');
+      const res = await api.delete(
+        `/api/orders/${encodeURIComponent(box.dataset.order)}/tags?tag=${encodeURIComponent(rm.dataset.tag)}`,
+      );
+      if (res.ok) renderTags(box, res.data.tags);
+      else alert(res.error || window.t('admin.orders.tagFailed'));
+      return;
+    }
+
+    const rename = e.target.closest('.tag-rename');
+    if (rename) {
+      const to = prompt(window.t('admin.orders.tagRenamePrompt', { tag: rename.dataset.tag, count: rename.dataset.count }), rename.dataset.tag);
+      if (to === null || !to.trim()) return;
+      const res = await api.patch('/api/orders/tags', { from: rename.dataset.tag, to });
+      if (!res.ok) return alert(res.error || window.t('admin.orders.tagRenameFailed'));
+      if (res.data?.failed) alert(window.t('admin.orders.tagsPartial', { failed: res.data.failed }));
+      location.reload();
+      return;
+    }
+
+    const del = e.target.closest('.tag-delete');
+    if (del) {
+      if (!confirm(window.t('admin.orders.tagDeleteConfirm', { tag: del.dataset.tag, count: del.dataset.count }))) return;
+      const res = await api.delete(`/api/orders/tags?tag=${encodeURIComponent(del.dataset.tag)}`);
+      if (!res.ok) return alert(res.error || window.t('admin.orders.tagDeleteFailed'));
+      if (res.data?.failed) alert(window.t('admin.orders.tagsPartial', { failed: res.data.failed }));
+      location.reload();
+      return;
+    }
+  });
+
+
+  // ---- Order timeline. Loaded when a row's <details> is opened.
+  const ordersRoot = document.getElementById('orders-root');
+  const parseJson = (v) => { try { return JSON.parse(v ?? '{}'); } catch { return {}; } };
+  const TL_LABELS = parseJson(ordersRoot?.dataset.tlLabels);
+  const TL_UI = parseJson(ordersRoot?.dataset.tlUi);
+  const TL_STATUS = parseJson(ordersRoot?.dataset.statusLabels);
+  const TL_LOCALE = ordersRoot?.dataset.locale || undefined;
+  const TL_DOT = {
+    status: 'bg-blue-500', payments: 'bg-green-500', shipments: 'bg-orange-500', notes: 'bg-gray-400', other: 'bg-indigo-400',
+  };
+  const TL_PAGE = 20;
+
+  function tlMoney(cents, currency, negative) {
+    let text;
+    try {
+      const f = new Intl.NumberFormat(TL_LOCALE, { style: 'currency', currency: currency || 'EUR' });
+      const digits = f.resolvedOptions().maximumFractionDigits;
+      text = f.format(cents / 10 ** digits);
+    } catch { text = (cents / 100).toFixed(2); }
+    return negative ? `−${text}` : text;
+  }
+
+  function tlWho(item) {
+    if (item.actor_kind === 'staff') return item.actor_name || '';
+    if (item.actor_kind === 'unknown') return '';
+    return TL_UI.actors?.[item.actor_kind] || '';
+  }
+
+  function tlRow(item, currency) {
+    const li = document.createElement('li');
+    li.className = 'flex gap-2';
+    const dot = document.createElement('span');
+    dot.className = `mt-1.5 h-2 w-2 shrink-0 rounded-full ${TL_DOT[item.category] ?? 'bg-gray-400'}`;
+    li.appendChild(dot);
+    const body = document.createElement('div');
+    body.className = 'min-w-0 break-words';
+    const head = document.createElement('div');
+    const title = document.createElement('span');
+    title.className = 'font-medium text-gray-900';
+    let label = TL_LABELS[item.event] ?? item.event;
+    if (item.event === 'status.changed' && item.from && item.to) {
+      label = `${label}: ${TL_STATUS[item.from] ?? item.from} → ${TL_STATUS[item.to] ?? item.to}`;
+    }
+    title.textContent = label;
+    head.appendChild(title);
+    if (item.amount_cents !== undefined) {
+      const refund = item.event === 'refund.issued' || item.event === 'payment.refunded';
+      const amt = document.createElement('span');
+      amt.className = `ml-2 ${refund ? 'text-purple-700' : 'text-green-700'}`;
+      amt.textContent = tlMoney(item.amount_cents, item.currency || currency, refund);
+      head.appendChild(amt);
+    }
+    body.appendChild(head);
+    const detail = [];
+    if (item.added?.length) detail.push(`+ ${item.added.join(', ')}`);
+    if (item.removed?.length) detail.push(`− ${item.removed.join(', ')}`);
+    if (item.count) detail.push((TL_UI.declinedTimes || '{count}').replace('{count}', String(item.count)));
+    if (item.ref) detail.push(item.ref);
+    if (item.text && item.event !== 'order.placed' && item.event !== 'payment.started') detail.push(item.text);
+    if (detail.length) {
+      const d = document.createElement('div');
+      d.className = 'text-xs text-gray-700 whitespace-pre-line';
+      d.textContent = detail.join(' · ');
+      body.appendChild(d);
+    }
+    const meta = document.createElement('div');
+    meta.className = 'text-xs text-gray-500';
+    const when = new Date(item.at);
+    const who = tlWho(item);
+    meta.textContent = (Number.isNaN(when.getTime()) ? item.at : when.toLocaleString(TL_LOCALE))
+      + (who ? ` · ${(TL_UI.by || '{name}').replace('{name}', who)}` : '');
+    body.appendChild(meta);
+    li.appendChild(body);
+    return li;
+  }
+
+  async function tlLoad(box, reset) {
+    const list = box.querySelector('.tl-list');
+    const status = box.querySelector('.tl-status');
+    const more = box.querySelector('.tl-more');
+    if (reset) { list.replaceChildren(); box.dataset.offset = '0'; }
+    const offset = Number(box.dataset.offset || 0);
+    const filter = box.querySelector('.tl-filter').value;
+    status.textContent = TL_UI.loading || '';
+    const q = new URLSearchParams({ limit: String(TL_PAGE), offset: String(offset) });
+    if (filter) q.set('filter', filter);
+    const res = await api.get(`/api/orders/${encodeURIComponent(box.dataset.order)}/timeline?${q}`);
+    if (!res.ok) { status.textContent = res.error || TL_UI.failed || ''; return; }
+    for (const item of res.data) list.appendChild(tlRow(item, box.dataset.currency));
+    box.dataset.offset = String(offset + res.data.length);
+    status.textContent = list.children.length === 0 ? (TL_UI.empty || '') : '';
+    more.classList.toggle('hidden', !res.meta?.hasMore);
+  }
+
+  document.addEventListener('toggle', (e) => {
+    const box = e.target;
+    if (!(box instanceof HTMLElement) || !box.classList.contains('order-timeline') || !box.open) return;
+    if (box.dataset.loaded) return;
+    box.dataset.loaded = '1';
+    tlLoad(box, true);
+  }, true);
+
+  document.addEventListener('change', (e) => {
+    const f = e.target.closest?.('.tl-filter');
+    if (f) tlLoad(f.closest('.order-timeline'), true);
+  });
+
+  document.addEventListener('click', async (e) => {
+    const more = e.target.closest?.('.tl-more');
+    if (more) { await tlLoad(more.closest('.order-timeline'), false); return; }
+    const add = e.target.closest?.('.tl-add');
+    if (add) {
+      const box = add.closest('.order-timeline');
+      const field = box.querySelector('.tl-comment');
+      const text = field.value.trim();
+      if (!text) return;
+      const res = await api.post(`/api/orders/${encodeURIComponent(box.dataset.order)}/timeline`, { text });
+      if (!res.ok) { alert(res.error || TL_UI.commentFailed || ''); return; }
+      field.value = '';
+      await tlLoad(box, true);
+    }
   });
 
   document.addEventListener('click', async (e) => {

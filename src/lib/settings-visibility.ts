@@ -97,6 +97,12 @@ export const PUBLIC_SETTING_KEYS: ReadonlySet<string> = new Set([
   'public_site_url',
   'order_max_qty_per_product',
   'order_max_items_per_order',
+  // Checkout consent: the storefront renders the box, so it must be able to
+  // ask whether it is required and what it says. The label and the link are
+  // text the merchant already prints beside the box on every checkout.
+  'checkout_terms_required',
+  'checkout_terms_label',
+  'checkout_terms_url',
   // NOTE: withdrawal/trader details are deliberately NOT here. They are public
   // information the Directive requires a trader to publish, but they get a
   // purpose-built endpoint (/api/legal/withdrawal) that returns them in a

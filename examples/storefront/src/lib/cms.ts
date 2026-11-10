@@ -72,10 +72,17 @@ export function productsIn(slug: string) {
 export const allPosts = once(() => cms.posts.listAll({}));
 
 /** A product is on sale when the CMS says so and the sale price is lower. */
-export function priceOf(p: Product): { now: number; was: number | null } {
-  const now = p.price_cents;
-  const was = p.on_sale && p.regular_price_cents && p.regular_price_cents > now ? p.regular_price_cents : null;
-  return { now, was };
+export function priceOf(p: Product): { now: number; was: number | null; from: boolean } {
+  // The CMS's own derived band: a variable product's `price_cents` is only the
+  // fallback its variants inherit, so a card must show the CMS's figure — the
+  // same one `?sort=price_asc` orders by — or the list looks unsorted.
+  // Read through a cast so this page type-checks against an older client.
+  const band = p as Product & { price_from_cents?: number | null; price_to_cents?: number | null };
+  const now = band.price_from_cents ?? p.price_cents;
+  const from = band.price_to_cents != null && band.price_to_cents > now;
+  const was = !from && now === p.price_cents && p.on_sale && p.regular_price_cents && p.regular_price_cents > now
+    ? p.regular_price_cents : null;
+  return { now, was, from };
 }
 
 /**
