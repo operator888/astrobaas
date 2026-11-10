@@ -1,6 +1,6 @@
 ---
 import { runAttention } from '../../lib/admin/attention';
-import { settingsMap } from '../../lib/settings-map';
+import { settingsMap, settingBool } from '../../lib/settings-map';
 import { enabledProviders } from '../../lib/payments/registry';
 import { returnUrlVerdict } from '../../lib/payments/return-url-check';
 import { LATEST_SCHEMA_VERSION } from '../../lib/migrations';
@@ -10,6 +10,9 @@ import { canReadCommerce } from '../../lib/auth';
 import { isCommerceEnabled } from '../../lib/commerce-service';
 import { formatMoney } from '../../lib/money-format';
 import { seedAdminEmail } from '../../lib/seed-data';
+import { productStockStatus } from '../../lib/commerce/stock-status';
+import { REVIEWS_TYPE, reviewStatusCounts, oldestPending, type ReviewRow } from '../../lib/reviews';
+import { REVIEWS_ENABLED_SETTING } from '../../core/builtin-collections';
 
 await LocalDB.init();
 const posts = await LocalDB.getPosts();
@@ -48,7 +51,9 @@ const openOrders = orders.filter((o) => o.status === 'pending' || o.status === '
 const paidRevenueCents = orders
   .filter((o) => (o.payment_status ?? 'unpaid') === 'paid')
   .reduce((sum, o) => sum + (o.total_cents ?? 0), 0);
-const outOfStock = productList.filter((p) => !p.in_stock).length;
+// Derived from the counts (variants included), not the stored `in_stock`. Only
+// "out" is counted here, which does not depend on the low-stock threshold.
+const outOfStock = productList.filter((p) => productStockStatus(p, 0).status === 'out-of-stock').length;
 // The hardcoded el-GR here was one of five, and disagreed with the sale
 // email's formatMoney — the screen and the receipt stated the same total two
 // ways. The locale now follows the staff member reading it.
@@ -154,7 +159,16 @@ const attention = await (async () => {
       LocalDB.getSchemaVersion().catch(() => null),
     ]);
     const settings = settingsMap(settingRows as never);
+    // Reviews waiting for a moderator — one read of the collection, and only
+    // when reviews are on AND this person could act on the card (the same
+    // commerce gate the other shop cards use).
+    const reviewRows = showCommerce && settingBool(settings[REVIEWS_ENABLED_SETTING], false)
+      ? await LocalDB.getCustomEntities(REVIEWS_TYPE).catch(() => []) as ReviewRow[]
+      : [];
     return runAttention({
+      pendingReviews: reviewRows.length
+        ? { count: reviewStatusCounts(reviewRows).pending, oldest: oldestPending(reviewRows) }
+        : undefined,
       settings,
       schema: typeof schemaVersion === 'number'
         ? { current: schemaVersion, latest: LATEST_SCHEMA_VERSION }

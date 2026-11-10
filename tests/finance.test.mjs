@@ -666,8 +666,8 @@ function memoryStore() {
   const routes = def.routes;
   check('plugin: every route lives under /api/plugin/finance/', routes.every((r) => r.path.startsWith('/api/plugin/finance/')));
   check('plugin: only the customer link (PDF, XML, portal, quote answer) and the signed webhook are public', routes.filter((r) => r.access === 'public').map((r) => r.path).sort().join()
-    === ['/api/plugin/finance/inbound/sale', '/api/plugin/finance/public/:id/:token', '/api/plugin/finance/public/:id/:token/respond', '/api/plugin/finance/public/:id/:token/view', '/api/plugin/finance/public/:id/:token/xml'].join());
-  check('plugin: only the signed webhook and the token-bound quote answer skip CSRF', routes.filter((r) => r.csrf === 'exempt').map((r) => r.path).sort().join() === '/api/plugin/finance/inbound/sale,/api/plugin/finance/public/:id/:token/respond');
+    === ['/api/plugin/finance/inbound/invoice', '/api/plugin/finance/inbound/request', '/api/plugin/finance/inbound/sale', '/api/plugin/finance/public/:id/:token', '/api/plugin/finance/public/:id/:token/respond', '/api/plugin/finance/public/:id/:token/view', '/api/plugin/finance/public/:id/:token/xml'].join());
+  check('plugin: only the signed webhook and the token-bound quote answer skip CSRF', routes.filter((r) => r.csrf === 'exempt').map((r) => r.path).sort().join() === '/api/plugin/finance/inbound/invoice,/api/plugin/finance/inbound/request,/api/plugin/finance/inbound/sale,/api/plugin/finance/public/:id/:token/respond');
   check('plugin: every staff route declares a finance scope', routes.filter((r) => r.access !== 'public').every((r) => /^finance:(read|write)$/.test(r.scope)));
   const editor = { request: new Request('http://x/'), url: new URL('http://x/'), params: {}, user: { id: 'u', role: 'editor' }, locals: {}, store: memoryStore(), settings: async () => ({}) };
   const summary = routes.find((r) => r.path.endsWith('/summary'));
@@ -1030,6 +1030,95 @@ check('leitweg: an ordinary PO number is not judged', T.leitwegIdValid('PO-778')
     check('export: contains every collection and the archived PDF', names.includes('data/documents.json') && names.includes('data/payments.json') && names.includes('data/expenses.json') && names.includes('data/contacts.json') && names.some((n) => /^files\/fa_.*\.pdf$/.test(n)) && names.includes('manifest.json') && names.some((n) => /^data\/log_2026\.json$/.test(n)));
     void e; void cust; void ZIPR;
   }
+}
+
+// ---- Website sync: mirrored invoices (ON-…) and the requests inbox
+{
+  const RQ = await loadTs('src/plugins/finance/lib/requests.ts');
+  const SAFE2 = await loadTs('src/plugins/finance/lib/safety.ts');
+  const store = memoryStore();
+  const fin = new S.Finance(store, { fontBytes: async () => font, now: () => new Date('2026-10-27T09:00:00Z') });
+  await fin.saveCompany(seller, 'a');
+  const pdf = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(200, 32), Buffer.from('\n%%EOF')]);
+  const inv = {
+    source: 'ecws-website', external_id: 'inv-uuid-1', kind: 'invoice', number: 'ON-2026-00001', issue_date: '2026-10-20',
+    service_date: '2026-10-20', tax_treatment: 'domestic', tax_rate: 19, net_cents: 10000, tax_cents: 1900, gross_cents: 11900,
+    customer: { company_name: 'Kunde GmbH', name: 'Eva Muster', email: 'eva@kunde.de', external_id: 'acc-1', address: { street: 'Weg 1', postal_code: '86150', city: 'Augsburg', country: 'DE' } },
+    lines: [{ description: 'Website-Wartung', quantity: 1, unit_net_cents: 10000, net_cents: 10000 }],
+    paid: { method: 'card', paid_at: '2026-10-20T10:00:00Z', reference: 'pi_1' },
+    pdf_base64: pdf.toString('base64'),
+  };
+  const m1 = await fin.mirrorDocument(inv, 'mirror');
+  const m2 = await fin.mirrorDocument(inv, 'mirror');
+  check('mirror: the website invoice keeps its number and is paid', m1.created && m1.document.number === 'ON-2026-00001' && m1.document.status === 'paid' && m1.document.imported);
+  check('mirror: delivered twice is one document', !m2.created && m2.document.id === m1.document.id && (await fin.listPayments(m1.document.id)).length === 1);
+  check('mirror: the issuer\'s PDF is archived and served', !!m1.document.archived_pdf_id && Buffer.from((await fin.documentPdf(m1.document.id)).bytes).subarray(0, 5).toString() === '%PDF-');
+  check('mirror: the customer became a contact', (await fin.listContacts()).some((c) => c.company_name === 'Kunde GmbH' && c.external_ids?.['ecws-website'] === 'acc-1'));
+  await rejects('mirror: the same number from another document is refused', () => fin.mirrorDocument({ ...inv, external_id: 'inv-uuid-2' }, 'mirror'), /already used/);
+  await rejects('mirror: an issued document cannot change its number', () => fin.mirrorDocument({ ...inv, number: 'ON-2026-00099' }, 'mirror'), /cannot change/);
+  await rejects('mirror: totals that do not add up are refused', () => fin.mirrorDocument({ ...inv, external_id: 'x3', number: 'ON-2026-00003', tax_cents: 1800 }, 'mirror'), /must equal/);
+  await rejects('mirror: lines that do not match the net are refused', () => fin.mirrorDocument({ ...inv, external_id: 'x4', number: 'ON-2026-00004', lines: [{ name: 'A', quantity: 1, unit_net_cents: 5000 }] }, 'mirror'), /add up/);
+  await rejects('mirror: a non-PDF file is refused', () => fin.mirrorDocument({ ...inv, external_id: 'x5', number: 'ON-2026-00005', pdf_base64: Buffer.from('hello').toString('base64') }, 'mirror'), /not a PDF/);
+  // Gross-derived amounts (fromGross): the issuer's rounding stands.
+  const g = await fin.mirrorDocument({ ...inv, external_id: 'inv-g', number: 'ON-2026-00006', net_cents: 840, tax_cents: 160, gross_cents: 1000,
+    lines: [{ name: 'Top-up', quantity: 1, unit_net_cents: 840 }], pdf_base64: undefined }, 'mirror');
+  check('mirror: totals and VAT groups follow the issuer', g.document.totals.gross_cents === 1000 && g.document.totals.groups[0].tax_cents === 160 && g.document.totals.groups[0].net_cents === 840);
+  const rc = await fin.mirrorDocument({ ...inv, external_id: 'inv-rc', number: 'ON-2026-00007', tax_treatment: 'reverse_charge_eu', tax_rate: 0, tax_cents: 0, gross_cents: 10000,
+    customer: { ...inv.customer, vat_id: 'ATU12345678', address: { country: 'AT', city: 'Wien' } }, pdf_base64: undefined }, 'mirror');
+  check('mirror: reverse charge is mirrored at 0 %', rc.document.tax_treatment === 'reverse_charge_eu' && rc.document.totals.tax_cents === 0);
+  await rejects('mirror: VAT on a reverse-charge document is refused', () => fin.mirrorDocument({ ...inv, external_id: 'x8', number: 'ON-2026-00008', tax_treatment: 'reverse_charge_eu' }, 'mirror'), /0 % VAT/);
+
+  // Cancellation → credit note, original cancelled; VAT nets to zero.
+  await rejects('mirror: a cancellation before its invoice waits', () => fin.mirrorDocument({ ...inv, external_id: 'can-0', kind: 'cancellation', number: 'ON-2026-00009', cancels_external_id: 'nope', net_cents: -10000, tax_cents: -1900, gross_cents: -11900 }, 'mirror'), /not mirrored yet/);
+  const can = await fin.mirrorDocument({ ...inv, external_id: 'can-1', kind: 'cancellation', number: 'ON-2026-00010', issue_date: '2026-10-25', cancels_external_id: 'inv-uuid-1',
+    net_cents: -10000, tax_cents: -1900, gross_cents: -11900, lines: [{ description: 'Website-Wartung', quantity: 1, unit_net_cents: -10000 }], paid: undefined, pdf_base64: undefined }, 'mirror');
+  const orig = await fin.getDocument(m1.document.id);
+  check('mirror: a cancellation is a credit note with its own number', can.created && can.document.type === 'credit_note' && can.document.number === 'ON-2026-00010' && can.document.refers_to_id === orig.id);
+  check('mirror: the cancelled original is marked cancelled', orig.status === 'cancelled' && orig.cancelled_by_id === can.document.id);
+  check('mirror: the paid amount is a refund owed on the credit note', can.document.status === 'open' && can.document.totals.gross_cents === 11900);
+  const refunded = await fin.mirrorDocument({ ...inv, external_id: 'can-1', kind: 'cancellation', number: 'ON-2026-00010', cancels_external_id: 'inv-uuid-1', net_cents: -10000, tax_cents: -1900, gross_cents: -11900, paid: { method: 'card', paid_at: '2026-10-26T08:00:00Z' }, pdf_base64: undefined }, 'mirror');
+  check('mirror: a later delivery records the refund', !refunded.created && refunded.document.status === 'paid');
+  const docs = await fin.listDocuments();
+  const vat = R.vatReturn({ from: '2026-10-01', to: '2026-10-31' }, 'soll', docs, await fin.listPayments(), [], false);
+  check('mirror: invoice and its cancellation cancel out in the VAT return', vat.kz['81'] === 840 && vat.kz['81_tax'] === 160 && vat.kz['21'] === 10000);
+  const integ = await SAFE2.integrityReport(fin);
+  check('mirror: the books stay consistent', integ.problems.filter((p) => p.severity === 'error').length === 0);
+
+  // Requests inbox.
+  const req = { source: 'ecws-website', external_id: 'order-1', kind: 'order', number: 'EC-2026-00012', status: 'submitted', subject: 'Shop-Relaunch', message: 'Bitte bis Dezember.',
+    customer: { company_name: 'Kunde GmbH', name: 'Eva Muster', email: 'eva@kunde.de', external_id: 'acc-1' },
+    items: [{ name: 'Shopify-Setup', quantity: 1, unit_net_cents: 150000 }, { name: 'Wartung', quantity: 1, unit_net_cents: 9900, billing: 'monthly' }, { name: 'Sonderwunsch', quantity: 1, unit_net_cents: null }],
+    net_cents: 159900, tax_cents: 30381, gross_cents: 190281, tax_rate: 19 };
+  const q1 = await RQ.upsertRequest(fin, req, 'inbound');
+  check('requests: a delivery lands in the inbox as new', q1.created && q1.request.state === 'new' && q1.request.items.length === 3 && q1.request.items[2].unit_net_cents === null);
+  await RQ.updateRequest(fin, q1.request.id, { state: 'in_progress', note: 'angerufen' }, 'a');
+  const q2 = await RQ.upsertRequest(fin, { ...req, status: 'paid' }, 'inbound');
+  check('requests: a later delivery refreshes the website status but keeps ours', !q2.created && q2.request.external_status === 'paid' && q2.request.state === 'in_progress' && q2.request.note === 'angerufen');
+  await rejects('requests: an unknown state is refused', () => RQ.updateRequest(fin, q1.request.id, { state: 'weird' }, 'a'), /state must be/);
+  const [qa, qb] = await Promise.all([RQ.requestToQuote(fin, q1.request.id, 'a'), RQ.requestToQuote(fin, q1.request.id, 'a')]);
+  check('requests: → Angebot makes ONE quote draft', qa.quote.id === qb.quote.id && qa.quote.type === 'quote' && qa.quote.status === 'draft');
+  check('requests: the quote carries the items, monthly marked, unknown price at 0', qa.quote.lines.length === 3 && qa.quote.lines[0].unit_price_cents === 150000 && qa.quote.lines[1].unit === 'MON' && qa.quote.lines[2].unit_price_cents === 0);
+  check('requests: the request reference is on the quote and the request is "quoted"', qa.quote.reference === 'EC-2026-00012' && (await RQ.getRequest(fin, q1.request.id)).state === 'quoted');
+  check('requests: the customer was matched to the existing contact', (await fin.listContacts()).filter((c) => c.company_name === 'Kunde GmbH').length === 1);
+  await RQ.upsertRequest(fin, { source: 'ecws-website', external_id: 'contact-7', kind: 'contact', customer: { name: 'Jan', email: 'jan@x.de' }, message: 'Hallo' }, 'inbound');
+  check('requests: open filter and search', (await RQ.listRequests(fin, { state: 'new' })).length === 1 && (await RQ.listRequests(fin, { q: 'jan@' })).length === 1);
+  await rejects('requests: a request without anyone to answer is refused', () => RQ.upsertRequest(fin, { source: 's', external_id: 'e', message: 'x' }, 'i'), /name or email/);
+
+  // Signed routes.
+  const plugin2 = await loadTs('src/plugins/finance/index.ts');
+  const r2 = plugin2.default.routes;
+  const { createHmac } = await import('node:crypto');
+  process.env.FINANCE_INBOUND_SECRET = 'shh';
+  const call = async (path, payload, secret = 'shh') => {
+    const raw = JSON.stringify(payload);
+    const t = Math.floor(Date.now() / 1000);
+    const sig = createHmac('sha256', secret).update(`${t}.${raw}`).digest('hex');
+    const route = r2.find((r) => r.path.endsWith(path));
+    return route.handler({ request: new Request('http://x/', { method: 'POST', body: raw, headers: { 'x-finance-signature': `t=${t},v1=${sig}` } }), url: new URL('http://x/'), params: {}, user: null, locals: {}, store, settings: async () => ({}) });
+  };
+  check('routes: a signed request lands (201), again is 200', (await call('/inbound/request', { ...req, external_id: 'order-2' })).status === 201 && (await call('/inbound/request', { ...req, external_id: 'order-2' })).status === 200);
+  check('routes: a wrongly signed invoice is refused', (await call('/inbound/invoice', { ...inv, external_id: 'z', number: 'ON-2026-00020' }, 'wrong')).status === 401);
+  check('routes: a signed invoice is mirrored', (await call('/inbound/invoice', { ...inv, external_id: 'z', number: 'ON-2026-00020', pdf_base64: undefined })).status === 201);
 }
 
 await fs.rm(tmp, { recursive: true, force: true });

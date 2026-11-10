@@ -2,13 +2,14 @@ import type { APIRoute } from 'astro';
 import { LocalDB } from '../../../lib/localdb';
 import { ApiResponseBuilder } from '../../../lib/api-response';
 import { validate, slugify } from '../../../lib/validate';
-import { getOrderLimits, listProducts, saveProduct, getProductFieldDefs } from '../../../lib/commerce-service';
+import { getOrderLimits, listProducts, saveProduct, getProductFieldDefs, loadGroupMembers } from '../../../lib/commerce-service';
 import {
   pickWritableProductFields, projectProductForReader, withMediaKind, buildMediaKindIndex,
 } from '../../../lib/product-fields';
-import { canManageCatalog } from '../../../lib/auth';
+import { canManageCatalog, canSeeUnpublishedProducts, includesUnpublishedProducts } from '../../../lib/auth';
 import { mediaBaseFor } from '../../../lib/media-base';
-import { projectAll, TRANSLATABLE_PRODUCT_FIELDS } from '../../../lib/i18n/catalogue-translations';
+import { projectAll, projectTranslations, TRANSLATABLE_PRODUCT_FIELDS } from '../../../lib/i18n/catalogue-translations';
+import { withGroup } from '../../../lib/commerce/grouped';
 import { contentLocale } from '../../../lib/i18n/resolve';
 import { withProductEmbeds } from '../../../lib/embeds';
 import { withOmnibusReference } from '../../../lib/commerce/price-history';
@@ -16,14 +17,29 @@ import { withPublicCache } from '../../../lib/http-cache';
 import { resolveSuggestSettings } from '../../../lib/search/suggest-settings';
 import { notePopularSearch } from '../../../lib/search/popular-store';
 import { settingsMap } from '../../../lib/settings-map';
+import { withStockStatus, resolveLowStockThreshold } from '../../../lib/commerce/stock-status';
+import { parseSort, withPriceRange } from '../../../lib/commerce/product-sort';
+import { queryFlag } from '../../../lib/http/query-flags';
+import { withResolvedVariants } from '../../../lib/commerce/variants';
 
 /** GET /api/products — public product listing with filters + pagination. */
 export const GET: APIRoute = async ({ url, locals, request }) => {
   try {
     await LocalDB.init();
     const q = url.searchParams;
+    // An unknown sort is refused, not ignored. A storefront menu that sends
+    // `price-asc` would otherwise render an unsorted list under a "low to high"
+    // label and never learn why. Checked before anything is read or counted.
+    const sort = parseSort(q.get('sort'));
+    if (!sort.ok) {
+      return ApiResponseBuilder.validationError(
+        `Unknown sort. Use one of: ${sort.allowed.join(', ')}`,
+        { sort: sort.allowed },
+      );
+    }
     // Staff see unpublished/out-of-stock rows the storefront must not.
-    const isStaff = !!locals.user && canManageCatalog(locals.user.role);
+    // Same predicate as GET /api/products/{id} — see canSeeUnpublishedProducts.
+    const isStaff = canSeeUnpublishedProducts(locals.user);
     // Definitions decide what is public. Read once per request, not per product.
     const productFieldDefs = await getProductFieldDefs();
     // ONE media index for the whole response, not a lookup per gallery entry.
@@ -32,9 +48,17 @@ export const GET: APIRoute = async ({ url, locals, request }) => {
       category: q.get('category') ?? undefined,
       brand: q.get('brand') ?? undefined,
       search: q.get('search') ?? undefined,
-      onSale: q.get('on_sale') === 'true',
-      featured: q.get('featured') === 'true',
-      includeInactive: Boolean(isStaff && q.get('all') === 'true'),
+      // `1` as well as `true`: the typed client has always sent `1` for a true
+      // boolean, so `products.list({ on_sale: true })` filtered nothing, and a
+      // staff `products.list({ all: true })` never saw a draft. Every flag this
+      // route reads goes through the one helper; see lib/http/query-flags.ts.
+      onSale: queryFlag(q, 'on_sale'),
+      featured: queryFlag(q, 'featured'),
+      // `all` follows the same rule as GET /api/products/{id}: staff (and a key
+      // whose scopes reach products), AND `?all=true` or `?all=1`.
+      includeInactive: includesUnpublishedProducts(locals.user, q),
+      sort: sort.sort,
+      locale: contentLocale(null, q.get('locale')),
       limit: Number(q.get('limit') ?? 24),
       offset: Number(q.get('offset') ?? 0),
     });
@@ -52,6 +76,8 @@ export const GET: APIRoute = async ({ url, locals, request }) => {
     // render a quantity selector that matches what checkout will actually
     // accept, instead of discovering the cap by getting a 400.
     const limits = await getOrderLimits();
+    // The shop-wide low-stock level, read once for the whole page.
+    const lowStockDefault = resolveLowStockThreshold(settingsMap(await LocalDB.getSettings()));
     // Project per-locale text down into the scalar fields.
     //
     // With NO ?locale= this is a no-op that only strips the `i18n` sidecar, so
@@ -59,11 +85,17 @@ export const GET: APIRoute = async ({ url, locals, request }) => {
     // parse. With one, the same SHAPE comes back with different text — which is
     // what lets this ship without either Next.js app changing a line. Returning
     // `name` as {en, de} instead would render [object Object] in both, today.
-    const localised = projectAll(
-      products,
-      contentLocale(null, q.get('locale')),
-      TRANSLATABLE_PRODUCT_FIELDS,
-    );
+    const locale = contentLocale(null, q.get('locale'));
+    const localised = projectAll(products, locale, TRANSLATABLE_PRODUCT_FIELDS);
+    // Grouped products carry their members, "from" price and availability,
+    // derived from the members now — the same helper as the single-product
+    // route. Loads nothing when the page holds no group.
+    const members = await loadGroupMembers(products);
+    const groupOpts = {
+      publicOnly: !isStaff,
+      defaultThreshold: lowStockDefault,
+      project: (m: (typeof products)[number]) => projectTranslations(m, locale, TRANSLATABLE_PRODUCT_FIELDS),
+    };
     // Embed facades (C-44). Applied on READ, like the post routes, because
     // what is STORED is an inert placeholder — see lib/embeds.ts. Both product
     // routes go through the same helper so they cannot drift.
@@ -73,9 +105,9 @@ export const GET: APIRoute = async ({ url, locals, request }) => {
     // staff-only fields here, so their copy is `private, no-store`. See
     // lib/http-cache.ts.
     return withPublicCache(ApiResponseBuilder.success(
-      localised.map((p) => withMediaKind(projectProductForReader(
-        withOmnibusReference(withProductEmbeds(p)), productFieldDefs, isStaff,
-      ), mediaIndex)), undefined, {
+      localised.map((p) => withMediaKind(withPriceRange(projectProductForReader(
+        withOmnibusReference(withProductEmbeds(withGroup(withStockStatus(withResolvedVariants(p), lowStockDefault), members, groupOpts))), productFieldDefs, isStaff,
+      )), mediaIndex)), undefined, {
       ...meta,
       max_qty_per_product: limits.maxQtyPerProduct,
       max_items_per_order: limits.maxItemsPerOrder,
@@ -140,7 +172,7 @@ export const POST: APIRoute = async ({ request, locals }) => {
       slug: v.slug || slugify(v.name),
       categories,
     }, undefined, session.id);
-    if (!saved.ok) return ApiResponseBuilder.error(saved.status, saved.message);
+    if (!saved.ok) return ApiResponseBuilder.error(saved.status, saved.message, saved.details, { code: saved.code });
     return ApiResponseBuilder.created(saved.value, 'Product created');
   } catch (err) {
     console.error('Product create error:', err);

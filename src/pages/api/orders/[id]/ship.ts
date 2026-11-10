@@ -3,7 +3,9 @@ import { LocalDB } from '../../../../lib/localdb';
 import { ApiResponseBuilder } from '../../../../lib/api-response';
 import { canWriteCommerce } from '../../../../lib/auth';
 import { recordAudit, AUDIT } from '../../../../lib/audit';
+import { recordOrderEvent } from '../../../../lib/commerce/order-timeline';
 import { buildShippedNotice, safeTrackingUrl } from '../../../../lib/commerce/shipped-notice';
+import { syncInvoiceRecordsSafely } from '../../../../lib/commerce/invoice-records';
 import type { Order } from '../../../../core/models';
 
 /**
@@ -68,6 +70,16 @@ export const POST: APIRoute = async ({ params, request, locals }) => {
     if (firstTime) patch.shipped_at = new Date().toISOString();
     const saved = await LocalDB.updateOrder(id, patch);
     if (!saved) return ApiResponseBuilder.serverError('Could not save the tracking details');
+    // A shop that records invoices "on shipped" gets the frozen record now.
+    // Never fails the dispatch (see invoice-records.ts).
+    if (firstTime) await syncInvoiceRecordsSafely(id);
+
+    await recordOrderEvent(id, {
+      event: firstTime ? 'shipment.shipped' : 'shipment.tracking_updated',
+      actor: user.id,
+      ...(number ? { ref: number } : {}),
+      ...(carrier ? { text: carrier } : {}),
+    });
 
     recordAudit(AUDIT.ORDER_SHIPPED, {
       actor: user.id,

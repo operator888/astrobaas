@@ -26,6 +26,7 @@ import type { PaymentProvider } from '../lib/payments/types';
 import type { ManualMethodDef } from '../lib/payments/registry';
 import type { PluginRoute, PluginAdminPage, PluginMigration } from '../lib/plugin-system';
 import { setPluginRoutes } from '../lib/plugin-platform/routes';
+import { setPluginWebhookEvents } from '../lib/plugin-platform/webhook-events';
 import { setPluginAdminPages, pluginAdminPageRoles } from '../lib/plugin-platform/admin-pages';
 import { setPluginAdminRoleResolver } from '../lib/admin-access';
 import { createPluginStore, runPluginMigrations } from '../lib/plugin-platform/store';
@@ -277,6 +278,14 @@ async function doBootstrap(): Promise<void> {
   setPluginRoutes(
     activePlugins.flatMap((p: Plugin) =>
       declared<PluginRoute>(p.routes, p.id, 'routes').map((route) => ({ pluginId: p.id, route }))),
+  );
+  // Declared webhook events, ACTIVE plugins only: a deactivated plugin's
+  // events stop being emittable and stop being offered on the webhook screen.
+  setPluginWebhookEvents(
+    activePlugins.map((p: Plugin) => ({
+      pluginId: p.id,
+      events: declared<unknown>(p.webhookEvents, p.id, 'webhookEvents'),
+    })),
   );
   setPluginAdminPages(
     activePlugins.flatMap((p: Plugin) =>

@@ -1,7 +1,8 @@
 import type { APIRoute } from 'astro';
 import { LocalDB } from '../../../lib/localdb';
 import { ApiResponseBuilder } from '../../../lib/api-response';
-import { normalizeCoupon } from '../../../lib/commerce/admin-normalize';
+import { normalizeCoupon, checkCouponRecord } from '../../../lib/commerce/admin-normalize';
+import { checkGiftProduct } from '../../../lib/commerce/coupon-service';
 
 /**
  * Coupons are STAFF-ONLY to list.
@@ -33,6 +34,8 @@ export const POST: APIRoute = async ({ request, locals }) => {
     const body = await request.json().catch(() => null);
     const parsed = normalizeCoupon(body);
     if (!parsed.ok) return ApiResponseBuilder.badRequest(parsed.error);
+    const whole = checkCouponRecord(parsed.value) ?? await checkGiftProduct(parsed.value);
+    if (whole) return ApiResponseBuilder.badRequest(whole);
 
     const existing = await LocalDB.getCoupons();
     if (existing.some((c) => c.code === (parsed.value as any).code)) {

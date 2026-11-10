@@ -85,6 +85,65 @@ export interface PublicStrings {
     unavailableNote: string;
     /** The link that downloads this receipt as a PDF file. */
     downloadPdf: string;
+    /** The purchased-files section (lib/commerce/download-entitlements.ts). */
+    downloadsHeading: string;
+    /** `{hours}` = how long each link works. */
+    downloadsNote: string;
+    /** `{n}` downloads left. */
+    downloadsLeft: string;
+    downloadsUnlimited: string;
+    /** `{date}` = the last day. */
+    downloadsUntil: string;
+    downloadsPending: string;
+    downloadsExpired: string;
+    downloadsRevoked: string;
+    downloadsExhausted: string;
+  };
+  /**
+   * The PDF of an invoice or credit-memo RECORD
+   * (lib/commerce/invoice-records.ts).
+   *
+   * `notTaxDocument` is load-bearing in the same way `receipt.notInvoice` is:
+   * without an issuer, core never issues a legal document (owner decision —
+   * AstroBaaS is not a fiscal device), and the page must say so to whoever
+   * reads it. `internalReference` labels the shop's own counter as NOT an
+   * invoice number, because a second numbering that looked like one beside an
+   * issuer's would be worse than none.
+   */
+  invoice: {
+    invoiceHeading: string;
+    recordHeading: string;
+    memoHeading: string;
+    memoRecordHeading: string;
+    notTaxDocument: string;
+    draft: string;
+    cancelled: string;
+    documentNo: string;
+    /** `{issuer}` is substituted. */
+    issuedBy: string;
+    issuedElsewhere: string;
+    /** `{number}` is substituted. */
+    issuedElsewhereAs: string;
+    internalReference: string;
+    /** `{id}` is substituted. */
+    credits: string;
+    record: string;
+    orderNo: string;
+    date: string;
+    seller: string;
+    buyer: string;
+    taxId: string;
+    item: string;
+    qty: string;
+    vatRate: string;
+    net: string;
+    amount: string;
+    vatAnalysis: string;
+    base: string;
+    vat: string;
+    netTotal: string;
+    total: string;
+    vatIncomplete: string;
   };
 }
 
@@ -120,6 +179,47 @@ const EN: PublicStrings = {
     unavailable: 'This receipt is not available',
     unavailableNote: 'The link may have expired, or the order it points to is no longer available. Please contact the shop.',
     downloadPdf: 'Download PDF',
+    downloadsHeading: 'Your downloads',
+    downloadsNote: 'Each link works for {hours} hours. Open this receipt again for fresh links.',
+    downloadsLeft: '{n} downloads left',
+    downloadsUnlimited: 'Unlimited downloads',
+    downloadsUntil: 'Available until {date}',
+    downloadsPending: 'Available once your payment is confirmed.',
+    downloadsExpired: 'Access to these files has expired.',
+    downloadsRevoked: 'Access to these files has been withdrawn.',
+    downloadsExhausted: 'The download limit for these files has been reached.',
+  },
+  invoice: {
+    invoiceHeading: 'Invoice',
+    recordHeading: 'Invoice record',
+    memoHeading: 'Credit note',
+    memoRecordHeading: 'Credit memo record',
+    notTaxDocument: 'This is the shop\'s record of the sale. It is not a tax document and carries no invoice number.',
+    draft: 'DRAFT — not final',
+    cancelled: 'CANCELLED',
+    documentNo: 'Document number',
+    issuedBy: 'Issued by {issuer}',
+    issuedElsewhere: 'The tax document for this sale was issued separately.',
+    issuedElsewhereAs: 'The tax document for this sale was issued separately, as {number}.',
+    internalReference: 'Internal reference (not an invoice number)',
+    credits: 'Credits record {id}',
+    record: 'Record',
+    orderNo: 'Order',
+    date: 'Date',
+    seller: 'Seller',
+    buyer: 'Buyer',
+    taxId: 'VAT ID',
+    item: 'Item',
+    qty: 'Qty',
+    vatRate: 'VAT',
+    net: 'Net',
+    amount: 'Amount',
+    vatAnalysis: 'VAT by rate',
+    base: 'Net amount',
+    vat: 'VAT',
+    netTotal: 'Net total',
+    total: 'Total',
+    vatIncomplete: 'This order was stored without a VAT breakdown that adds up, so no VAT analysis is shown.',
   },
 };
 
@@ -165,6 +265,49 @@ const CATALOGUE: Record<string, PublicStrings> = {
       unavailable: 'Η απόδειξη δεν είναι διαθέσιμη',
       unavailableNote: 'Ο σύνδεσμος μπορεί να έχει λήξει ή η παραγγελία δεν είναι πλέον διαθέσιμη. Επικοινωνήστε με το κατάστημα.',
       downloadPdf: 'Λήψη PDF',
+      downloadsHeading: 'Τα αρχεία σας',
+      downloadsNote: 'Κάθε σύνδεσμος ισχύει για {hours} ώρες. Ανοίξτε ξανά αυτή την απόδειξη για νέους συνδέσμους.',
+      downloadsLeft: 'Απομένουν {n} λήψεις',
+      downloadsUnlimited: 'Απεριόριστες λήψεις',
+      downloadsUntil: 'Διαθέσιμα έως {date}',
+      downloadsPending: 'Θα είναι διαθέσιμα μόλις επιβεβαιωθεί η πληρωμή σας.',
+      downloadsExpired: 'Η πρόσβαση σε αυτά τα αρχεία έχει λήξει.',
+      downloadsRevoked: 'Η πρόσβαση σε αυτά τα αρχεία έχει ανακληθεί.',
+      downloadsExhausted: 'Έχει εξαντληθεί το όριο λήψεων για αυτά τα αρχεία.',
+    },
+    invoice: {
+      invoiceHeading: 'Τιμολόγιο',
+      // "Εγγραφή", not "τιμολόγιο": without an issuer this is the shop's
+      // record, and the next line says it is not a tax document.
+      recordHeading: 'Εγγραφή πώλησης',
+      memoHeading: 'Πιστωτικό',
+      memoRecordHeading: 'Εγγραφή πίστωσης',
+      notTaxDocument: 'Αποτελεί εγγραφή της πώλησης από το κατάστημα. Δεν είναι φορολογικό παραστατικό και δεν φέρει αριθμό τιμολογίου.',
+      draft: 'ΠΡΟΣΧΕΔΙΟ — όχι οριστικό',
+      cancelled: 'ΑΚΥΡΩΜΕΝΟ',
+      documentNo: 'Αριθμός παραστατικού',
+      issuedBy: 'Εκδόθηκε από {issuer}',
+      issuedElsewhere: 'Το φορολογικό παραστατικό της πώλησης εκδόθηκε χωριστά.',
+      issuedElsewhereAs: 'Το φορολογικό παραστατικό της πώλησης εκδόθηκε χωριστά, με αριθμό {number}.',
+      internalReference: 'Εσωτερική αναφορά (όχι αριθμός τιμολογίου)',
+      credits: 'Πιστώνει την εγγραφή {id}',
+      record: 'Εγγραφή',
+      orderNo: 'Παραγγελία',
+      date: 'Ημερομηνία',
+      seller: 'Πωλητής',
+      buyer: 'Αγοραστής',
+      taxId: 'ΑΦΜ',
+      item: 'Είδος',
+      qty: 'Ποσ.',
+      vatRate: 'ΦΠΑ',
+      net: 'Καθαρή αξία',
+      amount: 'Αξία',
+      vatAnalysis: 'Ανάλυση ΦΠΑ',
+      base: 'Καθαρή αξία',
+      vat: 'ΦΠΑ',
+      netTotal: 'Σύνολο καθαρής αξίας',
+      total: 'Σύνολο',
+      vatIncomplete: 'Η παραγγελία αποθηκεύτηκε χωρίς ανάλυση ΦΠΑ που να συμφωνεί, γι\' αυτό δεν εμφανίζεται ανάλυση ΦΠΑ.',
     },
   },
   de: {
@@ -199,6 +342,47 @@ const CATALOGUE: Record<string, PublicStrings> = {
       unavailable: 'Dieser Beleg ist nicht verfügbar',
       unavailableNote: 'Der Link ist möglicherweise abgelaufen, oder die Bestellung ist nicht mehr verfügbar. Bitte wenden Sie sich an den Shop.',
       downloadPdf: 'PDF herunterladen',
+      downloadsHeading: 'Ihre Downloads',
+      downloadsNote: 'Jeder Link gilt {hours} Stunden. Öffnen Sie diesen Beleg erneut für neue Links.',
+      downloadsLeft: 'Noch {n} Downloads',
+      downloadsUnlimited: 'Unbegrenzte Downloads',
+      downloadsUntil: 'Verfügbar bis {date}',
+      downloadsPending: 'Verfügbar, sobald Ihre Zahlung bestätigt ist.',
+      downloadsExpired: 'Der Zugriff auf diese Dateien ist abgelaufen.',
+      downloadsRevoked: 'Der Zugriff auf diese Dateien wurde entzogen.',
+      downloadsExhausted: 'Das Download-Limit für diese Dateien ist erreicht.',
+    },
+    invoice: {
+      invoiceHeading: 'Rechnung',
+      recordHeading: 'Verkaufsbeleg (Aufzeichnung)',
+      memoHeading: 'Gutschrift',
+      memoRecordHeading: 'Gutschrift (Aufzeichnung)',
+      notTaxDocument: 'Dies ist die Aufzeichnung des Verkaufs durch den Shop. Es ist kein steuerliches Dokument und trägt keine Rechnungsnummer.',
+      draft: 'ENTWURF — nicht endgültig',
+      cancelled: 'STORNIERT',
+      documentNo: 'Belegnummer',
+      issuedBy: 'Ausgestellt von {issuer}',
+      issuedElsewhere: 'Das steuerliche Dokument zu diesem Verkauf wurde gesondert ausgestellt.',
+      issuedElsewhereAs: 'Das steuerliche Dokument zu diesem Verkauf wurde gesondert ausgestellt, als {number}.',
+      internalReference: 'Interne Referenz (keine Rechnungsnummer)',
+      credits: 'Schreibt die Aufzeichnung {id} gut',
+      record: 'Aufzeichnung',
+      orderNo: 'Bestellung',
+      date: 'Datum',
+      seller: 'Verkäufer',
+      buyer: 'Käufer',
+      taxId: 'USt-IdNr.',
+      item: 'Artikel',
+      qty: 'Menge',
+      vatRate: 'MwSt.',
+      net: 'Netto',
+      amount: 'Betrag',
+      vatAnalysis: 'MwSt. nach Satz',
+      base: 'Nettobetrag',
+      vat: 'MwSt.',
+      netTotal: 'Netto gesamt',
+      total: 'Gesamt',
+      vatIncomplete: 'Diese Bestellung wurde ohne stimmige MwSt.-Aufschlüsselung gespeichert, daher wird keine MwSt.-Analyse gezeigt.',
     },
   },
 };

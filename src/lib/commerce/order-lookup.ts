@@ -60,6 +60,9 @@ export function isErased(order: unknown): boolean {
   return typeof (order as { erased_at?: unknown } | null)?.erased_at === 'string';
 }
 
+/** Order states that count as a purchase for the verified-buyer stamp. */
+export const VERIFIED_ORDER_STATUSES: ReadonlySet<string> = new Set(['processing', 'completed']);
+
 /**
  * Did this address buy this product? — the verified-buyer test (C-35).
  *
@@ -92,6 +95,13 @@ export function boughtProduct(
     // and never paid is not a verified buyer, and treating them as one is the
     // cheapest way to fake a verified review.
     if ((o.payment_status ?? 'unpaid') !== 'paid') return false;
+    // ...and a paid order that was then cancelled, refunded or put on hold is
+    // not one either. `processing` is what a captured payment moves an order to
+    // (payments/capture.ts) and `completed` is what fulfilment moves it to;
+    // those two are the states in which the buyer HAS the product or is about
+    // to. Computed at submission and never recomputed: a review stamped before
+    // a later refund keeps the stamp, as it was true when written.
+    if (!VERIFIED_ORDER_STATUSES.has(String(o.status ?? ''))) return false;
     const items = Array.isArray(o.items) ? o.items : [];
     return items.some((i) => String((i as { product_id?: unknown }).product_id ?? '') === pid);
   });

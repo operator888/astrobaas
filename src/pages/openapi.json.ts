@@ -63,9 +63,24 @@ export const GET: APIRoute = async ({ site, url }) => {
       created_at: { type: 'string' }, updated_at: { type: 'string' },
     },
   };
+  const StockStatusInfo = {
+    type: 'object',
+    description: 'Derived on every read from the count, the effective low-stock threshold and the backorder policy. Never stored.',
+    properties: {
+      status: { type: 'string', enum: ['in-stock', 'low-stock', 'out-of-stock'], description: '`out-of-stock` when the count is 0 or less (whatever the threshold); `low-stock` when 0 < count <= threshold_qty; otherwise `in-stock`. Untracked stock is always `in-stock`.' },
+      tracked: { type: 'boolean', description: 'False when units are not counted (stock is null).' },
+      available_qty: { type: 'integer', nullable: true, description: 'Units on hand, never negative; null when untracked. The same number the product publishes as `stock` — no extra disclosure.' },
+      threshold_qty: { type: 'integer', description: 'The product\'s own low_stock_threshold when set, otherwise the shop-wide inventory_low_stock_threshold_qty (default 5). 0 means "never low".' },
+      backorderable: { type: 'boolean', description: 'Out of stock, but the product\'s backorder policy still lets an order through.' },
+      purchasable: { type: 'boolean', description: 'Whether one unit can be ordered right now — the checkout\'s own rule.' },
+    },
+  };
   const Product = {
     type: 'object',
     properties: {
+      price_from_cents: { type: 'integer', nullable: true, description: 'READ-ONLY, derived on every read, never stored. What a buyer pays at the LOWEST: `price_cents` for a simple product, the cheapest ENABLED variant for one with variants (a variable product\'s own `price_cents` is only the fallback its variants inherit). This is exactly the key `?sort=price_asc|price_desc` orders by, so a client can verify or reproduce the server order from the response. For a GROUPED product: the lowest price among the members a shopper can see ("from €X"), null when none is visible.' },
+      price_to_cents: { type: 'integer', nullable: true, description: 'READ-ONLY, derived on read. The dearest enabled variant; equal to `price_from_cents` for a simple product. Show "from €X" when it is greater.' },
+      stock_status: { ...StockStatusInfo, description: 'READ-ONLY. For a product with variants it is judged on its enabled variants (their counts summed; untracked if any is untracked), and each variants[] entry carries its own. `in_stock` is the stored flag and is not reliable for such products.' },
       custom: { type: 'object', additionalProperties: true, description: 'Values for the fields this merchant declared. Public callers see only the fields marked public; staff see the whole bag. See GET /api/commerce/product-fields for the schema.' },
       id: { type: 'string' }, name: { type: 'string' }, slug: { type: 'string' },
       sku: { type: 'string' }, description: { type: 'string' }, short_description: { type: 'string' },
@@ -74,7 +89,76 @@ export const GET: APIRoute = async ({ site, url }) => {
       stock: { type: 'integer', nullable: true }, in_stock: { type: 'boolean' },
       categories: { type: 'array', items: { type: 'string' } }, brand: { type: 'string' },
       images: { type: 'array', items: { type: 'object', properties: { src: { type: 'string' }, alt: { type: 'string' } } } },
+      attributes: {
+        type: 'array',
+        description: 'The variant axes, in the merchant\'s order (colour before size). A variant picker offers them in this order, each value in its `values` order.',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' }, values: { type: 'array', items: { type: 'string' } }, visible: { type: 'boolean' },
+            display: { type: 'string', enum: ['swatch', 'buttons'], description: 'Draw this option\'s values as swatches. Absent (or `buttons` on write, which is stored as absent) = buttons. A picker also draws swatches when every value has one.' },
+            swatches: {
+              type: 'object',
+              description: 'Per value (keys are entries of `values`): its swatch. A colour that is not a hex colour, or an image that is not a media reference, is refused with 400 on save rather than dropped.',
+              additionalProperties: {
+                type: 'object',
+                properties: {
+                  color: { type: 'string', pattern: '^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$', description: '`#rgb` or `#rrggbb` on write; stored and returned as lower-case `#rrggbb`.' },
+                  image: { type: 'string', description: 'A media reference: `/uploads/...` on this CMS (join `meta.media_base`), or an https URL. Never a video.' },
+                },
+              },
+            },
+          },
+        },
+      },
+      variants: {
+        type: 'array',
+        description: 'The purchasable variations (the most-read fields; ProductVariant in the TypeScript models lists every stored field). An order line for a product with variants must name one by `variant_id`. A disabled variant (`enabled: false`) cannot be ordered and a storefront should not offer it.',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            options: { type: 'object', additionalProperties: { type: 'string' }, description: 'Attribute name to value, e.g. {"Colour":"Red","Size":"M"}.' },
+            sku: { type: 'string' },
+            price_cents: { type: 'integer', nullable: true, description: 'The variant\'s own price; null inherits the product\'s. Read `resolved.price_cents` for what a shopper pays.' },
+            stock: { type: 'integer', nullable: true }, in_stock: { type: 'boolean' },
+            image: { type: 'string' }, enabled: { type: 'boolean' },
+            stock_status: { ...StockStatusInfo, readOnly: true, description: 'READ-ONLY. This variant\'s own availability; `purchasable` is the checkout\'s rule.' },
+            resolved: {
+              type: 'object',
+              readOnly: true,
+              description: 'READ-ONLY, derived on every read and never stored: what a shopper gets for THIS variant after inheriting from the product — the price the checkout will charge (sale window applied), and the SKU and image to show. A variant picker updates the page from this, never from its own arithmetic.',
+              properties: {
+                price_cents: { type: 'integer' }, regular_price_cents: { type: 'integer' }, on_sale: { type: 'boolean' },
+                sku: { type: 'string' }, image: { type: 'string' },
+              },
+            },
+          },
+        },
+      },
+      downloadable: { type: 'boolean' },
+      downloads: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string', description: 'STAFF ONLY — absent for every other reader. `https://…`, `/…` (own public media) or `private:pf_<id>` (a file from POST /api/downloads/upload, served only through a buyer\'s signed link).' } } } },
+      download_limit: { type: ['integer', 'null'], description: 'Downloads per purchase. Absent/null = the shop default (downloads_limit_default); 0 = unlimited.' },
+      download_expiry_days: { type: ['integer', 'null'], description: 'Days after payment the downloads work. Absent/null = the shop default (downloads_expiry_days_default, 90); 0 = never.' },
       status: { type: 'string', enum: ['active', 'draft', 'archived'] },
+      type: { type: 'string', enum: ['simple', 'variable', 'grouped'], description: '`simple` and `variable` are derived from `variants` and any value sent for them is ignored. `grouped` is chosen: a grouped product shows the products in `grouped_product_ids` on one page and is never bought itself — POST /api/orders and /api/orders/quote refuse it as a line (`grouped-not-buyable`); add each member as its own line. A group has no price, sale, stock or variants of its own; those are forced on save. Leaving `grouped` needs a price in the same save (`group.price_required`).' },
+      grouped_product_ids: { type: 'array', items: { type: 'string' }, maxItems: 10, description: 'A grouped product\'s members, in display order. Setting it needs 2 to 10; deleting members can leave fewer. Refused on save: duplicates, the product itself, unknown ids, a member that is itself grouped, and a NEW member that has variants. Deleting a product removes it from every group. A product that is a member cannot itself become a group. On a public read, narrowed to the members that reader can see.' },
+      grouped_products: {
+        type: 'array', description: 'READ-ONLY, grouped products only: the members resolved, in order. A public read skips draft, archived and hidden members; staff see them all with their `status` and `catalog_visibility`.',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' }, name: { type: 'string' }, slug: { type: 'string' }, sku: { type: 'string' },
+            type: { type: 'string', enum: ['simple', 'variable'], description: '`variable`: a member that gained variants after joining; choose an option on its own page.' },
+            price_cents: { type: 'integer', description: 'Current price; the cheapest variant for a `variable` member.' },
+            regular_price_cents: { type: 'integer' }, on_sale: { type: 'boolean' },
+            stock_status: StockStatusInfo,
+            image: { type: 'object', nullable: true, properties: { src: { type: 'string' }, alt: { type: 'string' } } },
+            status: { type: 'string', enum: ['active', 'draft', 'archived'] },
+            catalog_visibility: { type: 'string', enum: ['visible', 'catalog', 'search', 'hidden'] },
+          },
+        },
+      },
       created_at: { type: 'string' }, updated_at: { type: 'string' },
     },
   };
@@ -177,17 +261,28 @@ const ShippingMethod = {
     type: 'object',
     properties: {
       id: { type: 'string' }, code: { type: 'string' },
-      kind: { type: 'string', enum: ['percent', 'fixed'] },
-      value: { type: 'integer', description: 'Basis points for percent (1000 = 10%), minor units for fixed.' },
+      kind: {
+        type: 'string', enum: ['percent', 'fixed', 'bogo50', 'free_shipping', 'gift_product'],
+        description: 'Accepted on write as `kind` or `type`. bogo50: in each pair of qualifying units (paired from most to least expensive, across lines) the cheaper is half price; an odd unit left over is full price; one unit alone is refused (coupon.not_applicable). free_shipping: shipping costs 0, nothing off the goods. gift_product: adds one unit of gift_product_id at price 0; refused when it is not in stock.',
+      },
+      value: { type: 'integer', description: 'Basis points for percent (1000 = 10%), minor units for fixed. 0 for the other kinds.' },
       enabled: { type: 'boolean' }, description: { type: 'string' },
       min_subtotal_cents: { type: ['integer', 'null'] },
-      starts_at: { type: ['string', 'null'] }, ends_at: { type: ['string', 'null'] },
-      usage_limit: { type: ['integer', 'null'] },
-      usage_limit_per_customer: { type: ['integer', 'null'] },
+      starts_at: { type: ['string', 'null'] },
+      ends_at: { type: ['string', 'null'], description: 'Accepted on write as `ends_at` or `expires_at`.' },
+      usage_limit: { type: ['integer', 'null'], description: 'Total uses. Accepted on write as `max_redemptions`.' },
+      usage_limit_per_customer: { type: ['integer', 'null'], description: 'Uses per buyer email, counted atomically. Accepted on write as `max_redemptions_per_email`.' },
       used_count: { type: 'integer' },
       product_ids: { type: 'array', items: { type: 'string' } },
-      category_slugs: { type: 'array', items: { type: 'string' } },
+      category_slugs: { type: 'array', items: { type: 'string' }, description: 'Accepted on write as `categories` (or `conditions.categories`).' },
+      brands: { type: 'array', items: { type: 'string' }, description: 'Only products of these brands, matched as ?brand= matches (Ray-Ban = RAYBAN = its published slug). Must hold IN ADDITION to product_ids/category_slugs.' },
       free_shipping: { type: 'boolean' },
+      gift_product_id: { type: ['string', 'null'], description: 'For gift_product: a simple (non-variable) product.' },
+      email: { type: ['string', 'null'], description: 'Bound to one buyer: validates only for this email, case-insensitively. Stored lower-case.' },
+      single_use: { type: 'boolean', description: 'One redemption in total.' },
+      revoked_at: { type: ['string', 'null'], description: 'Set when a plugin revoked it (read-only).' },
+      source: { type: ['object', 'null'], description: '{ plugin, ref } when a plugin issued it through host.coupons.issue (read-only).' },
+      automatic: { type: 'boolean' },
     },
   } as const;
 
@@ -204,7 +299,75 @@ const ShippingMethod = {
       postcode: { type: 'string' },
       country: { type: 'string', minLength: 2, maxLength: 2 },
       phone: { type: 'string' },
-      tax_id: { type: 'string', description: 'VAT identifier / ΑΦΜ. Never verified against VIES here.' },
+      tax_id: { type: 'string', description: 'VAT identifier / ΑΦΜ. CAPTURED, never validated by the core, and never by itself a reason an order is refused. On billing_address (delivery address as fallback) it is what EU reverse charge reads when the shop has switched that on; a TAX_ID_VERDICT plugin may verify it (e.g. against VIES).' },
+    },
+  };
+  // PLUGIN_HOOKS.ORDER_LINE_ADDONS — one shape for what a line request
+  // sends and what a priced line carries back, used by the quote and the order.
+  const LineAddon = {
+    type: 'object',
+    required: ['id', 'label', 'unit_price_cents'],
+    properties: {
+      id: { type: 'string', maxLength: 100 },
+      label: { type: 'string', maxLength: 200, description: 'What a receipt prints.' },
+      unit_price_cents: { type: 'integer', minimum: 0, description: 'Per unit of the line, in the currency of the order (or quote). ALREADY INSIDE the line total — never add it again.' },
+      source: { type: 'string', description: 'The plugin that priced it.' },
+      kind: { type: 'string' },
+      namespace: { type: 'string', description: 'The request `addons` key it answers.' },
+    },
+  };
+  const lineAddonsRequest = {
+    type: 'object',
+    maxProperties: 8,
+    propertyNames: { pattern: '^[a-z][a-z0-9_-]{0,31}$' },
+    additionalProperties: true,
+    description: 'Priced add-on selections for this line, keyed by add-on type — e.g. `{ "lens": ["ar", "index-160"] }` for the optical module. Each value is the installed plugin\'s own selection format (JSON, at most 4 levels deep; the whole value at most 2048 bytes). Priced server-side by PLUGIN_HOOKS.ORDER_LINE_ADDONS and added to the line\'s unit price before coupons and tax. Refused with a 400 (never dropped) when the shape is wrong (reason checkout.addons_invalid), when no installed plugin handles add-ons (checkout.addons_unsupported), when a selection was not priced (checkout.addons_unpriced), or when the plugin refuses it (the plugin\'s own reason). null, [] or {} means nothing chosen.',
+  };
+  // Campaign attribution (commerce/attribution.ts). Known keys only, each capped.
+  const AttributionTouch = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['at'],
+    properties: {
+      utm_source: { type: 'string', maxLength: 100, description: 'Lower-cased on save.' },
+      utm_medium: { type: 'string', maxLength: 100, description: 'Lower-cased on save.' },
+      utm_campaign: { type: 'string', maxLength: 100 },
+      utm_term: { type: 'string', maxLength: 100 },
+      utm_content: { type: 'string', maxLength: 100 },
+      gclid: { type: 'string', maxLength: 200, pattern: '^[A-Za-z0-9._~-]+$' },
+      fbclid: { type: 'string', maxLength: 200, pattern: '^[A-Za-z0-9._~-]+$' },
+      msclkid: { type: 'string', maxLength: 200, pattern: '^[A-Za-z0-9._~-]+$' },
+      at: { type: 'string', format: 'date-time', description: 'When the campaign visit happened. Not in the future, not older than 90 days.' },
+    },
+  };
+  const OrderAttribution = {
+    type: 'object',
+    additionalProperties: false,
+    description: 'First and last campaign touch. Kept ONLY with the visitor\'s marketing consent; absent otherwise. Personal data: exported with the order, removed by an erasure.',
+    properties: { first: AttributionTouch, last: AttributionTouch },
+  };
+  const AttributionReport = {
+    type: 'object',
+    properties: {
+      model: { type: 'string', enum: ['first', 'last'] },
+      from: { type: 'string', format: 'date' },
+      to: { type: 'string', format: 'date' },
+      orders: { type: 'integer', description: 'Paid orders in the range.' },
+      attributed: { type: 'integer' },
+      unattributed: { type: 'integer', description: 'Paid orders with no attribution: no marketing consent, no campaign, or older than the feature.' },
+      unattributed_revenue: { type: 'object', additionalProperties: { type: 'integer' }, description: 'Minor units, keyed by currency.' },
+      rows: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            source: { type: 'string' }, medium: { type: 'string' }, campaign: { type: 'string' },
+            currency: { type: 'string', description: 'The shop\'s base currency at the time of each order.' },
+            orders: { type: 'integer' },
+            revenue_cents: { type: 'integer', description: 'Minor units of `currency` (base_total_cents ?? total_cents).' },
+          },
+        },
+      },
     },
   };
   const Order = {
@@ -229,8 +392,127 @@ const ShippingMethod = {
       shipping_address: { $ref: '#/components/schemas/Address' },
       billing_address: { $ref: '#/components/schemas/Address' },
       note: { type: 'string' },
-      items: { type: 'array', items: { type: 'object', properties: { product_id: { type: 'string' }, name: { type: 'string' }, qty: { type: 'integer' }, total_cents: { type: 'integer' } } } },
+      terms_accepted: { type: 'boolean', description: 'What the buyer answered to "I agree to the Terms & Conditions" at checkout, frozen. ABSENT means unknown (an older order, an import, a staff-placed order) — never "accepted". `false` is an explicit refusal and can only be stored while the shop does not require acceptance.' },
+      terms_accepted_at: { type: 'string', description: 'When the SERVER recorded the acceptance (ISO 8601). Present only with terms_accepted: true; never taken from the request.' },
+      privacy_accepted: { type: 'boolean', description: 'Optional privacy-policy consent, recorded the same way. Never required.' },
+      privacy_accepted_at: { type: 'string' },
+      entitlements: { type: 'array', items: { $ref: '#/components/schemas/DownloadEntitlement' }, description: 'Download entitlements, one per paid line of a downloadable product. Absent when none. Written only by the downloads module.' },
+      tags: { type: 'array', maxItems: 10, items: { type: 'string', maxLength: 40 }, description: 'Staff-only labels ("VIP", "needs review"). Absent when the order has none. Never shown to a buyer. Written only by the tag routes — PUT /api/orders/{id} ignores it.' },
+      attribution: OrderAttribution,
+      items: { type: 'array', items: { type: 'object', properties: { product_id: { type: 'string' }, name: { type: 'string' }, qty: { type: 'integer' }, total_cents: { type: 'integer', description: 'The line total (qty × unit, add-ons included, before discount), frozen from the same priced line as the order totals; the lines sum to subtotal_cents (on a converted order, to within a cent per line of rounding).' }, addons: { type: 'array', items: LineAddon, description: 'Priced add-ons, frozen at purchase. Absent when none.' } } } },
+      invoice_records: { type: 'array', items: { $ref: '#/components/schemas/InvoiceDocument' }, description: 'Invoice and credit-memo records (non-fiscal). Absent until the first. Written only through /api/orders/{id}/invoice-records and the payment, shipping and refund paths — PUT /api/orders/{id} ignores it.' },
       created_at: { type: 'string' }, updated_at: { type: 'string' },
+    },
+  };
+  const InvoiceDocument = {
+    type: 'object',
+    description: 'A frozen, non-fiscal record of what an order charged (kind invoice) or what a refund gave back (kind credit_memo). Money in minor units of `currency`.',
+    properties: {
+      id: { type: 'string' }, kind: { type: 'string', enum: ['invoice', 'credit_memo'] },
+      order_id: { type: 'string' },
+      status: { type: 'string', enum: ['draft', 'final', 'cancelled'] },
+      state: { type: 'string', enum: ['draft', 'final', 'cancelled', 'issuing', 'issued', 'issue_failed', 'issued_elsewhere'], description: 'Derived; present in the invoice-records responses.' },
+      trigger: { type: 'string', enum: ['paid', 'shipped', 'manual'] },
+      created_at: { type: 'string' }, finalised_at: { type: 'string' },
+      currency: { type: 'string' }, prices_include_tax: { type: 'boolean' },
+      seller: { type: 'object' }, buyer: { type: 'object', description: 'Includes tax_id as captured — never validated by core.' },
+      lines: { type: 'array', items: { type: 'object', properties: {
+        kind: { type: 'string', enum: ['goods', 'shipping'] }, description: { type: 'string' }, qty: { type: 'integer' },
+        net_cents: { type: 'integer' }, tax_rate_bp: { type: 'integer' }, tax_cents: { type: 'integer' }, total_cents: { type: 'integer' },
+        invoice_line: { type: 'integer', description: 'Credit memos: the invoice-record line it credits.' },
+        tax_treatment: { type: 'string', enum: ['standard', 'reverse-charge', 'export', 'exempt'], description: 'Frozen from the priced order at finalise. ABSENT means core cannot tell (e.g. a 0% line with nothing stamped) — never assume standard.' },
+        tax_jurisdiction: { type: 'string', description: 'ISO country whose VAT table priced the line, when not the shop\'s own.' },
+      } } },
+      vat: { type: 'array', items: { type: 'object', properties: { rate_bp: { type: 'integer' }, base_cents: { type: 'integer' }, tax_cents: { type: 'integer' } } } },
+      vat_complete: { type: 'boolean', description: 'False when the order had no per-line VAT breakdown that reconciles to what was charged.' },
+      net_cents: { type: 'integer' }, tax_cents: { type: 'integer' }, total_cents: { type: 'integer' },
+      invoice_record_id: { type: 'string' }, refund_id: { type: 'string' },
+      issuer: { type: 'object', properties: {
+        id: { type: 'string' },
+        status: { type: 'string', enum: ['issuing', 'issued', 'failed', 'declined'], description: 'declined: every issuer asked said "not mine"; the record is treated as with no issuer (state stays final).' },
+        number: { type: 'string' }, identifiers: { type: 'object', additionalProperties: { type: 'string' } }, issued_at: { type: 'string' }, error: { type: 'string' }, attempted_at: { type: 'string' },
+        key: { type: 'string', description: 'The idempotency key of every attempt at this record.' },
+        attempts: { type: 'integer' },
+        retryable: { type: 'boolean', description: 'failed only: retried automatically, with backoff, at next_attempt_at.' },
+        next_attempt_at: { type: 'string' },
+        declined: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, reason: { type: 'string' } } } },
+        late: { type: 'boolean', description: 'issued only: the success arrived after core stopped waiting.' },
+      } },
+      issued_externally: { type: 'object', properties: { at: { type: 'string' }, actor: { type: 'string' }, number: { type: 'string' } } },
+      internal_reference: { type: 'string', description: 'The shop\'s own bookkeeping counter. NOT an invoice number.' },
+    },
+  };
+  const InvoiceRecordList = {
+    type: 'object',
+    properties: {
+      id: { type: 'string' },
+      record: { $ref: '#/components/schemas/InvoiceDocument' },
+      records: { type: 'array', items: { $ref: '#/components/schemas/InvoiceDocument' } },
+      record_on: { type: 'string', enum: ['paid', 'shipped', 'manual'] },
+      issuer: { type: ['object', 'null'], properties: { id: { type: 'string' }, label: { type: 'string' } } },
+      issuer_chain: { type: 'array', description: 'The issuers asked, in order; the next is asked only when the one before declines a record.', items: { type: 'object', properties: { id: { type: 'string' }, label: { type: 'string' } } } },
+      issuer_problem: { type: 'string' },
+    },
+  };
+  const DownloadEntitlement = {
+    type: 'object',
+    description: 'One paid order line\'s right to download its product\'s files. Granted when the order reaches processing/completed; revoked on cancel/refund (lifted if the order is reopened) or by staff.',
+    properties: {
+      id: { type: 'string', example: 'ent_0123456789abcdef01234567' },
+      line: { type: 'integer', description: 'Index of the order line.' },
+      product_id: { type: 'string' },
+      name: { type: 'string' },
+      files: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string' } } }, description: 'Frozen at grant. A download prefers the product\'s current file of the same name.' },
+      download_limit: { type: ['integer', 'null'], description: 'null = unlimited.' },
+      download_count: { type: 'integer' },
+      expires_at: { type: ['string', 'null'], description: 'null = never.' },
+      granted_at: { type: 'string' },
+      revoked_at: { type: 'string' },
+      revoked_reason: { type: 'string', enum: ['refunded', 'cancelled', 'staff', 'erased'] },
+      log: { type: 'array', description: 'The newest 50 downloads. `ip` is removed by an erasure.', items: { type: 'object', properties: { at: { type: 'string' }, file: { type: 'string' }, ip: { type: 'string' } } } },
+      state: { type: 'string', enum: ['active', 'expired', 'exhausted', 'revoked', 'inactive'], description: 'Derived on read. `inactive` = the order does not grant downloads right now.' },
+      remaining: { type: ['integer', 'null'] },
+    },
+  };
+  const BuyerDownload = {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+      state: { type: 'string', enum: ['active', 'expired', 'exhausted', 'revoked', 'inactive'] },
+      files: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, href: { type: ['string', 'null'], description: 'A signed link to GET /api/downloads/{token}; null unless active. Never the file\'s location.' } } } },
+      remaining: { type: ['integer', 'null'] },
+      limit: { type: ['integer', 'null'] },
+      expires_at: { type: ['string', 'null'] },
+    },
+  };
+  const OrderTagList = {
+    type: 'object',
+    properties: {
+      id: { type: 'string' },
+      tags: { type: 'array', items: { type: 'object', properties: { tag: { type: 'string' }, color: { type: 'string', enum: ['red', 'orange', 'amber', 'green', 'teal', 'blue', 'indigo', 'purple', 'pink', 'gray'], description: 'Derived from the tag, never stored: the same tag is the same colour everywhere.' } } } },
+      max: { type: 'integer', description: 'The most tags one order may carry (10).' },
+    },
+  };
+  const OrderTimelineItem = {
+    type: 'object',
+    properties: {
+      id: { type: 'string' },
+      at: { type: 'string', description: 'When it happened (ISO 8601).' },
+      event: { type: 'string', description: 'Dotted code: order.placed, status.changed, payment.captured | failed | refunded | declined | started | needs_refund, refund.issued, shipment.shipped | tracking_updated, note.staff_updated | staff_cleared | customer_edited | comment, tags.changed, tax.override, order.abandoned, order.hold_expired, email.recovery_sent, consent.*, or bulk.<action>. Branch on this, never on a label.' },
+      category: { type: 'string', enum: ['status', 'payments', 'shipments', 'notes', 'other'], description: 'The filter this event belongs to.' },
+      actor: { type: ['string', 'null'], description: 'A user id, `provider`, `system[:job]`, `customer`, or null when the order does not record who (an order posted before shipments were recorded here).' },
+      actor_kind: { type: 'string', enum: ['staff', 'system', 'provider', 'customer', 'unknown'] },
+      actor_name: { type: ['string', 'null'], description: 'The staff member\'s name (or e-mail) for a user id; null otherwise.' },
+      from: { type: 'string', description: 'status.changed: the previous status.' },
+      to: { type: 'string', description: 'status.changed: the new status.' },
+      amount_cents: { type: 'integer', description: 'Payments and refunds: minor units of `currency`. Always positive; the event says which way the money went.' },
+      currency: { type: 'string' },
+      text: { type: 'string', description: 'A note or comment a person typed, a carrier, a payment method, a tax-override reason. Free text: render it as text.' },
+      added: { type: 'array', items: { type: 'string' }, description: 'tags.changed: tags added.' },
+      removed: { type: 'array', items: { type: 'string' }, description: 'tags.changed: tags removed.' },
+      ref: { type: 'string', description: 'A tracking number or refund id.' },
+      count: { type: 'integer', description: 'payment.declined: how many attempts were declined.' },
+      derived: { type: 'boolean', description: 'True when computed from the order\'s own fields at read time; false when it was stored.' },
     },
   };
   const spec = {
@@ -245,7 +527,7 @@ const ShippingMethod = {
       securitySchemes: {
         bearerApiKey: { type: 'http', scheme: 'bearer', description: 'API key minted at POST /api/keys.' },
       },
-      schemas: { Post, Product, Order, Address, ShippingMethod, Coupon, DeepHealth, RedirectRule, NotFoundRecord, ContentTypeDef },
+      schemas: { Post, Product, Order, OrderTagList, OrderAttribution, AttributionReport, DownloadEntitlement, BuyerDownload, InvoiceDocument, InvoiceRecordList, OrderTimelineItem, Address, ShippingMethod, Coupon, DeepHealth, RedirectRule, NotFoundRecord, ContentTypeDef },
     },
     paths: {
       '/api/posts': {
@@ -515,7 +797,7 @@ const ShippingMethod = {
             {
               name: 'where.{field}', in: 'query', schema: { type: 'string' },
               description:
-                'Narrow to records whose DECLARED field holds this value, compared as a string — e.g. `?where.post_id=abc`. Only declared fields: a filter cannot probe `_status` or any other key the server sets and reads as authority. An array field matches if any item does. An unknown field name is ignored rather than refused, so a storefront sending a stale filter gets the unfiltered list instead of a page that will not render — it cannot leak, because a filter only ever narrows what the caller could already see. On a MODERATED type the approval filter is applied first, so this never widens visibility.',
+                'Narrow to records whose DECLARED field holds this value, compared as a string — e.g. `?where.post_id=abc`. Only declared fields: a filter cannot probe `_status` or any other key the server sets and reads as authority. An array field matches if any item does. A field the type marks `private` (the author email) is not filterable by anyone who may not read it, and is ignored like an unknown name. An unknown field name is ignored rather than refused, so a storefront sending a stale filter gets the unfiltered list instead of a page that will not render — it cannot leak, because a filter only ever narrows what the caller could already see. On a MODERATED type the approval filter is applied first, so this never widens visibility.',
             },
           ],
           responses: { '200': ok({ type: 'array', items: { type: 'object' } }) },
@@ -557,7 +839,7 @@ const ShippingMethod = {
         },
         post: {
           summary: 'Mint an API key (admin; secret returned once)',
-          description: 'Optional `scopes` (e.g. ["posts:write"]) restrict the key to resource:action capabilities; omit for full role-based access. `expires_in_days` sets an expiry. `forward_client_ip: true` lets the key\'s server name the shopper a request is for in `X-AstroBaaS-Client-IP` (one address), which per-IP route limits and order risk then use; the header is ignored on every other request.',
+          description: 'Optional `scopes` (e.g. ["posts:write"]) restrict the key to resource:action capabilities (`<resource>:<read|write|*>`, or a named action: `game:play`, `coupons:validate` — POST /api/orders/quote only — `stats:read`; actions are per resource, so `game:read` is refused); omit for full role-based access. On any API-key request, `X-Client-IP` / `X-Client-UA` name the shopper for plugin routes (`ctx.client`); they are ignored on anonymous and cookie requests. `expires_in_days` sets an expiry. `forward_client_ip: true` lets the key\'s server name the shopper a request is for in `X-AstroBaaS-Client-IP` (one address), which per-IP route limits and order risk then use; the header is ignored on every other request.',
           security: [{ bearerApiKey: [] }],
           requestBody: {
             required: true,
@@ -620,9 +902,16 @@ const ShippingMethod = {
       },
       '/api/search': {
         get: {
-          summary: 'Search published content (public)',
-          parameters: [{ name: 'q', in: 'query', schema: { type: 'string' } }],
-          responses: { '200': ok({ type: 'array', items: { type: 'object' } }) },
+          summary: 'Search published posts (public). Products are searched with GET /api/products?search=',
+          parameters: [
+            { name: 'q', in: 'query', schema: { type: 'string' } },
+            {
+              name: 'sort', in: 'query', required: false,
+              schema: { type: 'string', enum: ['relevance', 'newest', 'name_asc', 'name_desc'], default: 'relevance' },
+              description: 'Order of the (at most 20) results, applied to the whole match set before the top 20 are cut. Posts have no price, so `price_asc`/`price_desc` are **422**, as is any unknown value — never silently ignored. Echoed in `meta.sort`.',
+            },
+          ],
+          responses: { '200': ok({ type: 'array', items: { type: 'object' } }), '422': { description: 'Unknown or inapplicable sort.' } },
         },
       },
       '/api/contact': {
@@ -645,10 +934,26 @@ const ShippingMethod = {
             + 'shop never holds a record about somebody who did not ask — which is both the '
             + 'anti-abuse property (you cannot subscribe a stranger) and the lawful-basis one. '
             + 'The 201 is returned whether or not the address is already subscribed and whether '
-            + 'or not the mail went out, so this cannot be used to ask "is this person on your list?".',
+            + 'or not the mail went out, so this cannot be used to ask "is this person on your list?". '
+            + 'A storefront that shows its own consent wording sends it as `consent_text` with a '
+            + '`consent_version` label (both or neither); its sha256 rides in the signed link and is '
+            + 'written to the consent ledger when the link is clicked. Without them the default '
+            + 'core wording is recorded.',
           requestBody: {
             required: true,
-            content: { 'application/json': { schema: { type: 'object', required: ['email'], properties: { email: { type: 'string' } } } } },
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['email'],
+                  properties: {
+                    email: { type: 'string' },
+                    consent_text: { type: 'string', maxLength: 5000, description: 'The exact wording the visitor was shown. Hashed, never stored.' },
+                    consent_version: { type: 'string', maxLength: 64 },
+                  },
+                },
+              },
+            },
           },
           responses: { '201': ok({ type: 'object' }) },
         },
@@ -722,6 +1027,95 @@ const ShippingMethod = {
             '403': { description: 'Staff only' },
             '404': { description: 'No such subscriber' },
           },
+        },
+      },
+      '/api/newsletter/subscribers/export': {
+        get: {
+          summary: 'Export the newsletter subscribers (staff)',
+          description:
+            'Read from the consent ledger: ONLY contacts whose newsletter consent is granted AND '
+            + 'confirmed (double opt-in) AND not withdrawn since. Each carries its proof — when it '
+            + 'was confirmed, the wording version and the sha256 of its text, and what recorded it. '
+            + 'Subscribers from before the ledger were recorded by a migration with '
+            + '`source: "migration"`. `?format=csv` returns a spreadsheet-safe CSV file.',
+          parameters: [
+            { name: 'format', in: 'query', required: false, schema: { type: 'string', enum: ['json', 'csv'] } },
+          ],
+          responses: {
+            '200': ok({ type: 'object', properties: { subscribers: { type: 'array', items: { type: 'object' } }, count: { type: 'integer' } } }),
+            '403': { description: 'Staff only' },
+          },
+        },
+      },
+      '/api/consent/ledger': {
+        get: {
+          summary: 'The consent ledger for one address (admin, read-only)',
+          description:
+            'Every consent-ledger row for the address, every purpose, in the order written — '
+            + '`{ id, email, purpose, granted, version, text_hash, at, ip?, ua?, source, '
+            + 'confirmed_at? }` — and the current state per purpose. The ledger is append-only: '
+            + 'no route edits or deletes a row. Administrators only.',
+          parameters: [
+            { name: 'email', in: 'query', required: true, schema: { type: 'string' } },
+          ],
+          responses: {
+            '200': ok({ type: 'object' }),
+            '400': { description: 'Not an email address' },
+            '403': { description: 'Administrators only' },
+          },
+        },
+      },
+      '/api/consent/ledger/withdraw': {
+        post: {
+          summary: 'Withdraw a consent, as the operator (admin)',
+          description:
+            'APPENDS a `granted: false` row (`source: "admin"`) for the address and purpose; '
+            + 'nothing recorded before is changed. For `newsletter` the address also leaves the list '
+            + 'and `subscriber.unsubscribed` fires. Session + CSRF; audited as '
+            + '`privacy.consent.withdraw`.',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['email', 'purpose'],
+                  properties: { email: { type: 'string' }, purpose: { type: 'string' } },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': ok({ type: 'object' }),
+            '400': { description: 'Invalid address or purpose' },
+            '403': { description: 'Administrators only' },
+          },
+        },
+      },
+      '/api/consent/withdraw': {
+        get: {
+          summary: 'Withdraw a consent by clicking a link (public, token-signed)',
+          description:
+            'The link a person clicks in an email (plugins mint it with '
+            + '`host.consent.withdrawUrl`). Withdraws the one purpose the token names and '
+            + 'redirects to `/consent/withdrawn?ok=1` (or `ok=0` for a bad or expired token).',
+          parameters: [
+            { name: 'token', in: 'query', required: true, schema: { type: 'string' } },
+          ],
+          responses: { '302': { description: 'Redirect to the withdrawn page' } },
+        },
+        post: {
+          summary: 'Withdraw a consent from a link (public, token-signed)',
+          description:
+            'The token (minted by core for one address and ONE purpose, its own signing purpose '
+            + 'so no other link can be replayed here) is in the query string, RFC 8058 style, and '
+            + 'is the whole authorisation: no session, exempt from CSRF. Appends a withdrawal row '
+            + '(`source: "withdraw_link"`). Answers the same 200 for a valid, an invalid and a '
+            + 'missing token, so it reveals nothing about who consented.',
+          parameters: [
+            { name: 'token', in: 'query', required: true, schema: { type: 'string' } },
+          ],
+          responses: { '200': { description: 'Accepted; the consent is withdrawn if the token named one' } },
         },
       },
       '/api/media/update': {
@@ -854,11 +1248,25 @@ const ShippingMethod = {
               description: 'A brand `slug` from GET /api/brands (always leads to that brand, whatever script it is written in), or any spelling of the brand name (matched ignoring case, accents, spacing and punctuation).',
             },
             { name: 'search', in: 'query', schema: { type: 'string' } },
-            { name: 'on_sale', in: 'query', schema: { type: 'boolean' } },
+            { name: 'on_sale', in: 'query', schema: { type: 'boolean' }, description: '`true` or `1`.' },
+            { name: 'featured', in: 'query', schema: { type: 'boolean' }, description: '`true` or `1`.' },
+            {
+              name: 'all', in: 'query', schema: { type: 'boolean' },
+              description: '`true` or `1`: also list drafts and archived products. Staff only; ignored for any other caller.',
+            },
+            {
+              name: 'sort', in: 'query', required: false,
+              schema: { type: 'string', enum: ['relevance', 'price_asc', 'price_desc', 'newest', 'name_asc', 'name_desc'], default: 'relevance' },
+              description: 'Result order, applied by the server over the WHOLE matching set before `limit`/`offset` cut the page, so it composes with filters and paging (`meta.total` and `meta.hasMore` describe the same set whatever the order). `relevance` (default) is the ranked order for a `search` and the shop\'s merchandising order otherwise. `price_asc`/`price_desc` order by the price a buyer is charged (the sale price while a sale is live; a variable product by its cheapest variant; a product with no price last). `newest` is by creation date. `name_asc`/`name_desc` compare names in the `locale` language. Equal keys keep relevance order, so paging is deterministic. An unknown value is **422** with the allowed values in `error.details.sort`, never silently ignored. `price_*` use `price_from_cents` on each product in the response. The order applied is echoed in `meta.sort`. Popularity and rating are not offered: nothing records either.',
+            },
+            { name: 'locale', in: 'query', schema: { type: 'string' }, description: 'Language for translated product text and name collation.' },
             { name: 'limit', in: 'query', schema: { type: 'integer' } },
             { name: 'offset', in: 'query', schema: { type: 'integer' } },
           ],
-          responses: { '200': ok({ type: 'array', items: { $ref: '#/components/schemas/Product' } }) },
+          responses: {
+            '200': ok({ type: 'array', items: { $ref: '#/components/schemas/Product' } }),
+            '422': { description: 'Unknown `sort` value; `error.details.sort` lists the allowed ones. `meta.sort` on 200 echoes the order applied.' },
+          },
         },
         post: {
           summary: 'Create a product (admin/editor)',
@@ -870,8 +1278,12 @@ const ShippingMethod = {
       '/api/products/{id}': {
         get: {
           summary: 'Fetch one product by id or slug (public)',
-          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-          responses: { '200': ok({ $ref: '#/components/schemas/Product' }) },
+          description: 'Active products only. Catalogue staff (admin/editor/manager, or an API key with such a role whose scopes, if it has any, include `products`) who pass `all=true` also get draft and archived products, the same rule as `GET /api/products?all=true`. Everyone else, and staff without `all=true`, gets 404 for those. The staff response is `Cache-Control: private, no-store`.',
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'all', in: 'query', required: false, schema: { type: 'string', enum: ['true', '1'] }, description: 'Catalogue staff only: include draft and archived products. Ignored for anyone else.' },
+          ],
+          responses: { '200': ok({ $ref: '#/components/schemas/Product' }), '404': { description: 'No such product, or not active and the caller is not catalogue staff' } },
         },
         put: {
           summary: 'Update a product (admin/editor)',
@@ -1083,12 +1495,14 @@ const ShippingMethod = {
           requestBody: {
             required: true,
             content: { 'application/json': { schema: { type: 'object', required: ['items'], properties: {
-              items: { type: 'array', items: { type: 'object', required: ['product_id', 'qty'], properties: { product_id: { type: 'string' }, qty: { type: 'integer' } } } },
+              items: { type: 'array', items: { type: 'object', required: ['product_id', 'qty'], properties: { product_id: { type: 'string' }, variant_id: { type: 'string' }, qty: { type: 'integer' }, addons: lineAddonsRequest, prescription: { type: 'object', description: 'As POST /api/orders takes it. Not validated by the quote (the order validates it); handed to the add-on filter, which may price by it.' } } } },
               shipping_country: { type: 'string', description: 'ISO-3166 alpha-2.' },
               shipping_postcode: { type: 'string' },
               shipping_method_id: { type: 'string', description: 'An id from available_shipping_methods. Its COST is always re-derived server-side.' },
               coupon_code: { type: 'string' },
-              email: { type: 'string', description: 'Only used to evaluate per-customer coupon limits.' },
+              email: { type: 'string', description: 'The buyer\'s email, for coupon rules that depend on it: per-customer limits, and coupons bound to one email (compared case-insensitively). Send the address checkout will send, or an email-bound code is refused (coupon.email_mismatch for staff; coupon.not_found for anyone else, like every refusal but coupon.min_subtotal).' },
+              shipping_address: { $ref: '#/components/schemas/Address', description: 'Read as POST /api/orders reads it: its country/postcode are the destination when shipping_country/shipping_postcode are absent. A malformed address is ignored here (the order refuses it).' },
+              billing_address: { $ref: '#/components/schemas/Address', description: 'Its tax_id (delivery address as fallback) is the buyer\'s VAT id for EU reverse charge — the same reader POST /api/orders uses, so a quote and the order agree.' },
             } } } },
           },
           responses: {
@@ -1097,11 +1511,18 @@ const ShippingMethod = {
               shipping_cents: { type: 'integer' }, tax_cents: { type: 'integer' },
               total_cents: { type: 'integer' }, prices_include_tax: { type: 'boolean' },
               requires_shipping: { type: 'boolean' }, weight_grams: { type: 'integer' },
-              lines: { type: 'array', items: { type: 'object' }, description: 'Per-line net/tax/discount breakdown.' },
+              lines: { type: 'array', items: { type: 'object', properties: {
+                addons: { type: 'array', items: LineAddon, description: 'The add-ons priced into this line, already inside unit_price_cents. Absent when none.' },
+                coupon_gift: { type: 'boolean', description: 'true on the free unit a gift_product coupon added — always the last line, at unit_price_cents 0.' },
+              } }, description: 'Per-line net/tax/discount breakdown.' },
               available_shipping_methods: { type: 'array', items: { type: 'object' } },
-              coupon: { type: 'object', description: 'A REJECTED coupon is reported here with a reason, not as an error — the rest of the quote is still valid.' },
+              coupon: {
+                type: ['object', 'null'],
+                description: 'A REJECTED coupon is reported here with a reason, not as an error — the rest of the quote is still valid. Accepted: { ok: true, code, kind, discount_cents, free_shipping, gift_product_id? }. Rejected: { ok: false, reason, refusal, message, shortfall_cents? }, where refusal is one of the stable codes coupon.not_found, coupon.expired, coupon.not_started, coupon.min_subtotal, coupon.not_applicable, coupon.email_mismatch, coupon.already_redeemed, coupon.exhausted. Anyone who is not staff (an anonymous cart, an API key) gets coupon.not_found for every refusal except coupon.min_subtotal, so the endpoint cannot be used to learn which codes exist. POST /api/orders refuses with the same codes in error.params.refusal.',
+              },
             } }),
-            '400': errRes('Invalid basket, an order limit exceeded, or an unavailable product'),
+            '400': errRes('Invalid basket, an order limit exceeded, an unavailable product, or refused add-ons (reason checkout.addons_*, or the plugin\'s own)'),
+            '500': errRes('An add-on plugin failed or returned an invalid result (reason checkout.addons_failed); nothing is priced without the add-on'),
           },
         },
       },
@@ -1115,7 +1536,7 @@ const ShippingMethod = {
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
           responses: {
             '200': ok({ $ref: '#/components/schemas/Order' }),
-            '400': errRes('No reason given, an unknown tax class, a line index out of range, or an erased order'),
+            '400': errRes('No reason given, a tax class with no country-wide rate in the shop\'s own country (a class only another country has is unknown here), a tax class on a line taxed as destination, reverse charge or export (only `exempt` applies there), a line index out of range, or an erased order'),
             '403': errRes('Missing the override_tax capability'),
             '404': errRes('Not found'),
           },
@@ -1233,6 +1654,50 @@ const ShippingMethod = {
           responses: { '200': ok({ type: 'null' }), '404': errRes('Not found') },
         },
       },
+      '/api/products/{id}/stock-status': {
+        get: {
+          summary: 'Availability of one product: in-stock, low-stock or out-of-stock (public)',
+          description:
+            'The same `stock_status` every product already carries, on its own, for refreshing a '
+            + 'badge without re-fetching the product. `id` is an id or a slug; a product that is '
+            + 'not active is 404, exactly as GET /api/products/{id}. A product with variants '
+            + 'is judged on its enabled variants and lists each one under `variants`. '
+            + 'Untracked stock is `in-stock` with `available_qty: null`. A product '
+            + 'below the threshold is `low-stock`; at 0 or less it is `out-of-stock`, and '
+            + '`backorderable`/`purchasable` say whether an order is still accepted. The threshold '
+            + 'is the product\'s own `low_stock_threshold`, else the shop setting '
+            + '`inventory_low_stock_threshold_qty` (default 5). Pull-based: anonymous responses '
+            + 'share the public read cache (30 s by default), and nothing is reserved.',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': ok({
+              type: 'object',
+              properties: {
+                product_id: { type: 'string' },
+                ...StockStatusInfo.properties,
+                members: {
+                  type: 'array',
+                  description: 'Only for a grouped product: one entry per member a shopper can see, in order. The group itself is the best of them (`tracked` false, `available_qty` null).',
+                  items: { type: 'object', properties: { id: { type: 'string' }, ...StockStatusInfo.properties } },
+                },
+                variants: {
+                  type: 'array',
+                  description: 'Only for a product with variants: one entry per enabled variant.',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      options: { type: 'object', additionalProperties: { type: 'string' } },
+                      ...StockStatusInfo.properties,
+                    },
+                  },
+                },
+              },
+            }),
+            '404': errRes('No active product with that id or slug.'),
+          },
+        },
+      },
       '/api/products/{id}/notify-me': {
         post: {
           summary: 'Tell me when this product is back (public)',
@@ -1275,6 +1740,198 @@ const ShippingMethod = {
           },
         },
       },
+      '/api/products/{id}/reviews': {
+        get: {
+          summary: 'A product\'s published reviews and their aggregate (public)',
+          description:
+            'APPROVED reviews only, newest first by default, as an allow-listed projection: '
+            + 'id, product_id, rating (1–5), title, body, author_name, verified_buyer, locale, '
+            + 'created_at. Never the email, the order number, the spam score or the moderation '
+            + 'state. `aggregate` is computed over every approved review of the product (not the '
+            + 'page) and is the same number `GET /api/products/{id}` puts in its schema.org '
+            + '`aggregateRating`. A review erased at its author\'s request keeps its rating in the '
+            + 'aggregate and is left out of the list. `accepting_reviews` says whether to show a form '
+            + '(the site switch AND the product\'s own `reviews_enabled`). `media` appears on a '
+            + 'review only when a media plugin attaches photos or video through the '
+            + '`review_media` hook — core stores text only. `{id}` is the product id or slug; an '
+            + 'inactive or unknown product is a 404.',
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' }, description: 'Product id or slug.' },
+            { name: 'rating', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 5 }, description: 'Only reviews with this rating.' },
+            { name: 'locale', in: 'query', schema: { type: 'string' }, description: 'Only reviews written in this locale.' },
+            { name: 'verified', in: 'query', schema: { type: 'string', enum: ['1', 'true'] }, description: 'Only verified buyers.' },
+            { name: 'sort', in: 'query', schema: { type: 'string', enum: ['recent', 'rating_desc', 'rating_asc'] } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 50, default: 10 } },
+            { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0 } },
+            { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1 } },
+          ],
+          responses: {
+            '200': ok({
+              type: 'object',
+              properties: {
+                product_id: { type: 'string' },
+                accepting_reviews: { type: 'boolean' },
+                aggregate: {
+                  type: 'object',
+                  properties: {
+                    count: { type: 'integer' },
+                    average: { type: ['number', 'null'], description: 'One decimal; null with no reviews.' },
+                    histogram: {
+                      type: 'object',
+                      description: 'Count per star, keys "1" to "5".',
+                      additionalProperties: { type: 'integer' },
+                    },
+                  },
+                },
+                reviews: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    required: ['id', 'product_id', 'rating', 'body', 'author_name', 'verified_buyer', 'created_at'],
+                    properties: {
+                      id: { type: 'string' },
+                      product_id: { type: 'string' },
+                      rating: { type: 'integer', minimum: 1, maximum: 5 },
+                      title: { type: 'string' },
+                      body: { type: 'string' },
+                      author_name: { type: 'string' },
+                      verified_buyer: { type: 'boolean' },
+                      locale: { type: 'string' },
+                      created_at: { type: 'string', format: 'date-time' },
+                      media: {
+                        type: 'array',
+                        description: 'Only when a media plugin is installed.',
+                        items: {
+                          type: 'object',
+                          properties: {
+                            kind: { type: 'string', enum: ['image', 'video'] },
+                            url: { type: 'string' },
+                            alt: { type: 'string' },
+                            thumbnail_url: { type: 'string' },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            }),
+            '404': { description: 'No such product, or not active' },
+          },
+        },
+        post: {
+          summary: 'Submit a product review (public)',
+          description:
+            'Public and cookie-less, through the shared public gate: per-IP rate limit, honeypot '
+            + '(`hp_url`), and a proof of work that is ALWAYS required on this surface — fetch a '
+            + 'challenge from `GET /api/captcha/challenge?surface=reviews`, solve it, and send '
+            + '`pow_token`. The structural spam score flags and never refuses. `verified_buyer` '
+            + 'is computed by the server — true only when the email has a paid order in state '
+            + 'processing or completed containing this product — and is never read from the body. '
+            + 'A new review is pending until a moderator approves it, unless the shop turned on '
+            + '`reviews_auto_approve_verified` (off by default) and the review is from a verified '
+            + 'buyer and was not flagged. One review per address per product (a rejected one may '
+            + 'be rewritten). The answer is `201 { received: true }` whether the review was '
+            + 'stored, auto-approved, dropped as a duplicate or caught by the honeypot: telling '
+            + 'them apart would reveal whether an address bought a product.',
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' }, description: 'Product id or slug.' },
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['rating', 'body', 'author_name', 'author_email', 'pow_token'],
+                  properties: {
+                    rating: { type: 'integer', minimum: 1, maximum: 5 },
+                    title: { type: 'string', maxLength: 120 },
+                    body: { type: 'string', minLength: 2, maxLength: 4000 },
+                    author_name: { type: 'string', minLength: 1, maxLength: 80 },
+                    author_email: { type: 'string', format: 'email', description: 'Never published.' },
+                    order_number: { type: 'string', maxLength: 40, description: 'Optional. Never published.' },
+                    locale: { type: 'string', description: 'A configured site locale; anything else becomes the default.' },
+                    pow_token: { type: 'string', description: '`challenge::nonce` from the proof-of-work widget.' },
+                    hp_url: { type: 'string', description: 'Honeypot. Leave empty.' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '201': ok({ type: 'object', properties: { received: { type: 'boolean', enum: [true] } } }),
+            '403': { description: 'The proof of work was missing, stale or already used' },
+            '404': { description: 'No such product, not active, or not taking reviews' },
+            '422': { description: 'A field failed validation (named in `error.details`)' },
+            '429': { description: 'Rate limited' },
+          },
+        },
+      },
+      '/api/reviews': {
+        get: {
+          summary: 'The review moderation queue (staff: manage_catalog)',
+          description:
+            'Every moderation state, including rejected and spam, WITH the reviewer\'s email. '
+            + 'Defaults to `status=pending`. `meta.counts` holds the per-state totals for the whole '
+            + 'collection; `meta.products` maps each product id on the page to its name.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [
+            { name: 'status', in: 'query', schema: { type: 'string', enum: ['pending', 'approved', 'rejected', 'spam', 'all'], default: 'pending' } },
+            { name: 'rating', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 5 } },
+            { name: 'verified', in: 'query', schema: { type: 'string', enum: ['yes', 'no'] } },
+            { name: 'product_id', in: 'query', schema: { type: 'string' } },
+            { name: 'q', in: 'query', schema: { type: 'string' }, description: 'Matches name, email, title or body.' },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
+            { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0 } },
+          ],
+          responses: {
+            '200': ok({ type: 'array', items: { type: 'object', description: 'A stored review entity: { id, type, data, created_at, updated_at }.' } }),
+            '401': { description: 'Not signed in' },
+            '403': { description: 'The role may not moderate reviews' },
+          },
+        },
+      },
+      '/api/reviews/moderate': {
+        post: {
+          summary: 'Approve, reject, mark as spam, re-queue or delete reviews (staff: manage_catalog)',
+          description:
+            'Up to 200 ids per call, one audit entry (`review.moderate`) naming the actor, the '
+            + 'action and every id. Approving stamps `published_at` the first time only; every '
+            + 'change of state stamps `moderated_at`. Unknown ids are returned in `missing` rather '
+            + 'than failing the batch. Deleting fires the `after_review_delete` plugin action so a '
+            + 'media module can drop what it stored.',
+          security: [{ bearerApiKey: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['ids', 'action'],
+                  properties: {
+                    ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 200 },
+                    action: { type: 'string', enum: ['approve', 'reject', 'spam', 'pending', 'delete'] },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': ok({
+              type: 'object',
+              properties: {
+                action: { type: 'string' },
+                updated: { type: 'array', items: { type: 'string' } },
+                missing: { type: 'array', items: { type: 'string' } },
+              },
+            }),
+            '401': { description: 'Not signed in' },
+            '403': { description: 'The role may not moderate reviews' },
+            '422': { description: 'Unknown action, or ids missing, duplicated or too many' },
+          },
+        },
+      },
       '/api/orders/{id}/ship': {
         post: {
           summary: 'Record tracking and notify the customer (commerce write)',
@@ -1310,6 +1967,323 @@ const ShippingMethod = {
             '400': { description: 'No tracking number or URL, or a non-http(s) URL' },
             '403': { description: 'Commerce write permission required' },
             '404': { description: 'No such order' },
+          },
+        },
+      },
+      '/api/orders/attribution': {
+        get: {
+          summary: 'Paid orders and revenue by campaign source, medium and campaign (staff only)',
+          description:
+            'Built from `order.attribution`, which exists only for visitors who granted marketing consent. '
+            + 'Paid orders only, the rule the dashboard uses. Revenue is in the shop\'s base currency. '
+            + '`format=csv` returns a spreadsheet (formula-escaped) with the unattributed orders as their own row.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [
+            { name: 'from', in: 'query', schema: { type: 'string', format: 'date' }, description: 'First UTC day, inclusive. Default: 29 days before `to`.' },
+            { name: 'to', in: 'query', schema: { type: 'string', format: 'date' }, description: 'Last UTC day, inclusive. Default: today. At most 731 days in all.' },
+            { name: 'model', in: 'query', schema: { type: 'string', enum: ['first', 'last'], default: 'last' } },
+            { name: 'format', in: 'query', schema: { type: 'string', enum: ['json', 'csv'], default: 'json' } },
+          ],
+          responses: {
+            '200': { ...ok({ $ref: '#/components/schemas/AttributionReport' }), description: 'The report (JSON), or text/csv with format=csv' },
+            '400': errRes('A bad date, a reversed or over-long range, or an unknown model/format'),
+            '401': errRes('Not signed in'),
+            '403': errRes('Your role cannot view orders'),
+          },
+        },
+      },
+      '/api/orders/tags': {
+        get: {
+          summary: 'Staff tags in use, with the number of orders carrying each (staff only)',
+          description:
+            'The autocomplete list and the sidebar counts. Most used first, then alphabetical. '
+            + 'Counts ORDERS, not uses. `meta.max_per_order` and `meta.max_length` carry the limits.',
+          security: [{ bearerApiKey: [] }],
+          responses: {
+            '200': ok({ type: 'array', items: { type: 'object', properties: { tag: { type: 'string' }, count: { type: 'integer' }, color: { type: 'string' } } } }),
+            '403': errRes('Your role cannot view orders'),
+          },
+        },
+        patch: {
+          summary: 'Rename a staff tag on every order that has it (commerce write)',
+          description:
+            'Each order is rewritten atomically and merged with any concurrent edit, but the whole '
+            + 'rename is NOT one transaction: if it is interrupted some orders are renamed and some '
+            + 'are not, and running it again finishes the job. Renaming onto a tag an order already '
+            + 'has merges the two. `failed` counts orders that lost a race on every attempt — re-run to '
+            + 'catch them. Audited with counts only.',
+          security: [{ bearerApiKey: [] }],
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { type: 'object', required: ['from', 'to'], properties: { from: { type: 'string' }, to: { type: 'string', maxLength: 40 } } } } },
+          },
+          responses: {
+            '200': ok({ type: 'object', properties: { tag: { type: 'string' }, changed: { type: 'integer' }, failed: { type: 'integer' } } }),
+            '403': errRes('Commerce write permission required'),
+            '422': errRes('Not a valid tag (reason order_tags.invalid; params.reason says why)'),
+          },
+        },
+        delete: {
+          summary: 'Remove a staff tag from every order that has it (commerce write)',
+          description: 'Per-order atomic, not one transaction — see PATCH. Audited with counts only.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [{ name: 'tag', in: 'query', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': ok({ type: 'object', properties: { changed: { type: 'integer' }, failed: { type: 'integer' } } }),
+            '403': errRes('Commerce write permission required'),
+            '422': errRes('Not a valid tag'),
+          },
+        },
+      },
+      '/api/orders/{id}/downloads': {
+        get: {
+          summary: 'One order\'s download entitlements, with the download log (staff only)',
+          security: [{ bearerApiKey: [] }],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': ok({ type: 'object', properties: { id: { type: 'string' }, entitlements: { type: 'array', items: { $ref: '#/components/schemas/DownloadEntitlement' } } } }),
+            '401': errRes('Not signed in'),
+            '403': errRes('Your role cannot view orders'),
+            '404': errRes('No such order'),
+          },
+        },
+        post: {
+          summary: 'Revoke, restore or reset an entitlement, or grant what a paid order is owed (commerce write)',
+          description:
+            '`{ "action": "revoke" | "restore" | "reset", "entitlement_id": "ent_…" }`, or `{ "action": "grant" }`. '
+            + 'reset puts the count back to 0 and keeps the log. restore undoes any revocation; the download '
+            + 'still requires the order to be processing or completed. grant creates entitlements for an order '
+            + 'that reached a paid status without them (an import, an order older than this feature) and emails the buyer. Audited.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { type: 'object', required: ['action'], properties: { action: { type: 'string', enum: ['revoke', 'restore', 'reset', 'grant'] }, entitlement_id: { type: 'string' } } } } },
+          },
+          responses: {
+            '200': ok({ type: 'object', properties: { id: { type: 'string' }, entitlements: { type: 'array', items: { $ref: '#/components/schemas/DownloadEntitlement' } } } }),
+            '403': errRes('Commerce write permission required'),
+            '404': errRes('No such order or entitlement'),
+            '409': errRes('The order was erased'),
+            '422': errRes('Unknown action or missing entitlement_id (downloads.invalid_action)'),
+            '503': errRes('The order was changed by others on every attempt; safe to retry'),
+          },
+        },
+      },
+      '/api/downloads': {
+        get: {
+          summary: 'The buyer\'s downloads for one order, with freshly signed links',
+          description:
+            'Authorised by the RECEIPT token from the order confirmation email (`?receipt=`). For a headless '
+            + 'storefront\'s own downloads page; the CMS /receipt page shows the same. Never returns a file\'s '
+            + 'location or the download log. A bad token, an erased or cancelled order and an order without '
+            + 'downloads all answer 404.',
+          parameters: [{ name: 'receipt', in: 'query', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': ok({ type: 'array', items: { $ref: '#/components/schemas/BuyerDownload' } }),
+            '404': errRes('No downloads for that receipt'),
+          },
+        },
+      },
+      '/api/downloads/{token}': {
+        get: {
+          summary: 'Download one purchased file through a signed link',
+          description:
+            'The token is an HMAC over the order, entitlement and file, valid for downloads_link_ttl_hours (24) '
+            + 'or until the entitlement expires. Checked live: the order must be processing/completed and not '
+            + 'refunded, the entitlement not revoked, not expired and under its limit. The download is COUNTED '
+            + '(compare-and-set) before anything is sent. A private file is streamed as an attachment; an https '
+            + 'or own-media file is a 302 to it — that URL is then visible to the buyer. HEAD checks the link '
+            + 'and does not count. Refusals carry error.reason downloads.link_invalid | not_available | '
+            + 'revoked | expired | limit_reached | file_missing | busy.',
+          parameters: [{ name: 'token', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': { description: 'The file (private uploads), Content-Disposition: attachment', content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } } },
+            '302': { description: 'Redirect to an externally hosted file, after every check passed' },
+            '403': errRes('Invalid/expired link, not paid, revoked, expired, or limit reached (see error.reason)'),
+            '404': errRes('The file is no longer available (downloads.file_missing)'),
+            '429': errRes('Too many downloads from this address in a minute'),
+          },
+        },
+      },
+      '/api/downloads/upload': {
+        post: {
+          summary: 'Upload a file to sell as a product download, stored privately (catalogue staff)',
+          description:
+            'Multipart, field `file`. PDF, ZIP, EPUB, MP3, PNG, JPEG, GIF or WebP by magic bytes, up to '
+            + 'DOWNLOAD_MAX_FILE_MB (100). Answers `private:pf_<id>` to put in a product\'s downloads[].url — '
+            + 'no URL, because the file is served only through a buyer\'s signed link.',
+          security: [{ bearerApiKey: [] }],
+          requestBody: { required: true, content: { 'multipart/form-data': { schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' } } } } } },
+          responses: {
+            '201': ok({ type: 'object', properties: { url: { type: 'string' }, original_name: { type: 'string' }, mime_type: { type: 'string' }, size: { type: 'integer' } } }),
+            '400': errRes('Empty, unsupported type, or infected'),
+            '401': errRes('Not signed in'),
+            '403': errRes('Your role cannot manage products'),
+            '413': errRes('Larger than DOWNLOAD_MAX_FILE_MB'),
+          },
+        },
+      },
+      '/api/orders/{id}/tags': {
+        get: {
+          summary: 'One order\'s staff tags (staff only)',
+          security: [{ bearerApiKey: [] }],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': ok({ $ref: '#/components/schemas/OrderTagList' }),
+            '403': errRes('Your role cannot view orders'),
+            '404': errRes('No such order'),
+          },
+        },
+        post: {
+          summary: 'Add staff tags to an order (commerce write)',
+          description:
+            'Send `{ "tag": "VIP" }` or `{ "tags": ["VIP", "Fragile"] }`. A tag is trimmed, '
+            + 'whitespace-collapsed and at most 40 characters; tags are the same tag whatever '
+            + 'their casing, and adding one the order already has is not an error. An order holds at '
+            + 'most 10 — a request that would pass it is refused whole, nothing written '
+            + '(reason order_tags.too_many). Decided against the list as it is when written, so two '
+            + 'staff adding different tags at once both land. There is no "replace all" verb on '
+            + 'purpose. Tags are never visible to buyers.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { type: 'object', properties: { tag: { type: 'string', maxLength: 40 }, tags: { type: 'array', maxItems: 10, items: { type: 'string', maxLength: 40 } } } } } },
+          },
+          responses: {
+            '200': ok({ $ref: '#/components/schemas/OrderTagList' }),
+            '403': errRes('Commerce write permission required'),
+            '404': errRes('No such order'),
+            '409': errRes('The order was edited by others on every attempt (order_tags.busy); nothing was written, safe to retry'),
+            '422': errRes('Invalid tag (order_tags.invalid) or more than 10 on the order (order_tags.too_many)'),
+          },
+        },
+        delete: {
+          summary: 'Remove one staff tag from an order (commerce write)',
+          description: 'Any casing. Removing a tag the order does not have is a no-op, not an error.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'tag', in: 'query', required: true, schema: { type: 'string' } },
+          ],
+          responses: {
+            '200': ok({ $ref: '#/components/schemas/OrderTagList' }),
+            '403': errRes('Commerce write permission required'),
+            '404': errRes('No such order'),
+            '422': errRes('Not a valid tag'),
+          },
+        },
+      },
+      '/api/orders/{id}/timeline': {
+        get: {
+          summary: 'Everything that happened to one order, newest first (staff only)',
+          description:
+            'Placed, status changes (who, from, to), payments and refunds with amounts, shipping with '
+            + 'tracking, staff notes and comments, tag edits, tax overrides. Part of it is derived from '
+            + 'the order\'s own fields and part is stored on the order (`derived` says which). '
+            + 'Status, payment-verdict, note, comment and tag events are recorded from the release that '
+            + 'added this route: an older order shows what its own fields say, not a status history it '
+            + 'never kept. `?filter=` is status, payments, shipments, notes, other, or all. '
+            + '`?format=csv` returns the whole filtered list as a spreadsheet instead. Never visible to buyers.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'filter', in: 'query', schema: { type: 'string', enum: ['all', 'status', 'payments', 'shipments', 'notes', 'other'] } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
+            { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0, default: 0 } },
+            { name: 'format', in: 'query', schema: { type: 'string', enum: ['json', 'csv'] } },
+          ],
+          responses: {
+            '200': ok({ type: 'array', items: { $ref: '#/components/schemas/OrderTimelineItem' } }),
+            '403': errRes('Your role cannot view orders'),
+            '404': errRes('No such order'),
+            '422': errRes('Unknown filter (order_timeline.invalid_filter)'),
+          },
+        },
+        post: {
+          summary: 'Add a staff comment to an order\'s timeline (commerce write)',
+          description:
+            'Send `{ "text": "Called the customer, collecting Tuesday" }` (at most 1000 characters). '
+            + 'Appended atomically: two staff commenting at once both land. At most 100 stored events are '
+            + 'kept per order; the oldest are dropped, and derived ones never are.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { type: 'object', required: ['text'], properties: { text: { type: 'string', maxLength: 1000 } } } } },
+          },
+          responses: {
+            '200': ok({ $ref: '#/components/schemas/OrderTimelineItem' }),
+            '403': errRes('Commerce write permission required'),
+            '404': errRes('No such order'),
+            '409': errRes('The order was being edited on every attempt (order_timeline.busy); nothing was written, safe to retry'),
+            '422': errRes('Empty or over-long text (order_timeline.invalid, order_timeline.too_long)'),
+          },
+        },
+      },
+      '/api/orders/{id}/invoice-records': {
+        get: {
+          summary: 'An order\'s invoice and credit-memo records (staff only)',
+          description:
+            'Frozen, NON-FISCAL records: the lines, the VAT per rate, both parties with the buyer\'s VAT id, '
+            + 'as charged. Each carries a `state`: draft, final, issuing, issued (with the issuer\'s number), '
+            + 'issue_failed (with the issuer\'s message), issued_elsewhere or cancelled. AstroBaaS is not a '
+            + 'fiscal device: the only document number a record carries is the one an issuer plugin returned.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': ok({ $ref: '#/components/schemas/InvoiceRecordList' }),
+            '403': errRes('Your role cannot view orders'),
+            '404': errRes('No such order'),
+          },
+        },
+        post: {
+          summary: 'Create, finalise, cancel, credit or mark an invoice record (admin)',
+          description:
+            '`action` (default `create`): `create` a record by hand (`finalise: true` makes it final; while the '
+            + 'order has a live record nothing is created and that record is returned), `finalise` or `cancel` a '
+            + 'draft, `credit` a final record in full (a correction — no money moves; then create a new one), '
+            + '`issued_externally` (issued on the shop\'s POS or elsewhere, `number` optional — no issuer is ever '
+            + 'called for it), `issue` (send to the issuer again after a failure). A final record is never edited. '
+            + 'Two concurrent finalisations make ONE final record. Records are also made by themselves on '
+            + 'payment or shipment (setting `invoice_record_on`) and a credit memo follows every refund.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { type: 'object', properties: {
+              action: { type: 'string', enum: ['create', 'finalise', 'cancel', 'credit', 'issued_externally', 'issue'] },
+              record_id: { type: 'string', description: 'Required for every action but create.' },
+              finalise: { type: 'boolean' },
+              number: { type: 'string', maxLength: 100, description: 'issued_externally only: the document number it was issued with.' },
+            } } } },
+          },
+          responses: {
+            '200': ok({ $ref: '#/components/schemas/InvoiceRecordList' }),
+            '201': ok({ $ref: '#/components/schemas/InvoiceRecordList' }),
+            '403': errRes('Administrator only'),
+            '404': errRes('No such order or record'),
+            '409': errRes('Not allowed in the record\'s state (invoice_records.conflict), or the records kept changing (invoice_records.busy)'),
+            '422': errRes('Malformed request (invoice_records.invalid)'),
+          },
+        },
+      },
+      '/api/invoice-records/{id}/pdf': {
+        get: {
+          summary: 'One invoice or credit-memo record as a PDF',
+          description:
+            'Staff may open any record. A buyer opens a FINAL record of their own order with `?token=`, the '
+            + 'receipt token from the confirmation email; anything else is a 404. Without an issuer the PDF says '
+            + 'it is not a tax document and prints no document number; an internal reference, if the shop uses '
+            + 'one, is labelled as not an invoice number.',
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' }, description: '`<order id>.inv-<n>` or `<order id>.cm-<n>`' },
+            { name: 'token', in: 'query', required: false, schema: { type: 'string' } },
+          ],
+          responses: {
+            '200': { description: 'The PDF', content: { 'application/pdf': { schema: { type: 'string', format: 'binary' } } } },
+            '404': { description: 'No such record, or not yours to see' },
           },
         },
       },
@@ -1475,6 +2449,7 @@ const ShippingMethod = {
           security: [{ bearerApiKey: [] }],
           parameters: [
             { name: 'status', in: 'query', schema: { type: 'string' } },
+            { name: 'tag', in: 'query', schema: { type: 'string' }, description: 'Only orders carrying this staff tag, any casing. A value that is not a valid tag matches nothing.' },
             { name: 'limit', in: 'query', schema: { type: 'integer' } },
             { name: 'offset', in: 'query', schema: { type: 'integer' } },
           ],
@@ -1487,14 +2462,15 @@ const ShippingMethod = {
           ],
           requestBody: {
             required: true,
-            content: { 'application/json': { schema: { type: 'object', required: ['email', 'items'], properties: { email: { type: 'string' }, name: { type: 'string' }, phone: { type: 'string' }, address: { type: 'string' }, note: { type: 'string' }, pow_token: { type: 'string', description: 'Solved proof-of-work (challenge::nonce), required only when the shop enables the checkout anti-spam surface.' }, items: { type: 'array', items: { type: 'object', required: ['product_id', 'qty'], properties: { product_id: { type: 'string' }, qty: { type: 'integer' } } } } } } } },
+            content: { 'application/json': { schema: { type: 'object', required: ['email', 'items'], properties: { email: { type: 'string' }, name: { type: 'string' }, phone: { type: 'string' }, address: { type: 'string' }, note: { type: 'string' }, pow_token: { type: 'string', description: 'Solved proof-of-work (challenge::nonce), required only when the shop enables the checkout anti-spam surface.' }, terms_accepted: { type: 'boolean', description: 'The buyer\'s answer to the Terms & Conditions box. Must be a real boolean. REQUIRED to be true only when the shop has switched `checkout_terms_required` on (read it, with the label and link, from GET /api/settings/get: checkout_terms_required, checkout_terms_label, checkout_terms_url); otherwise optional and stored as sent. Staff sessions are never refused for it.' }, privacy_accepted: { type: 'boolean', description: 'Optional privacy-policy consent, stored as sent. Never required.' }, attribution: { ...OrderAttribution, description: 'Optional campaign attribution from a headless storefront. Send it ONLY when the shopper granted marketing consent on your storefront. Validated strictly: unknown keys, non-text or over-long values, or an `at` that is not a time are a 422 naming the field. Times come from the shopper\'s device and are judged leniently: a future `at` is clamped to now, a touch older than 90 days is dropped, a first touch later than the last gives way to it — a wrong clock never refuses the order. Send one of first/last and it is used for both. Without this field, a checkout from the CMS\'s own pages uses the visitor\'s first-party `astrobaas_attribution` cookie, and only when the consent cookie grants marketing. Always validated; then not stored for staff sessions, for a browser whose own `astrobaas_consent` cookie on this site refuses marketing, or while the shop has switched attribution off.' }, items: { type: 'array', items: { type: 'object', required: ['product_id', 'qty'], properties: { product_id: { type: 'string' }, variant_id: { type: 'string' }, qty: { type: 'integer' }, prescription: { type: 'object', description: 'Per-line prescription, when the product requires one (validated by the optical module).' }, addons: lineAddonsRequest } } } } } } },
           },
           responses: {
             '201': ok({ type: 'object' }),
-            '400': errRes('Invalid payload, unavailable product, an order limit exceeded, a refused coupon (reason checkout.coupon_invalid), or a malformed Idempotency-Key'),
+            '500': errRes('An add-on plugin failed or returned an invalid result (reason checkout.addons_failed). Fail closed: the order is not placed and nothing is charged.'),
+            '400': errRes('Invalid payload, unavailable product, an order limit exceeded, refused add-ons (reason checkout.addons_invalid / addons_unsupported / addons_unpriced, or the plugin\'s own), a refused coupon (reason checkout.coupon_invalid), terms not accepted while the shop requires them (reason checkout.terms_not_accepted), or a malformed Idempotency-Key'),
             '403': errRes('Proof-of-work required and missing or invalid (reason checkout.captcha_failed)'),
             '409': errRes('Insufficient stock — another buyer took the units first. Safe to retry with a smaller quantity. Also: IDEMPOTENCY_IN_PROGRESS, or checkout.promotion_unavailable.'),
-            '422': errRes('Invalid payload fields (e.g. email), or an Idempotency-Key reused with a different body (IDEMPOTENCY_KEY_REUSED)'),
+            '422': errRes('Invalid payload fields (e.g. email, or terms_accepted / privacy_accepted that is not a boolean), or an Idempotency-Key reused with a different body (IDEMPOTENCY_KEY_REUSED)'),
             '429': errRes('Too many unpaid orders for this buyer (reason checkout.too_many_unpaid); Retry-After is set'),
           },
         },
@@ -1507,6 +2483,7 @@ const ShippingMethod = {
         },
         put: {
           summary: 'Update order status/note (staff only). Moving to cancelled/refunded returns the stock; moving back out re-takes it.',
+          description: 'Body fields: `status`, `note` (the customer\'s note), `staff_note` (the shop\'s own). An empty-string `staff_note` CLEARS the note (a client that always sends the field with an empty value will clear it); omit the field to leave it alone. `note: ""` is read as "not sent". Changes are recorded on the order\'s timeline (GET /api/orders/{id}/timeline); the response never carries the timeline.',
           security: [{ bearerApiKey: [] }],
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
           responses: {
@@ -1518,7 +2495,13 @@ const ShippingMethod = {
       },
       '/api/customers': {
         get: {
-          summary: 'List customers (staff only — PII)', security: [{ bearerApiKey: [] }],
+          summary: 'List customers (staff only — PII), newest first. Paged like GET /api/orders: response meta carries total, count, limit, offset, page and hasMore.',
+          security: [{ bearerApiKey: [] }],
+          parameters: [
+            { name: 'search', in: 'query', schema: { type: 'string' }, description: 'Matches email, name or phone; accent- and case-insensitive.' },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
+            { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0, default: 0 } },
+          ],
           responses: { '200': ok({ type: 'array', items: { type: 'object' } }) },
         },
         post: {
@@ -1944,6 +2927,23 @@ const ShippingMethod = {
           responses: { '200': ok({ type: 'object' }) },
         },
       },
+      '/api/stats/orders-this-month': {
+        get: {
+          summary: 'Paid orders placed this month (opt-in, public)',
+          description: 'One number for a storefront\'s social proof: orders with payment_status "paid", counted by the month they were placed in the shop timezone (setting shop_timezone, default UTC). 404 — the same answer as an unknown path — unless the setting public_order_stats_enabled is on. Never revenue, amounts or anything per customer. Cache-Control: public, max-age=60. A scoped API key needs stats:read.',
+          responses: {
+            '200': ok({
+              type: 'object',
+              properties: {
+                count: { type: 'integer', minimum: 0 },
+                month: { type: 'string', pattern: '^\\d{4}-\\d{2}$', description: 'YYYY-MM in the shop timezone.' },
+              },
+              required: ['count', 'month'],
+            }),
+            '404': { description: 'The counter is switched off (or the shop is).' },
+          },
+        },
+      },
       '/api/locales': {
         get: {
           summary: 'Languages this site serves (public)',
@@ -2316,6 +3316,11 @@ const ShippingMethod = {
               type: 'object',
               properties: {
                 ordersAnonymised: { type: 'integer' },
+                reviewsAnonymised: {
+                  type: 'integer',
+                  description: 'Published product reviews kept as a star rating only (name, email, '
+                    + 'order number, title and text removed). Unpublished ones are counted in deleted.reviews.',
+                },
                 deleted: { type: 'object' },
                 staffAccountFound: { type: 'boolean' },
                 notes: { type: 'array', items: { type: 'string' } },
@@ -2405,7 +3410,7 @@ const ShippingMethod = {
         get: {
           summary: 'Issue a proof-of-work anti-spam challenge',
           description: 'Public. Returns {enabled:false} when the surface is unprotected; otherwise a signed single-use challenge the browser solves before submitting the protected form (see /captcha.js).',
-          parameters: [{ name: 'surface', in: 'query', required: true, schema: { type: 'string', enum: ['contact', 'newsletter', 'login', 'forgot'] } }],
+          parameters: [{ name: 'surface', in: 'query', required: true, schema: { type: 'string', enum: ['contact', 'newsletter', 'login', 'forgot', 'forms', 'checkout', 'magic-link', 'reviews'] }, description: '`reviews` is always on; the others follow the operator\'s anti-spam settings.' }],
           responses: {
             '200': ok({ type: 'object', properties: { enabled: { type: 'boolean' }, token: { type: 'string' }, bits: { type: 'integer' } }, required: ['enabled'] }),
             '400': { description: 'Unknown surface' },

@@ -95,6 +95,8 @@ if (process.env.REPLACE_TEST_CHILD) {
     variants: [{ id: 'v1', options: {}, image: original.url }],
     description: `<img src="${original.url}">`,
     i18n: { de: { description: `<p>Deutsch <img src="${original.url}"></p>` } },
+    // A colour swatch's image is a media reference too.
+    attributes: [{ name: 'Colour', values: ['Navy'], visible: true, display: 'swatch', swatches: { Navy: { color: '#1e3a8a', image: original.url } } }],
   });
   const brand = await LocalDB.createBrand({
     name: 'Replace Test Brand', slug: 'replace-test-brand', logo: original.url,
@@ -195,6 +197,8 @@ if (process.env.REPLACE_TEST_CHILD) {
     // leave a second row behind.
     mediaCount,
     variantRewritten: productAfterR?.variants?.[0]?.image === after?.url,
+    swatchRewritten: productAfterR?.attributes?.[0]?.swatches?.Navy?.image === after?.url
+      && productAfterR?.attributes?.[0]?.swatches?.Navy?.color === '#1e3a8a',
     descriptionRewritten: (productAfterR?.description ?? '').includes(after?.url ?? '#'),
     i18nRewritten: (productAfterR?.i18n?.de?.description ?? '').includes(after?.url ?? '#'),
     i18nTextKept: (productAfterR?.i18n?.de?.description ?? '').includes('Deutsch'),
@@ -308,6 +312,7 @@ for (const driver of DRIVERS) {
   // cover_image, a name that exists nowhere, so featured images stayed broken.
   t('the FEATURED IMAGE field is rewritten', r.featuredRewritten === true);
   t('a variant IMAGE OVERRIDE is rewritten', r.variantRewritten === true);
+  t('a colour SWATCH image is rewritten, its colour kept', r.swatchRewritten === true);
   t('the product description HTML is rewritten', r.descriptionRewritten === true);
   t('a TRANSLATED description is rewritten too — bilingual pages must not keep the dead URL',
     r.i18nRewritten === true);

@@ -1,22 +1,25 @@
 import type { APIRoute } from 'astro';
 import { LocalDB } from '../../../lib/localdb';
 import { ApiResponseBuilder } from '../../../lib/api-response';
-import { saveProduct, removeProduct, getProductFieldDefs } from '../../../lib/commerce-service';
+import { saveProduct, removeProduct, getProductFieldDefs, loadGroupMembers } from '../../../lib/commerce-service';
+import { withGroup } from '../../../lib/commerce/grouped';
 import {
   pickWritableProductFields, projectProductForReader, withMediaKind, buildMediaKindIndex, readStockBases,
 } from '../../../lib/product-fields';
-import { canManageCatalog, canDeleteProducts } from '../../../lib/auth';
+import { canManageCatalog, canDeleteProducts, canSeeUnpublishedProducts, includesUnpublishedProducts } from '../../../lib/auth';
 import { projectTranslations, TRANSLATABLE_PRODUCT_FIELDS } from '../../../lib/i18n/catalogue-translations';
 import { contentLocale } from '../../../lib/i18n/resolve';
 import { productNode, structuredData } from '../../../lib/structured-data';
 import { mediaBaseFor } from '../../../lib/media-base';
 import { resolveSiteUrl } from '../../../lib/site-url';
-import { REVIEWS_TYPE, summariseRatings } from '../../../core/builtin-collections';
-import { isPubliclyVisible } from '../../../core/moderation';
+import { reviewAggregate, reviewRowsIfEnabled } from '../../../lib/reviews';
 import { withProductEmbeds } from '../../../lib/embeds';
 import { resolveShopCurrency } from '../../../lib/commerce-settings';
 import { withOmnibusReference } from '../../../lib/commerce/price-history';
 import { withPublicCache } from '../../../lib/http-cache';
+import { withStockStatus, resolveLowStockThreshold } from '../../../lib/commerce/stock-status';
+import { withPriceRange } from '../../../lib/commerce/product-sort';
+import { withResolvedVariants } from '../../../lib/commerce/variants';
 
 /** GET /api/products/[id] — public; accepts an id or a slug. */
 export const GET: APIRoute = async ({ params, url, request, locals }) => {
@@ -33,18 +36,24 @@ export const GET: APIRoute = async ({ params, url, request, locals }) => {
      * the product — a data-loss bug of exactly the shape the e2e regression
      * guard for variants and images was written after.
      */
-    const isStaff = !!locals.user && canManageCatalog(locals.user.role);
-    if (!product || product.status !== 'active') return ApiResponseBuilder.notFound('Product');
+    const isStaff = canSeeUnpublishedProducts(locals.user);
+    // Drafts and archived products: staff who ask with `?all=true` — the SAME
+    // rule the list route applies (`includeInactive` there), from the same
+    // helper. This used to 404 them for everyone, so the admin editor, which
+    // loads through here, could not open a draft. Without `?all=true` every
+    // caller gets the public answer, so a storefront calling with a staff-role
+    // key cannot render a draft by accident. A 404 is never given a
+    // shared-cache policy, and the staff 200 below is `private, no-store`.
+    if (!product || (product.status !== 'active' && !includesUnpublishedProducts(locals.user, url.searchParams))) {
+      return ApiResponseBuilder.notFound('Product');
+    }
     // The SLUG stays global and untranslated: it is a lookup key here, not a
     // URL. Both storefronts mint their own URLs, and nothing in this repo
     // renders a product page — so per-locale slugs would buy nothing today and
     // cost a new uniqueness scope, a resolution rule for two locales
     // disagreeing, and a change to the importer. Purely additive later.
-    const view = projectTranslations(
-      product,
-      contentLocale(null, url.searchParams.get('locale')),
-      TRANSLATABLE_PRODUCT_FIELDS,
-    );
+    const locale = contentLocale(null, url.searchParams.get('locale'));
+    const view = projectTranslations(product, locale, TRANSLATABLE_PRODUCT_FIELDS);
 
     // The storefront renders the product page, so the storefront needs the
     // schema.org Product — and price and availability are exactly the two
@@ -69,14 +78,36 @@ export const GET: APIRoute = async ({ params, url, request, locals }) => {
     // name, so the number has to be one the shop can stand behind.
     const ratings = await (async () => {
       try {
-        const rows = await LocalDB.getCustomEntities(REVIEWS_TYPE) as { data?: Record<string, unknown> }[];
-        return summariseRatings(rows.filter(
-          (r) => String(r.data?.product_id ?? '') === String(view.id) && isPubliclyVisible(r.data),
-        ));
+        // The SAME function GET /api/products/{ref}/reviews reports its
+        // aggregate from, so the stars in the JSON-LD and the stars a
+        // storefront draws from the reviews endpoint cannot disagree.
+        // ...and the same site-switch rule: reviews switched off means no
+        // stars here either, not stars from rows collected before.
+        const rows = await reviewRowsIfEnabled(map, (t) => LocalDB.getCustomEntities(t));
+        return reviewAggregate(rows, String(view.id));
       } catch {
         return { count: 0, average: null, histogram: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } };
       }
     })();
+
+    // Derived on READ, from the count as it is now — never the stored
+    // `in_stock`, which for a product with variants describes the PRODUCT's own
+    // count and says "in stock" when every size is sold out. The same helper
+    // feeds the list route, the stock-status route and the JSON-LD below, so
+    // the badge and the schema.org availability cannot disagree.
+    // Each variant also carries `resolved` — its price, SKU and image after
+    // inheritance, from the checkout's own resolvePurchasable — so a variant
+    // picker shows the price the basket will charge. Same on the list route.
+    //
+    // A grouped product then takes its price ("from"), its availability and
+    // its resolved members from the members as they are now — hidden and draft
+    // members only for staff. See lib/commerce/grouped.ts.
+    const lowStockDefault = resolveLowStockThreshold(map);
+    const stocked = withGroup(withStockStatus(withResolvedVariants(view), lowStockDefault), await loadGroupMembers([product]), {
+      publicOnly: !isStaff,
+      defaultThreshold: lowStockDefault,
+      project: (m) => projectTranslations(m, locale, TRANSLATABLE_PRODUCT_FIELDS),
+    });
 
     const jsonld = structuredData([productNode({
       name: view.name,
@@ -99,14 +130,18 @@ export const GET: APIRoute = async ({ params, url, request, locals }) => {
       // The filter now lives INSIDE productNode, so every caller gets it —
       // themes and plugins included, not just this route.
       images: (view.images ?? []).map((i) => i.src),
-      priceCents: view.price_cents,
+      // `stocked`, not `view`: a grouped product's price is its "from" price.
+      // A group with no visible member has no price at all; publishing a €0
+      // Offer for it would be false, so the offer is left out.
+      priceCents: (stocked as { type?: string }).type === 'grouped' && stocked.price_from_cents == null
+        ? undefined : stocked.price_cents,
       // The shop's currency. The field existed on the node's input type and
       // NOTHING EVER PASSED IT, so `p.currency || 'EUR'` made every install
       // publish euro prices in its product schema — a field Google reads and
       // shows in results. A write-only interface, the same shape as the
       // PrintButton label before it was wired.
       currency: resolveShopCurrency(map),
-      inStock: view.in_stock,
+      inStock: stocked.stock_status.status !== 'out-of-stock',
       status: view.status,
       ratingCount: ratings.count,
       ratingAverage: ratings.average,
@@ -129,11 +164,11 @@ export const GET: APIRoute = async ({ params, url, request, locals }) => {
     // loads through here, with staff-only fields) is `private, no-store`.
     return withPublicCache(ApiResponseBuilder.success(
       withMediaKind(
-        projectProductForReader(
-          withOmnibusReference(withProductEmbeds(view)),
+        withPriceRange(projectProductForReader(
+          withOmnibusReference(withProductEmbeds(stocked)),
           await getProductFieldDefs(),
           isStaff,
-        ),
+        )),
         buildMediaKindIndex(await LocalDB.getMedia()),
       ),
       undefined, {
@@ -176,7 +211,7 @@ export const PUT: APIRoute = async ({ params, request, locals }) => {
     // derived server-side and deliberately not accepted from a client.
     const updates = pickWritableProductFields(body);
     const saved = await saveProduct(updates, params.id!, session.id, bases);
-    if (!saved.ok) return ApiResponseBuilder.error(saved.status, saved.message);
+    if (!saved.ok) return ApiResponseBuilder.error(saved.status, saved.message, saved.details, { code: saved.code });
     return ApiResponseBuilder.success(saved.value, 'Product updated');
   } catch (err) {
     console.error('Product update error:', err);

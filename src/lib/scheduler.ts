@@ -237,6 +237,16 @@ export function startScheduler(env: NodeJS.ProcessEnv = process.env): void {
         // COSTS: an order placed in the same tick should be priced by the
         // window that is live now, not the one that was live a minute ago.
         const { repriced } = await sweepScheduledSales();
+        // Invoice issues whose outcome is unknown (a retryable failure, a
+        // timeout, a claim left by a crash), retried with backoff under the
+        // same idempotency key. Here, on the scheduler's tick, and never in a
+        // checkout, refund or webhook request. Its own catch: an issuer's
+        // outage must not cost the backup and the campaign below their turn.
+        if (sweepMayContinue()) {
+          await sweepInvoiceIssueRetries().catch((err) => {
+            console.error('Invoice issue retry sweep failed:', err instanceof Error ? err.message : err);
+          });
+        }
         await maybeBackUp();
         await maybeCheckLinks();
         await maybeSendCampaign();
@@ -455,7 +465,15 @@ export async function maybeSendCampaign(): Promise<void> {
       return;
     }
 
-    const subscribers = await LocalDB.getSubscribers();
+    // The consent ledger outranks the list: an address whose latest newsletter
+    // row is a withdrawal is never mailed, even if a subscriber row for it
+    // somehow survived (a hand-edited database, a restore). Every withdrawal
+    // path also deletes the row, so on a healthy install this removes nothing
+    // and the cursor walks the same list it always did.
+    const { withdrawnEmails, NEWSLETTER_PURPOSE } = await import('./consent-ledger');
+    const withdrawn = withdrawnEmails(await LocalDB.getConsentRows({ purpose: NEWSLETTER_PURPOSE }));
+    const subscribers = (await LocalDB.getSubscribers())
+      .filter((s) => !withdrawn.has(String(s.email ?? '').trim().toLowerCase()));
     const cursor = Number(active.data?.cursor ?? 0) || 0;
     // The cursor EXACTLY as stored is what the claim compares against. A
     // record from before the cursor existed has none (null).
@@ -977,4 +995,19 @@ export async function sweepPaymentHolds(
   }
   if (expired) console.log(`[astrobaas] released ${expired} unpaid online order(s) past the ${settings.holdMinutes}-minute payment hold`);
   return { expired };
+}
+
+/**
+ * Retry invoice issues whose outcome is unknown — see
+ * `sweepInvoiceIssueRetries` in commerce/invoice-records.ts, which owns every
+ * rule (what is due, the backoff, the cap, the same key). Imported lazily like
+ * the other commerce sweeps, so a site without commerce never loads it.
+ */
+export async function sweepInvoiceIssueRetries(
+  nowMs: number = Date.now(),
+): Promise<{ retried: number; issued: number }> {
+  const { LocalDB } = await import('./localdb');
+  const invoices = await import('./commerce/invoice-records');
+  await LocalDB.init();
+  return invoices.sweepInvoiceIssueRetries(nowMs);
 }

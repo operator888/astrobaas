@@ -15,7 +15,7 @@
  * variant exists to answer.
  */
 
-import type { Product, ProductVariant } from '../../core/models';
+import type { Product, ProductVariant, ResolvedVariantView } from '../../core/models';
 import { normalizeBackorders, deriveSaleState, mainImage } from '../product-fields';
 
 /** Is this product bought through a variant? */
@@ -86,6 +86,11 @@ export function resolvePurchasable(
   product: Product,
   variantId?: string | null,
 ): ResolvedPurchasable | null {
+  // A grouped product is a page of other products, never a line of its own:
+  // it has no price (stored as 0) and no stock. Its members are added to the
+  // cart one line each. Refused here, the one resolver every pricing and
+  // ordering path goes through, so no path can sell "the group" for nothing.
+  if (product.type === 'grouped') return null;
   if (!isVariable(product)) {
     // A simple product. A variant_id sent for one is a client bug, not a
     // silent fallback — refusing surfaces it instead of shipping the wrong item.
@@ -172,13 +177,19 @@ export function totalVariantStock(product: Product): number | null {
   return vs.reduce((sum, v) => sum + (v.stock ?? 0), 0);
 }
 
-export type VariantRejection = 'variant-required' | 'unknown-variant' | 'variant-not-for-simple';
+export type VariantRejection = 'variant-required' | 'unknown-variant' | 'variant-not-for-simple' | 'grouped-not-buyable';
 
 /** Why a purchasable could not be resolved. Distinct messages, distinct fixes. */
 export function explainResolveFailure(
   product: Product,
   variantId?: string | null,
 ): { code: VariantRejection; message: string } {
+  if (product.type === 'grouped') {
+    return {
+      code: 'grouped-not-buyable',
+      message: `${product.name} is a group of products; add the products in it to the cart instead`,
+    };
+  }
   if (!isVariable(product)) {
     return {
       code: 'variant-not-for-simple',
@@ -220,4 +231,42 @@ export function variantAvailability(
   return normalizeBackorders(product.backorders) === 'no'
     ? { ok: false, code: 'insufficient-stock', reason: 'Insufficient stock' }
     : { ok: true };
+}
+
+/**
+ * What a shopper pays for ONE variant, as the checkout will price it — the
+ * read-only `resolved` field on every `variants[]` entry a product route sends.
+ *
+ * A storefront that shows a variant's price has otherwise to re-implement the
+ * inheritance above (a variant without a price costs the parent's) and the
+ * sale rule (`deriveSaleState`, with the product's sale window). Two
+ * implementations of "what does the red one cost" is how a picker shows one
+ * price and the basket charges another, so the answer travels with the data,
+ * from `resolvePurchasable` — the function the checkout itself calls.
+ *
+ * Derived on READ and never stored: `normalizeVariants` keeps only the fields
+ * it names, so a client that reads a product and writes it back has this
+ * dropped (see recurring-bug-patterns, 7). A product without variants is
+ * returned as it is.
+ */
+export function withResolvedVariants<T extends Product>(product: T): T {
+  if (!Array.isArray(product.variants) || !product.variants.length) return product;
+  return {
+    ...product,
+    variants: product.variants.map((v) => {
+      // resolvePurchasable refuses a disabled variant (an order cannot name
+      // it). Its price is still a fact worth stating to a staff reader, so it
+      // is resolved as if enabled; a storefront never offers it anyway.
+      const r = resolvePurchasable({ ...product, variants: [{ ...v, enabled: true }] } as Product, v.id);
+      if (!r) return v;
+      const resolved: ResolvedVariantView = {
+        price_cents: r.price_cents,
+        regular_price_cents: r.regular_price_cents,
+        on_sale: r.on_sale,
+        ...(r.sku ? { sku: r.sku } : {}),
+        ...(r.image ? { image: r.image } : {}),
+      };
+      return { ...v, resolved };
+    }),
+  };
 }

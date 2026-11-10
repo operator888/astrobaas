@@ -2,9 +2,10 @@ import type { APIRoute } from 'astro';
 import { LocalDB } from '../../../../lib/localdb';
 import { ApiResponseBuilder } from '../../../../lib/api-response';
 import { canOverrideTax } from '../../../../lib/auth';
-import { resolveTaxSettings } from '../../../../lib/commerce/tax';
+import { resolveTaxSettingsWithPlugins } from '../../../../lib/commerce/tax-plugins';
 import { applyTaxOverride } from '../../../../lib/commerce/tax-override';
 import { recordAudit, AUDIT } from '../../../../lib/audit';
+import { withoutTimeline } from '../../../../lib/commerce/order-timeline';
 
 /**
  * POST /api/orders/{id}/tax-override — depart from the engine's answer.
@@ -53,7 +54,8 @@ export const POST: APIRoute = async ({ params, request, locals }) => {
     const rows = await LocalDB.getSettings();
     const map: Record<string, unknown> = {};
     for (const r of rows) map[r.key] = r.value;
-    const settings = resolveTaxSettings(map);
+    // The same table the quote and the order priced with, plugin rows included.
+    const settings = resolveTaxSettingsWithPlugins(map);
 
     const result = applyTaxOverride(
       order.line_totals,
@@ -115,7 +117,7 @@ export const POST: APIRoute = async ({ params, request, locals }) => {
       },
     });
 
-    return ApiResponseBuilder.success(saved, 'Tax overridden');
+    return ApiResponseBuilder.success(saved ? withoutTimeline(saved) : saved, 'Tax overridden');
   } catch (err) {
     console.error('Tax override error:', err);
     return ApiResponseBuilder.serverError('Failed to override tax');

@@ -20,6 +20,13 @@ export const WEBHOOK_EVENTS = [
   'product.deleted',
   'order.created',
   'order.status_changed',
+  /**
+   * A coupon use counted by a placed order. `{ code, coupon_id, order_id,
+   * email_hash }` — the buyer as a SHA-256 of the lower-cased address
+   * (`couponEmailKey`), never the address itself. A cancellation before
+   * payment hands the use back; that shows as `order.status_changed`.
+   */
+  'coupon.redeemed',
   'customer.created',
   /**
    * The newsletter list (C-113).
@@ -42,6 +49,16 @@ export const WEBHOOK_EVENTS = [
    */
   'subscriber.confirmed',
   'subscriber.unsubscribed',
+  /**
+   * A confirmed `newsletter` consent in the consent ledger
+   * (src/lib/consent-service.ts) — the double opt-in completed, from core's own
+   * forms or from a plugin's `host.consent.confirm`. Payload
+   * `{ email_hash, source, at }`: the sha256 of the address, never the address,
+   * so an integration that only counts or correlates signups never holds it.
+   * Fired together with `subscriber.confirmed`, which keeps carrying the
+   * address for ESP sync.
+   */
+  'newsletter.subscribed',
   /**
    * The finance module (src/plugins/finance). Fired only while it is active.
    * `invoice.paid` is the one most integrations want: unlock a licence, start

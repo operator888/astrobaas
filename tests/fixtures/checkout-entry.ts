@@ -13,7 +13,13 @@
  * fix instead of failing to bundle.
  */
 export { LocalDB } from '../../src/lib/localdb';
-export { placeOrder, setOrderStatus } from '../../src/lib/commerce-service';
+export { placeOrder, setOrderStatus, couponMove } from '../../src/lib/commerce-service';
+// Coupons v2 (tests/coupons-v2.test.mjs): the service behind host.coupons, and
+// the add-on decision the coupon maths must agree with.
+export * as couponService from '../../src/lib/commerce/coupon-service';
+export * as lineAddons from '../../src/lib/commerce/line-addons';
+export { POST as postCoupon } from '../../src/pages/api/coupons/index';
+export { PUT as putCoupon } from '../../src/pages/api/coupons/[id]';
 export { pluginManager, PLUGIN_HOOKS } from '../../src/lib/plugin-system';
 export { applyVerifiedEvent, refundOrder, startPayment } from '../../src/lib/payments/service';
 export * as registry from '../../src/lib/payments/registry';
@@ -33,3 +39,13 @@ export { POST as postQuote } from '../../src/pages/api/orders/quote';
 export { POST as postPaymentStart } from '../../src/pages/api/payments/start';
 export { POST as postWebhook } from '../../src/pages/api/payments/webhook/[provider]';
 export { POST as postMagicLink } from '../../src/pages/api/auth/magic-link';
+// The public settings read, for the checkout-terms test: what a storefront is
+// told about the consent box is part of the contract.
+export { GET as getPublicSettings } from '../../src/pages/api/settings/get';
+// The host external plugins receive (reverse-charge test: host.createStore),
+// and the store a route handler / migration gets, to prove they agree.
+export * as externalPlugins from '../../src/plugins/external';
+export { createPluginStore } from '../../src/lib/plugin-platform/store';
+// The tax-override route, for the TAX_RATES seam test: an override must see
+// the same rate table the quote and the order priced with.
+export { POST as postTaxOverride } from '../../src/pages/api/orders/[id]/tax-override';

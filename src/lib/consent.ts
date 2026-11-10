@@ -45,7 +45,16 @@ export const CONSENT_COOKIE = 'astrobaas_consent';
  * A stored record from an older version does not cover the new processing, so
  * it is treated as absent and the banner returns.
  */
-export const CONSENT_VERSION = 1;
+export const CONSENT_VERSION = 2;
+/*
+ * Version history, because a bump re-asks every visitor and the reason should
+ * be findable:
+ *   1 — the four categories as first shipped.
+ *   2 — `marketing` now also covers this shop remembering, first-party, which
+ *       campaign link brought the visitor, so an order can be credited to it
+ *       (commerce/attribution.ts). A "yes" given under v1 was a yes to ad
+ *       platforms measuring their ads, not to this; it is asked again.
+ */
 
 /** Six months. Long enough not to nag, short enough to be a real refresh. */
 export const CONSENT_MAX_AGE_DAYS = 182;
@@ -120,7 +129,7 @@ export const CONSENT_STRINGS: Record<string, ConsentStrings> = {
       },
       marketing: {
         label: 'Marketing',
-        description: 'Lets advertising platforms measure whether their ads brought you here and show you more relevant ads elsewhere.',
+        description: 'Lets this shop remember which ad or campaign link brought you here, so an order can be credited to it, and lets advertising platforms measure their ads and show you more relevant ones elsewhere.',
       },
     },
   },
@@ -148,7 +157,7 @@ export const CONSENT_STRINGS: Record<string, ConsentStrings> = {
       },
       marketing: {
         label: 'Διαφήμιση',
-        description: 'Επιτρέπει σε διαφημιστικές πλατφόρμες να μετρούν αν οι διαφημίσεις τους σας έφεραν εδώ και να σας δείχνουν πιο σχετικές διαφημίσεις αλλού.',
+        description: 'Επιτρέπει στο κατάστημα να θυμάται ποια διαφήμιση ή καμπάνια σας έφερε εδώ, ώστε μια παραγγελία να αποδίδεται σε αυτή, και σε διαφημιστικές πλατφόρμες να μετρούν τις διαφημίσεις τους και να σας δείχνουν πιο σχετικές αλλού.',
       },
     },
   },
@@ -176,7 +185,7 @@ export const CONSENT_STRINGS: Record<string, ConsentStrings> = {
       },
       marketing: {
         label: 'Marketing',
-        description: 'Erlaubt Werbeplattformen zu messen, ob ihre Anzeigen Sie hierher gebracht haben, und Ihnen anderswo relevantere Werbung zu zeigen.',
+        description: 'Erlaubt diesem Shop, sich zu merken, welche Anzeige oder Kampagne Sie hierher gebracht hat, damit eine Bestellung ihr zugeordnet werden kann, und Werbeplattformen, ihre Anzeigen zu messen und Ihnen anderswo relevantere Werbung zu zeigen.',
       },
     },
   },

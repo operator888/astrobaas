@@ -36,6 +36,22 @@ function check(name, cond) {
 // --- catalog ---
 check('PLUGIN_HOOKS has the live filter names', PLUGIN_HOOKS.POST_CONTENT === 'post_content' && PLUGIN_HOOKS.API_POSTS_GET === 'api_posts_get');
 check('PLUGIN_HOOKS exposes the lifecycle/render hooks', PLUGIN_HOOKS.BEFORE_POST_SAVE === 'before_post_save' && PLUGIN_HOOKS.AFTER_POST_SAVE === 'after_post_save' && PLUGIN_HOOKS.HEAD_TAGS === 'head_tags');
+check('PLUGIN_HOOKS has the tax-id verdict seam', PLUGIN_HOOKS.TAX_ID_VERDICT === 'tax_id_verdict');
+{
+  // The catalog and the plugin author's documentation cannot drift: every
+  // constant has a row in PLUGIN_DEVELOPMENT.md's hook tables, by name. Driven
+  // from the constant, not a hand-kept list, so a new hook fails here until it
+  // is documented.
+  const { readFileSync } = await import('node:fs');
+  const doc = readFileSync(new URL('../PLUGIN_DEVELOPMENT.md', import.meta.url), 'utf8');
+  const rows = new Set([...doc.matchAll(/^\| `([A-Z_]+)` \|/gm)].map((m) => m[1]));
+  const keys = Object.keys(PLUGIN_HOOKS);
+  const undocumented = keys.filter((k) => !rows.has(k));
+  check(`every PLUGIN_HOOKS constant (${keys.length}) has a row in PLUGIN_DEVELOPMENT.md (missing: ${undocumented.join(', ') || 'none'})`,
+    keys.length > 0 && undocumented.length === 0);
+  const values = Object.values(PLUGIN_HOOKS);
+  check('no two hooks share a name', new Set(values).size === values.length);
+}
 
 // --- before_post_save can mutate the draft + receives the ctx arg ---
 const pmSave = new PluginManager();

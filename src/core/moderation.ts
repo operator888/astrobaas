@@ -37,8 +37,16 @@
  * inverted. `field-rule-build.ts` reserves it alongside `_layout`.
  */
 
-/** The states a moderated record moves through. */
-export const MODERATION_STATES = ['pending', 'approved', 'rejected'] as const;
+/**
+ * The states a moderated record moves through.
+ *
+ * `spam` is separate from `rejected` on purpose. A rejected review is a real
+ * person's opinion the shop chose not to publish, and it may be reconsidered;
+ * spam is junk, and keeping the two apart lets an operator empty one without
+ * reading the other. Neither is public, and both stay readable by staff — a
+ * queue that destroys what it hides cannot be audited.
+ */
+export const MODERATION_STATES = ['pending', 'approved', 'rejected', 'spam'] as const;
 export type ModerationState = (typeof MODERATION_STATES)[number];
 
 /** The reserved key holding a record's approval state. */

@@ -67,6 +67,63 @@ same body to `/api/plugin/finance/inbound/sale`, signed:
 X-Finance-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(FINANCE_INBOUND_SECRET, "<t>.<raw body>")>
 ```
 
+**Invoices another system issued** (the website's `ON-…` invoices): the other
+system stays the issuer, Billing keeps a mirror so the VAT figures, DATEV, the
+reports and the dashboard see every sale. Number, totals and PDF are kept as
+issued (an imported document, like the Lexware import); a number already used
+here is refused.
+
+```http
+POST /api/plugin/finance/documents/mirror        (API key, finance:write)
+POST /api/plugin/finance/inbound/invoice         (signed, same body)
+
+{
+  "source": "ecws-website", "external_id": "<invoice uuid>",
+  "kind": "invoice",                       // or "cancellation" + "cancels_external_id"
+  "number": "ON-2026-00012", "issue_date": "2026-10-20",
+  "service_date": "2026-10-20", "service_date_end": null,
+  "tax_treatment": "domestic", "tax_rate": 19,  // reverse_charge_eu / third_country_service at 0
+  "net_cents": 10000, "tax_cents": 1900, "gross_cents": 11900,
+  "customer": { "company_name": "…", "name": "…", "email": "…", "vat_id": "…", "external_id": "<account id>",
+                "address": { "street": "…", "zip": "…", "city": "…", "country": "DE" } },
+  "lines": [{ "name": "…", "quantity": 1, "unit_net_cents": 10000 }],
+  "paid": { "method": "card", "paid_at": "2026-10-20T10:00:00Z", "reference": "pi_…" },
+  "pdf_base64": "JVBERi0…", "pdf_sha256": "…"
+}
+```
+
+A cancellation becomes a credit note with its own number; the mirrored original
+is marked cancelled, and what the customer paid shows as a refund owed until a
+later delivery carries `paid` (the refund). Delivering the same document again
+only adds what was missing (PDF, payment). The PDF must stay under 1.4 MB.
+**Do not also send the same sale to `/sales`** — that would book it twice.
+
+**Requests and orders** (the "Anfragen" inbox): contact and quote forms, the
+cost calculator, orders and requests from a customer portal. Not bookkeeping —
+a lead to answer. "→ Angebot" makes a contact and a quote draft from it.
+
+```http
+POST /api/plugin/finance/requests                (API key, finance:write)
+POST /api/plugin/finance/inbound/request         (signed, same body)
+
+{
+  "source": "ecws-website", "external_id": "order:<uuid>",
+  "kind": "order",           // order | request | inquiry | contact | quote | estimate
+  "number": "EC-2026-00012", "status": "submitted", "created_at": "…",
+  "subject": "…", "message": "…", "page": "/kontakt", "link": "https://…/admin/orders/…",
+  "customer": { "name": "…", "company_name": "…", "email": "…", "phone": "…", "external_id": "…" },
+  "items": [{ "name": "…", "quantity": 1, "unit_net_cents": 150000, "billing": "one_off" },
+            { "name": "…", "quantity": 1, "unit_net_cents": null }],   // null = on request
+  "net_cents": 150000, "tax_cents": 28500, "gross_cents": 178500, "tax_rate": 19,
+  "extra": { "Budget": "5–10 k€" }
+}
+```
+
+Again idempotent: a later delivery refreshes what the other system knows (its
+status, items), never the inbox state, the note or the quote made here.
+`GET /requests?state=open|new|in_progress|quoted|done|dismissed|all&q=`,
+`PUT /requests/:id {state, note}`, `POST /requests/:id/quote`.
+
 **AstroBaaS shop** — Settings → "Shop-Bestellungen automatisch abrechnen":
 a completed order becomes a finalized, paid invoice.
 
@@ -76,7 +133,7 @@ a completed order becomes a finalized, paid invoice.
 `expense.created`.
 
 **MCP** — `npx astrobaas-mcp` exposes `finance_*` tools (summary, documents,
-payments, expenses, VAT report, bank matching, recurring). Destructive tools
+payments, expenses, VAT report, bank matching, recurring, the requests inbox). Destructive tools
 (finalize, cancel, send) say so in their descriptions so an agent confirms
 first.
 
@@ -85,7 +142,7 @@ first.
 | Variable | Purpose |
 | --- | --- |
 | `FINANCE_PUBLIC_URL` | Origin used in customer links (defaults to `SITE_URL`, then the request origin). |
-| `FINANCE_INBOUND_SECRET` | Enables the signed `/inbound/sale` endpoint. |
+| `FINANCE_INBOUND_SECRET` | Enables the signed `/inbound/sale`, `/inbound/invoice` and `/inbound/request` endpoints. |
 | `PRIVATE_UPLOADS_DIR` | Where the GoBD archive lives (`<dir>/finance/`). **Back it up.** |
 
 ## Data and retention

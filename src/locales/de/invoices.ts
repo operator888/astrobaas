@@ -1,0 +1,41 @@
+/**
+ * de — admin.invoices.* (see en/invoices.ts).
+ */
+export const invoices = {
+  'admin.invoices.heading': 'Rechnungsaufzeichnungen',
+  'admin.invoices.none': 'Noch keine Aufzeichnung.',
+  'admin.invoices.kindInvoice': 'Verkaufsaufzeichnung',
+  'admin.invoices.kindMemo': 'Gutschrift',
+  'admin.invoices.stateDraft': 'Entwurf',
+  'admin.invoices.stateFinal': 'Endgültig',
+  'admin.invoices.stateCancelled': 'Storniert',
+  'admin.invoices.stateIssuing': 'Wird ausgestellt',
+  'admin.invoices.stateIssued': 'Ausgestellt',
+  'admin.invoices.stateIssueFailed': 'Ausstellung fehlgeschlagen',
+  'admin.invoices.stateIssuedElsewhere': 'Anderswo ausgestellt',
+  'admin.invoices.issuerNumber': 'Beleg-Nr. {number}',
+  'admin.invoices.externalNumber': 'Anderswo als {number}',
+  'admin.invoices.internalReference': 'Interne Ref. {ref} (keine Rechnungsnummer)',
+  'admin.invoices.credits': 'schreibt {id} gut',
+  'admin.invoices.vatIncomplete': 'Keine stimmige MwSt.-Aufschlüsselung zu dieser Bestellung',
+  'admin.invoices.pdf': 'PDF',
+  'admin.invoices.create': 'Aufzeichnung anlegen',
+  'admin.invoices.createFinal': 'Endgültige Aufzeichnung anlegen',
+  'admin.invoices.finalise': 'Abschließen',
+  'admin.invoices.cancel': 'Entwurf verwerfen',
+  'admin.invoices.credit': 'Vollständig gutschreiben',
+  'admin.invoices.markExternal': 'Anderswo ausgestellt…',
+  'admin.invoices.retry': 'Erneut an den Aussteller senden',
+  'admin.invoices.notTaxDocument': 'Kein Aussteller eingerichtet: Diese Aufzeichnungen sind keine steuerlichen Dokumente.',
+  'admin.invoices.issuerInUse': 'Ausgestellt über {issuer}.',
+  'admin.invoices.markExternalPrompt': 'Belegnummer, unter der es anderswo ausgestellt wurde (optional):',
+  'admin.invoices.creditConfirm': 'Diese Aufzeichnung vollständig gutschreiben? Es wird kein Geld erstattet; nutzen Sie dies zur Korrektur und legen Sie danach eine neue an.',
+  'admin.invoices.finaliseConfirm': 'Diese Aufzeichnung abschließen? Eine endgültige Aufzeichnung kann nie mehr geändert werden.',
+  'admin.invoices.declined': 'Nicht ausgestellt — abgelehnt von {reasons}',
+  'admin.invoices.retryAt': 'Automatischer neuer Versuch nach {at} (Versuch {n} von {max})',
+  'admin.invoices.retryExhausted': 'Automatische Versuche aufgebraucht; bitte von Hand erneut senden.',
+  'admin.invoices.issuedLate': 'verspätet bestätigt',
+  'admin.invoices.failed': 'Die Rechnungsaufzeichnungen konnten nicht aktualisiert werden.',
+};
+
+export default invoices;

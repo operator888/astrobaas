@@ -175,3 +175,39 @@ export function browserStorage(): CartStorage {
 export function cartCount(lines: readonly CartLine[]): number {
   return lines.reduce((n, l) => n + l.qty, 0);
 }
+
+/**
+ * The field-name prefix a group page's quantity boxes use: `add.<product id>`.
+ *
+ * A group page is a plain `<form method="get" action="/cart/">`, so "Add
+ * selected to cart" needs no JavaScript on the group page: the browser sends
+ * `/cart/?add.p1=1&add.p2=0`, and the cart page — which needs JavaScript
+ * anyway, to ask the CMS for prices — takes those lines into the cart. Each
+ * member becomes its own line; a group is never a line itself.
+ */
+export const GROUP_FIELD_PREFIX = 'add.';
+
+/**
+ * The lines a group form sent, from a query string. A quantity of 0 (or junk)
+ * leaves that product out — that is how a shopper deselects one. Anything that
+ * is not a valid line is ignored, exactly as `readCart` ignores it.
+ */
+export function linesFromQuery(search: string): CartLine[] {
+  const out: CartLine[] = [];
+  let params: URLSearchParams;
+  try { params = new URLSearchParams(search); } catch { return out; }
+  for (const [key, value] of params) {
+    if (!key.startsWith(GROUP_FIELD_PREFIX)) continue;
+    const line = validLine({ product_id: key.slice(GROUP_FIELD_PREFIX.length), qty: value });
+    if (!line || out.some((l) => sameLine(l, line.product_id))) continue;
+    if (out.length < MAX_LINES) out.push(line);
+  }
+  return out;
+}
+
+/** Add what a group form sent to the cart. Returns how many lines it added. */
+export function addFromQuery(storage: CartStorage, search: string): number {
+  const lines = linesFromQuery(search);
+  for (const l of lines) addToCart(storage, l.product_id, l.qty);
+  return lines.length;
+}

@@ -34,6 +34,10 @@ export const attention = {
   'admin.attention.flagged-orders.body': 'Die Risikosignale lehnen nie eine Bestellung ab — sie bitten nur um einen Menschen. Diese sind noch offen.',
   'admin.attention.flagged-orders.action': 'Jetzt prüfen',
 
+  'admin.attention.pending-reviews.title': '{count} Bewertungen warten auf Freigabe',
+  'admin.attention.pending-reviews.body': 'Kundinnen und Kunden sehen eine Bewertung erst nach der Freigabe — und wer sie geschrieben hat, wartet darauf.',
+  'admin.attention.pending-reviews.action': 'Jetzt moderieren',
+
   'admin.attention.active-out-of-stock.title': '{count} Produkte sind gelistet, aber nicht vorrätig',
   'admin.attention.active-out-of-stock.body': 'Kundinnen und Kunden finden sie und können sie nicht kaufen. Gewollt bei Nachbestellungen, sonst Sackgassen im Katalog.',
   'admin.attention.active-out-of-stock.action': 'Katalog öffnen',

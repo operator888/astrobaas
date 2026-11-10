@@ -3,10 +3,16 @@ import { LocalDB } from '../../../../lib/localdb';
 import { checkReferences, resolveMediaUrls } from '../../../../lib/content-refs';
 import { ApiResponseBuilder } from '../../../../lib/api-response';
 import { validate } from '../../../../lib/validate';
-import { getContentType, schemaForContentType, contentTypeIsPublic } from '../../../../core/content-types';
+import {
+  getContentType, schemaForContentType, contentTypeIsPublic, projectEntityForReader, canReadPrivateFields,
+} from '../../../../core/content-types';
 import { ensurePluginsBootstrapped } from '../../../../plugins';
 import { fireEvent } from '../../../../lib/webhooks';
+import { recordAudit, AUDIT } from '../../../../lib/audit';
 import { isPubliclyVisible, isModerationState, MODERATION_STATES, STATUS_KEY } from '../../../../core/moderation';
+import {
+  REVIEWS_TYPE, reviewModerationPatch, announceReviewRemoved, type ReviewRow,
+} from '../../../../lib/reviews';
 
 // GET    /api/content/<type>/<id> — fetch one (public read, like the list).
 // PUT    /api/content/<type>/<id> — update (admin/editor).
@@ -51,7 +57,13 @@ export const GET: APIRoute = async ({ params, locals }) => {
     // The same resolution the list does, from the same function: a reader must
     // not get a picture on one endpoint and a bare id on the other.
     const [resolved] = await resolveMediaUrls(def, [entity as { data?: Record<string, unknown> }]);
-    return ApiResponseBuilder.success(resolved, 'Entity retrieved successfully');
+    // The same projection the list applies, from the same function: a field
+    // the type marks `private` must not be one id-guess away on this route.
+    const privileged = canReadPrivateFields(locals.user?.role);
+    return ApiResponseBuilder.success(
+      projectEntityForReader(def, resolved, privileged),
+      'Entity retrieved successfully',
+    );
   } catch (err) {
     console.error('Custom content get error:', err);
     return ApiResponseBuilder.serverError('Failed to fetch entity');
@@ -128,12 +140,29 @@ export const PUT: APIRoute = async ({ params, request, locals }) => {
       termPatch = { [TERMS_FIELD]: cleanTerms(rawTerms, taxonomyDefs, type) };
     }
 
+    // A REVIEW moved between states from this generic screen gets the same
+    // timestamps (`moderated_at`, first `published_at`) as one moved from the
+    // review queue — one function decides, so the two doors cannot drift.
+    let statusPatch: Record<string, unknown> = requestedStatus !== undefined ? { [STATUS_KEY]: requestedStatus } : {};
+    if (type === REVIEWS_TYPE && requestedStatus !== undefined) {
+      const prev = await LocalDB.getCustomEntity(type, String(params.id)) as ReviewRow | null | undefined;
+      statusPatch = { [STATUS_KEY]: requestedStatus, ...reviewModerationPatch(prev?.data, requestedStatus, new Date().toISOString()) };
+    }
+
     const updated = await LocalDB.updateCustomEntity(type, String(params.id), {
       ...(value as Record<string, any>),
       ...termPatch,
-      ...(requestedStatus !== undefined ? { [STATUS_KEY]: requestedStatus } : {}),
+      ...statusPatch,
     });
     if (!updated) return ApiResponseBuilder.notFound(def.label);
+    // Moderating a review from this generic screen is audited like the queue,
+    // so "who published that review?" has one answer whichever door was used.
+    if (type === REVIEWS_TYPE && requestedStatus !== undefined) {
+      recordAudit(AUDIT.REVIEW_MODERATE, {
+        actor: session.id, target: '1 review', ip: locals.ip,
+        metadata: { action: `status:${String(requestedStatus)}`, ids: [String(params.id)], missing: [], via: 'content' },
+      });
+    }
     fireEvent('content.updated', { type, entity: updated }).catch(() => {});
     return ApiResponseBuilder.success(updated, `${def.label} updated successfully`);
   } catch (err) {
@@ -154,8 +183,14 @@ export const DELETE: APIRoute = async ({ params, locals }) => {
     const def = getContentType(type);
     if (!def) return ApiResponseBuilder.notFound('Content type');
 
+    // A review's media (the paid seam) is keyed by the review id — tell the
+    // module it is gone, from this door as well as the review queue's.
+    const before = type === REVIEWS_TYPE
+      ? await LocalDB.getCustomEntity(type, String(params.id)) as ReviewRow | null | undefined
+      : null;
     const ok = await LocalDB.deleteCustomEntity(type, String(params.id));
     if (!ok) return ApiResponseBuilder.notFound(def.label);
+    if (before) announceReviewRemoved(before, 'deleted');
     fireEvent('content.deleted', { type, id: String(params.id) }).catch(() => {});
     return ApiResponseBuilder.deleted();
   } catch (err) {

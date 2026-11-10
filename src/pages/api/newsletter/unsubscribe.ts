@@ -1,7 +1,8 @@
 import type { APIRoute } from 'astro';
 import { LocalDB } from '../../../lib/localdb';
 import { readUnsubscribeToken } from '../../../lib/newsletter-confirm';
-import { fireEvent } from '../../../lib/webhooks';
+import { withdrawConsent } from '../../../lib/consent-service';
+import { NEWSLETTER_PURPOSE } from '../../../lib/consent-ledger';
 
 /**
  * Leave the mailing list.
@@ -31,43 +32,20 @@ export const prerender = false;
  * two copies of "delete every matching row and fire exactly one event" is two
  * chances to fix one of them.
  */
-async function unsubscribeByToken(token: string | null): Promise<boolean> {
+async function unsubscribeByToken(token: string | null, source: string): Promise<boolean> {
   await LocalDB.init();
   const email = readUnsubscribeToken(token);
   if (!email) return false;
-
-  const all = await LocalDB.getSubscribers();
-    // Every matching row, not the first: nothing in any driver enforces
-    // uniqueness, so a list that somehow holds a duplicate must still end up
-    // with the person gone rather than half-gone.
-  const matches = (all as { id?: string; email?: string }[]).filter(
-    (row) => typeof row?.email === 'string' && row.email.trim().toLowerCase() === email,
-  );
-  for (const m of matches) {
-    if (m.id) await LocalDB.deleteSubscriber(m.id);
-  }
-    // ONE event for the person, not one per duplicate row (C-113). This is the
-    // event that must reach the ESP: an unsubscribe this site honours and
-    // Mailchimp does not is the shape that ends in a spam complaint, which is
-    // why an integration built on the confirm event alone would be worse than
-    // none at all. Fire-and-forget — somebody's automation being down must not
-    // stop a person leaving.
-    // Fired whether or not a row was here to delete.
-    //
-    // Gating it on `matches.length` looked tidy and was the named failure: the
-    // reader clicks unsubscribe, the row goes, the webhook delivery to the ESP
-    // fails, they keep receiving ESP mail, they click the link in the NEXT
-    // message — and this time there is no row, so no event, so they are
-    // permanently un-removable from the ESP. An unsubscribe is idempotent at
-    // every ESP, so a duplicate costs nothing and a missing one costs a spam
-    // complaint.
-  void fireEvent('subscriber.unsubscribed', { email, unsubscribed_at: new Date().toISOString() });
+  // A WITHDRAWAL in the consent ledger, which also removes every subscriber row
+  // for the address and fires `subscriber.unsubscribed` exactly once — even when
+  // no row was left to delete (consent-service.ts `unsubscribeAll` says why).
+  await withdrawConsent({ email, purpose: NEWSLETTER_PURPOSE, source });
   return true;
 }
 
 export const GET: APIRoute = async ({ url, redirect }) => {
   try {
-    const done = await unsubscribeByToken(new URL(url).searchParams.get('token'));
+    const done = await unsubscribeByToken(new URL(url).searchParams.get('token'), 'unsubscribe_link');
     return redirect(`/newsletter/unsubscribed?ok=${done ? 1 : 0}`, 302);
   } catch (err) {
     console.error('Newsletter unsubscribe error:', err);
@@ -100,7 +78,7 @@ export const GET: APIRoute = async ({ url, redirect }) => {
  */
 export const POST: APIRoute = async ({ url }) => {
   try {
-    await unsubscribeByToken(new URL(url).searchParams.get('token'));
+    await unsubscribeByToken(new URL(url).searchParams.get('token'), 'one_click');
   } catch (err) {
     console.error('Newsletter one-click unsubscribe error:', err);
   }

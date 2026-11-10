@@ -43,6 +43,7 @@ import { externalCheckState, pendingCount } from '../../lib/link-check-external'
 import { resolveSiteUrl } from '../../lib/site-url';
 import { reservedSlugs } from '../../lib/reserved-slugs';
 import { formatMoney } from '../../lib/money-format';
+import { attributionReport, parseReportQuery, resolveAttributionEnabled } from '../../lib/commerce/attribution';
 
 const user = Astro.locals.user;
 if (!canOpenAdminPage('/admin/insights', user?.role)) {
@@ -111,6 +112,22 @@ const orders = showCommerce ? await LocalDB.getOrders() : [];
 // plan from — so the rule is reused rather than re-decided here.
 const paidOrders = orders.filter((o) => (o.payment_status ?? 'unpaid') === 'paid');
 const orderSeries = daySeries(paidOrders, (o) => o.created_at, (o) => Number(o.total_cents) || 0, { days: WINDOW_DAYS, now });
+
+// ── Where paid orders came from (commerce/attribution.ts) ──────────────────
+// The SAME parser and report the API and its CSV use, so the screen, the JSON
+// and the spreadsheet cannot disagree. A bad query falls back to the default
+// range rather than an error page; the message says so.
+const attrQuery = parseReportQuery(new URLSearchParams({
+  from: Astro.url.searchParams.get('attr_from') ?? '',
+  to: Astro.url.searchParams.get('attr_to') ?? '',
+  model: Astro.url.searchParams.get('attr_model') ?? '',
+}), now);
+const attrRange = attrQuery.ok ? attrQuery.value : (parseReportQuery(new URLSearchParams(), now) as { ok: true; value: { from: string; to: string; model: 'first' | 'last' } }).value;
+const attrError = attrQuery.ok ? null : attrQuery.error;
+const attr = showCommerce ? attributionReport(orders, attrRange) : null;
+const attrEnabled = resolveAttributionEnabled(map0);
+const attrCsvHref = `/api/orders/attribution?${new URLSearchParams({ ...attrRange, format: 'csv' }).toString()}`;
+const attrWidths = attr ? barWidths(attr.rows.map((r) => r.orders), 100) : [];
 
 const messages = await LocalDB.getMessages();
 const messageSeries = daySeries(messages, (m) => m.created_at, null, { days: WINDOW_DAYS, now, cap: 5000 });
@@ -679,6 +696,114 @@ const canClearSearches = user?.role === 'admin';
         </div>
       ))}
     </section>
+
+    {attr && (
+      <section id="attribution" class="space-y-4">
+        <div>
+          <h2 class="text-lg font-semibold text-gray-900">Where paid orders came from</h2>
+          <p class="mt-1 text-sm text-gray-600 max-w-2xl">
+            By the campaign tags (<span class="font-mono">utm_source</span>, <span class="font-mono">utm_medium</span>,
+            <span class="font-mono">utm_campaign</span>) of the visit that brought the customer. They are kept
+            only for visitors who allowed <strong>marketing</strong> cookies, so orders from everyone else are
+            counted below as having no attribution — that is consent working, not missing data.
+          </p>
+          {!attrEnabled && (
+            <p class="mt-2 text-sm text-amber-800">
+              Attribution is switched off under <a href="/admin/settings#set-analytics" class="underline">Settings → Analytics &amp; marketing tags</a>,
+              so new orders carry none.
+            </p>
+          )}
+        </div>
+
+        <form method="get" action="/admin/insights#attribution" class="flex flex-wrap items-end gap-3 bg-white border border-gray-200 rounded-lg p-4">
+          <label class="text-sm text-gray-700">
+            <span class="block text-xs text-gray-500 mb-1">From</span>
+            <input type="date" name="attr_from" value={attrRange.from} class="px-2 py-1.5 border border-gray-300 rounded" />
+          </label>
+          <label class="text-sm text-gray-700">
+            <span class="block text-xs text-gray-500 mb-1">To</span>
+            <input type="date" name="attr_to" value={attrRange.to} class="px-2 py-1.5 border border-gray-300 rounded" />
+          </label>
+          <label class="text-sm text-gray-700">
+            <span class="block text-xs text-gray-500 mb-1">Credit goes to</span>
+            <select name="attr_model" class="px-2 py-1.5 border border-gray-300 rounded">
+              <option value="last" selected={attrRange.model === 'last'}>Last touch</option>
+              <option value="first" selected={attrRange.model === 'first'}>First touch</option>
+            </select>
+          </label>
+          <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded text-sm font-medium">Show</button>
+          <a href={attrCsvHref} class="text-sm text-blue-600 hover:underline ml-auto" download>Export CSV</a>
+        </form>
+        {attrError && <p class="text-sm text-amber-800">{attrError} — showing the last 30 days instead.</p>}
+
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-4">
+          <div class="bg-white border border-gray-200 rounded-lg p-4">
+            <div class="text-2xl font-semibold text-gray-900" data-attr-orders>{num(attr.orders)}</div>
+            <div class="text-xs text-gray-500 mt-1">paid orders, {attr.from} – {attr.to}</div>
+          </div>
+          <div class="bg-white border border-gray-200 rounded-lg p-4">
+            <div class="text-2xl font-semibold text-gray-900" data-attr-attributed>{num(attr.attributed)}</div>
+            <div class="text-xs text-gray-500 mt-1">with a campaign ({attr.model === 'first' ? 'first' : 'last'} touch)</div>
+          </div>
+          <div class="bg-white border border-gray-200 rounded-lg p-4">
+            <div class="text-2xl font-semibold text-gray-900">{num(attr.unattributed)}</div>
+            <div class="text-xs text-gray-500 mt-1">no attribution (no consent, no campaign, or older)</div>
+          </div>
+        </div>
+
+        {attr.rows.length === 0 ? (
+          <p class="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
+            No paid order in this range carries campaign attribution.
+          </p>
+        ) : (
+          <div class="bg-white border border-gray-200 rounded-lg overflow-x-auto">
+            <table class="min-w-full text-sm" data-attribution-report>
+              <thead class="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
+                <tr>
+                  <th scope="col" class="px-4 py-2 text-left font-medium">Source</th>
+                  <th scope="col" class="px-4 py-2 text-left font-medium">Medium</th>
+                  <th scope="col" class="px-4 py-2 text-left font-medium">Campaign</th>
+                  <th scope="col" class="px-4 py-2 text-right font-medium">Orders</th>
+                  <th scope="col" class="px-4 py-2 text-right font-medium">Revenue</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100">
+                {attr.rows.map((r, i) => (
+                  <tr>
+                    <td class="px-4 py-2 text-gray-900 break-all">{r.source}</td>
+                    <td class="px-4 py-2 text-gray-700 break-all">{r.medium}</td>
+                    <td class="px-4 py-2 text-gray-700 break-all">{r.campaign}</td>
+                    <td class="px-4 py-2 text-right tabular-nums">
+                      {num(r.orders)}
+                      <svg viewBox="0 0 100 3" preserveAspectRatio="none" class="w-16 h-1 ml-auto mt-1 block" role="presentation">
+                        <rect x="0" y="0" width="100" height="3" rx="1.5" fill="#f1f5f9" />
+                        <rect x="0" y="0" width={attrWidths[i]} height="3" rx="1.5" fill="#0d9488" />
+                      </svg>
+                    </td>
+                    <td class="px-4 py-2 text-right tabular-nums whitespace-nowrap">{formatMoney(r.revenue_cents, { currency: r.currency, locale: adminLocale })}</td>
+                  </tr>
+                ))}
+                {attr.unattributed > 0 && (
+                  <tr class="text-gray-500">
+                    <td class="px-4 py-2" colspan="3">No attribution</td>
+                    <td class="px-4 py-2 text-right tabular-nums">{num(attr.unattributed)}</td>
+                    <td class="px-4 py-2 text-right tabular-nums whitespace-nowrap">
+                      {Object.entries(attr.unattributed_revenue).map(([cur, cents]) => formatMoney(cents, { currency: cur, locale: adminLocale })).join(' + ')}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p class="text-xs text-gray-500 max-w-2xl">
+          Paid orders only, dated by when they were placed (UTC days). Revenue is in the shop's base
+          currency. First touch credits the earliest campaign visit remembered (up to 90 days), last
+          touch the most recent; splitting credit across several visits is not something this
+          report claims to do.
+        </p>
+      </section>
+    )}
 
   </div>
   <script>

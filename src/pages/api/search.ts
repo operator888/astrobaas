@@ -9,10 +9,19 @@ import { settingsMap } from '../../lib/settings-map';
 import { pluginManager, PLUGIN_HOOKS } from '../../lib/plugin-system';
 import type { TermExpander } from '../../lib/search/rank';
 import { articlesOnly } from '../../lib/post-kind';
-import { filterByLocale } from '../../lib/i18n';
+import { filterByLocale, defaultLocale } from '../../lib/i18n';
 import { withPublicCache } from '../../lib/http-cache';
 import { resolveSuggestSettings } from '../../lib/search/suggest-settings';
 import { notePopularSearch } from '../../lib/search/popular-store';
+import { parseSort, sortItems, type SortValue } from '../../lib/commerce/product-sort';
+
+/**
+ * Posts have no price. `price_*` is refused here rather than ignored: a
+ * storefront that sends the same `?sort=` to both search endpoints must hear
+ * that this one cannot honour it, not get relevance order back under a
+ * "cheapest first" label. The product catalogue is `GET /api/products?search=`.
+ */
+const POST_SORTS: readonly SortValue[] = ['relevance', 'newest', 'name_asc', 'name_desc'];
 
 /**
  * Site search over published posts.
@@ -37,6 +46,13 @@ export const GET: APIRoute = async ({ url, request, locals }) => {
     // query would return the payload of an amplification attempt verbatim, and
     // `meta.q` now tells a client truthfully what was searched.
     const q = clipQuery(new URL(url).searchParams.get('q') || '');
+    const sort = parseSort(new URL(url).searchParams.get('sort'), POST_SORTS);
+    if (!sort.ok) {
+      return ApiResponseBuilder.validationError(
+        `Unknown sort for post search. Use one of: ${sort.allowed.join(', ')}`,
+        { sort: sort.allowed },
+      );
+    }
     if (q.trim().length < 2) {
       return withPublicCache(
         ApiResponseBuilder.success([], 'Query too short', { q, count: 0 }),
@@ -75,7 +91,7 @@ export const GET: APIRoute = async ({ url, request, locals }) => {
       { query: q, settings: settingsMap(settingsRows) },
     ) as TermExpander | null;
 
-    const matches = rankBy(
+    const ranked = rankBy(
       published,
       q,
       (p) => [
@@ -89,7 +105,14 @@ export const GET: APIRoute = async ({ url, request, locals }) => {
         { text: plainText(p.content), weight: POST_WEIGHTS.body },
       ],
       { expand: expand ?? undefined },
-    )
+    );
+    // An explicit sort reorders the WHOLE match set before the top 20 are cut,
+    // so "newest" means the 20 newest matches, not the 20 most relevant
+    // re-sorted. Stable: equal keys keep their relevance order.
+    const matches = sortItems(ranked, sort.sort, {
+      created: (r) => r.item.created_at,
+      name: (r) => r.item.title,
+    }, locale ?? defaultLocale())
       .slice(0, 20)
       .map((r) => ({
         id: r.item.id,
@@ -109,7 +132,7 @@ export const GET: APIRoute = async ({ url, request, locals }) => {
     // search is the most repeated GET a storefront makes, and each one is a
     // full ranking pass over the blog.
     return withPublicCache(
-      ApiResponseBuilder.success(matches, 'Search complete', { q, count: matches.length }),
+      ApiResponseBuilder.success(matches, 'Search complete', { q, count: matches.length, sort: sort.sort }),
       { request, locals },
     );
   } catch (err) {

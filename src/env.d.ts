@@ -29,6 +29,13 @@ declare namespace App {
      */
     ip?: string;
     /**
+     * Who the request is FOR: address (same identity as `ip`), User-Agent, and
+     * whether either came from a forwarding header. X-Client-IP / X-Client-UA
+     * count only on an API-key request. Read it through `requestClient(locals)`
+     * (src/lib/client-address.ts); plugin routes get it as `ctx.client`.
+     */
+    client?: import('./lib/client-address').RequestClient;
+    /**
      * Locale for this request, from a /<locale>/ path prefix (stripped by the
      * middleware) or the site default. Always set; equals the default locale on
      * single-locale installs.

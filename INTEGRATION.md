@@ -223,15 +223,19 @@ Core endpoints (full list in [`/openapi.json`](#6-ai-agents-mcp--llmstxt)):
 | `GET /api/posts?status=&category=&kind=&limit=` | List posts (published when anonymous) | – |
 | `GET /api/posts/{slug}` | One post (article or page) | – |
 | `GET /api/posts/{slug}/related` | Related articles for the strip under a post | – |
-| `GET /api/products` | The catalogue (`search`, `category`, `brand`, `featured`, `on_sale`) | – |
-| `GET /api/products/{ref}` | One product, by id or slug | – |
+| `GET /api/products` | The catalogue (`search`, `category`, `brand`, `featured`, `on_sale`, `sort`) | – |
+| `GET /api/products/{ref}` | One product, by id or slug (both product routes carry derived `price_from_cents` / `price_to_cents`: the cheapest and dearest buyable price — equal to `price_cents` for a simple product — and `sort=price_*` orders by `price_from_cents`) | – |
+| `GET /api/products/{ref}/stock-status` | Availability: `in-stock`, `low-stock` or `out-of-stock` (also on every product as `stock_status`) | – |
 | `POST /api/products/{ref}/notify-me` | "Tell me when it's back" | – |
 | `POST /api/orders/quote` | Price a basket, server-side | – |
 | `POST /api/orders` | Place an order — **no account needed** | – |
 | `POST /api/payments/start` | Open a payment session for an order | – |
 | `POST /api/orders/{id}/ship` | Record tracking; emails the customer once | staff |
-| `GET /api/orders` | List orders | staff |
-| `GET /api/customers` | List customers | staff |
+| `GET /api/orders` | List orders (`?tag=` filters by staff tag) | staff |
+| `GET /api/orders/tags` | Staff tags in use, with order counts | staff |
+| `POST /api/orders/{id}/tags` · `DELETE …?tag=` | Add / remove a staff tag (max 10 per order) | staff |
+| `GET /api/orders/{id}/timeline` · `POST …` | One order's history (status, payments, shipping, notes, tags; `?filter=`, `?format=csv`); add a staff comment | staff |
+| `GET /api/customers` | List customers (`?search=`; paged like orders: `?limit=` default 50, max 200, `?offset=`) | staff |
 | `GET/POST /api/coupons` | Coupons and automatic cart rules | staff |
 | `POST /api/posts` | Create a post or page | author |
 | `GET /api/content/{type}` | List custom-type entities | – |
@@ -336,6 +340,21 @@ and solve a new one for every order; a retry with the same `Idempotency-Key`
 may carry a new token. `POST /api/auth/magic-link` has the same opt-in
 `magic-link` surface.
 
+**Terms & Conditions.** A shop can require the buyer's agreement. Read
+`checkout_terms_required`, `checkout_terms_label` and `checkout_terms_url` from
+`GET /api/settings/get` (public), draw the box, and send what the buyer ticked:
+
+```ts
+body: JSON.stringify({ ...order, terms_accepted: box.checked })   // a real boolean
+```
+
+With `checkout_terms_required` on, anything but `true` is refused with `400`
+`reason: checkout.terms_not_accepted`. With it off (the default) the field is
+optional and stored as sent. A server-side storefront calling with an API key
+must forward the shopper's answer; the key is not asked on the shopper's
+behalf. Render `checkout_terms_label` as text, never as HTML. The order carries
+`terms_accepted` and a server-stamped `terms_accepted_at`. See COMMERCE.md.
+
 **Other refusals a checkout page should handle:**
 
 | Answer | Meaning |
@@ -343,7 +362,10 @@ may carry a new token. `POST /api/auth/magic-link` has the same opt-in
 | `429`, `reason: checkout.too_many_unpaid`, `params.max` | This buyer already has `max` unpaid orders waiting. The cap counts by email; for anonymous shoppers it also counts by network address, over the last couple of hours. Ask them to pay or cancel one. `Retry-After` is set. A server-side storefront calling with an API key is capped by email only. |
 | `400`, `reason: checkout.coupon_invalid` | The code was refused. Callers who are not staff get one generic message. `params.shortfall_cents` is present only when the basket is below the code's minimum spend. |
 | `409`, `reason: checkout.promotion_unavailable` | An automatic cart rule in the quote has been used up. Re-quote and show the new total. |
+| `400`, `reason: checkout.terms_not_accepted` | The shop requires the Terms & Conditions box and `terms_accepted` was not `true`. Show the box's error; nothing was reserved. |
 | `422` on `email` | The address is not a single well-formed address. |
+| `422` on `terms_accepted` / `privacy_accepted` | The value is not a boolean. |
+| `422` on `attribution.*` | The campaign attribution has an unknown key, a bad value or time. See "Campaign attribution". |
 
 `POST /api/orders/quote` reports a refused coupon as
 `coupon: { ok: false, reason: "invalid", message }` to anyone but staff. The
@@ -353,6 +375,63 @@ Every specific code is in `error.reason`, with its values in `error.params`.
 `error.code` is still the HTTP-derived code. The typed client exposes them as
 `AstroBaasError.reason` and `AstroBaasError.params`, and keeps
 `AstroBaasError.code` as it was.
+
+### Campaign attribution (UTM tags and ad click ids)
+
+An order can record which campaign brought the shopper: `order.attribution`
+holds a **first** and a **last** touch, each with the `utm_source`,
+`utm_medium`, `utm_campaign`, `utm_term`, `utm_content`, `gclid`, `fbclid`
+and `msclkid` of the landing URL and the time `at` of that visit.
+
+**Only with marketing consent.** These are identifiers an ad platform can join
+back to a person, so they may be kept only after the shopper granted the
+`marketing` consent category. Without it nothing is kept and the order has no
+`attribution` key at all.
+
+- **Pages the CMS serves** need nothing: `/consent.js` keeps the tags in the
+  first-party cookie `astrobaas_attribution` (90 days) after marketing consent
+  and deletes it when consent is withdrawn. At checkout the server re-checks the
+  `astrobaas_consent` cookie for `marketing` before it reads that cookie.
+- **A headless storefront** has its own domain, banner and storage, so it
+  captures the tags itself and sends them on `POST /api/orders`:
+
+```jsonc
+{
+  "email": "buyer@example.com",
+  "items": [{ "product_id": "…", "qty": 1 }],
+  "attribution": {
+    "first": { "utm_source": "google", "utm_medium": "cpc", "utm_campaign": "spring", "gclid": "Cj0K…", "at": "2026-10-01T09:12:00.000Z" },
+    "last":  { "utm_source": "newsletter", "utm_medium": "email", "at": "2026-10-11T18:40:00.000Z" }
+  }
+}
+```
+
+  Send `attribution` **only when the shopper granted marketing consent on your
+  storefront** — the CMS cannot see your banner and takes your word for it.
+  The example storefront does this in `examples/storefront/src/lib/attribution.ts`:
+  it captures on every page load, keeps the result in `localStorage`, re-checks
+  consent at checkout and sends nothing without it. Wire its
+  `hasMarketingConsent()` to your banner; by default it asks the CMS consent
+  API (`window.astrobaasConsent.has('marketing')`) and otherwise answers no.
+
+**Validation is strict.** Only `first` and `last`; in each, only the eight keys
+above plus `at`. Tags are text of at most 100 characters without quotes,
+markup or control characters (`utm_source` and `utm_medium` are lower-cased);
+click ids are at most 200 characters of `A-Z a-z 0-9 . _ ~ -`. `at` must be
+an ISO time. Send one of the two and it is used for both. A shape error is a
+`422` whose `error.details` names the field (`attribution.last.utm_source`),
+and nothing is placed. Times are judged leniently, because they come from the
+shopper's device: a future `at` is clamped to the server's now, a touch older
+than 90 days is dropped, and a first touch later than the last gives way to
+it — a wrong device clock never refuses an order. A body `attribution` wins
+over the cookie, but a browser whose own `astrobaas_consent` cookie on the CMS
+refuses marketing records none. Staff sessions never record one, and nothing
+is recorded while the shop has switched attribution off (`attribution_enabled`).
+
+`attribution` is personal data: a data-subject export includes it and an
+erasure removes it. It also appears in the `order.created` webhook payload.
+Staff read the totals from `GET /api/orders/attribution?from=&to=&model=first|last`
+(`&format=csv` for a spreadsheet), or `orders.attribution()` in the typed client.
 
 ### Paying for an order
 
@@ -550,7 +629,7 @@ The public read endpoints send shared-cache headers to **anonymous** callers:
 
 | Endpoint |
 | --- |
-| `GET /api/products`, `GET /api/products/{ref}` |
+| `GET /api/products`, `GET /api/products/{ref}`, `GET /api/products/{ref}/stock-status` |
 | `GET /api/brands`, `GET /api/product-categories` |
 | `GET /api/search` |
 | `GET /sitemap.xml`, `GET /rss.xml` |

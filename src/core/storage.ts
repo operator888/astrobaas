@@ -22,6 +22,7 @@ import type {
   Order,
   OrderStatus,
   PaymentStatus,
+  InvoiceDocument,
   Customer,
   Post,
   Category,
@@ -35,6 +36,7 @@ import type {
   PluginRecord,
   ContactMessage,
   Subscriber,
+  ConsentLedgerRow,
   CustomEntity,
   PluginDataRecord,
   RedirectRule,
@@ -66,6 +68,26 @@ import type {
 export interface UpdateProductOptions {
   keepVariantStock?: readonly string[];
 }
+
+/**
+ * What `claimCouponUse` counts besides the coupon's total.
+ *
+ * `emailKey` is `couponEmailKey(email)` (lower-case hex, never the address):
+ * with it, the claim also counts one use against that buyer in
+ * `redemptions_by_email`, and — when `perEmailLimit` is set — lands only while
+ * that buyer is under it. Both counts move in the SAME atomic step as the
+ * total, so two checkouts by one buyer cannot both pass a one-per-customer
+ * code. `force` counts without checking any limit: re-counting a use that
+ * already happened (a cancelled order reopened), never a new sale.
+ */
+export interface CouponClaimOptions {
+  emailKey?: string;
+  perEmailLimit?: number | null;
+  force?: boolean;
+}
+
+/** A per-email key a coupon count may be stored under: lower-case hex only. */
+export const COUPON_EMAIL_KEY_RE = /^[a-f0-9]{16,64}$/;
 
 /**
  * What `transitionOrderStatus` requires of the stored order besides its status.
@@ -130,6 +152,41 @@ export type RefundAppend =
   | { outcome: 'appended'; order: Order }
   | { outcome: 'duplicate'; order: Order }
   | { outcome: 'missing' };
+
+/**
+ * What `compareAndSetOrderTags` found.
+ *
+ *  - applied: the stored tags were still `expected`; `next` is written
+ *  - changed: they are not — someone else wrote since the caller read; re-read
+ *  - missing: no such order
+ */
+export type OrderTagsWrite =
+  | { outcome: 'applied'; order: Order }
+  | { outcome: 'changed' }
+  | { outcome: 'missing' };
+
+/** What `compareAndSetOrderTimeline` found — same three answers as `OrderTagsWrite`. */
+export type OrderTimelineWrite =
+  | { outcome: 'applied'; order: Order }
+  | { outcome: 'changed' }
+  | { outcome: 'missing' };
+/** What `compareAndSetOrderInvoiceRecords` found — the same three answers. */
+export type OrderInvoiceRecordsWrite = OrderTagsWrite;
+
+/**
+ * The order fields `compareAndSetOrderField` may write. A closed list, because
+ * the field name becomes a JSON path in SQL and because each field here has
+ * exactly one owning module that does its read-modify-write through it:
+ *
+ *  - `tags`         — lib/commerce/order-tags.ts
+ *  - `entitlements` — lib/commerce/download-entitlements.ts (the download
+ *                     count: two downloads at once must not both see "4 of 5")
+ */
+export const ORDER_CAS_FIELDS = ['tags', 'entitlements'] as const;
+export type OrderCasField = (typeof ORDER_CAS_FIELDS)[number];
+
+/** What `compareAndSetOrderField` found. Same three answers as the tags write. */
+export type OrderFieldWrite = OrderTagsWrite;
 
 /**
  * What `claimIdempotencyKey` found.
@@ -207,9 +264,13 @@ export interface Storage {
    * `used_count + 1` from the count it had READ after the order existed, so
    * two checkouts with a one-use code both passed and both wrote 1.
    */
-  claimCouponUse(id: string): Promise<boolean>;
-  /** Hand a claimed use back (the order it was claimed for was not placed). Never below 0. */
-  releaseCouponUse(id: string): Promise<void>;
+  claimCouponUse(id: string, opts?: CouponClaimOptions): Promise<boolean>;
+  /**
+   * Hand a claimed use back (the order it was claimed for was not placed, or
+   * was cancelled before payment). Never below 0. With `emailKey`, that
+   * buyer's count is handed back too.
+   */
+  releaseCouponUse(id: string, opts?: Pick<CouponClaimOptions, 'emailKey'>): Promise<void>;
 
   /**
    * Atomically increment and return a named counter.
@@ -309,6 +370,68 @@ export interface Storage {
    * first.
    */
   appendRefund(id: string, record: RefundRecord): Promise<RefundAppend>;
+  /**
+   * ATOMICALLY replace an order's staff `tags`, but only while the stored
+   * value is still `expected` (the raw value the caller read: `undefined` =
+   * the field is absent). An empty `next` removes the field, so an untagged
+   * order carries no `tags: []`.
+   *
+   * A staff tag edit is read-modify-write — "add VIP to the ones it has" —
+   * and two staff adding different tags at once each wrote their own full
+   * list, the second erasing the first. This makes the comparison and the
+   * write one step (a conditional UPDATE on the relational driver, one
+   * `locked()` hold on lowdb and doc-blob), and the caller retries on
+   * `changed`. Records the change in the content feed as `updateOrder` does,
+   * and only when it lands. Nothing else on the order is touched, so a
+   * payment landing at the same moment is not lost either.
+   *
+   * Use `lib/commerce/order-tags.ts`; it owns the normalisation and the
+   * limits, and this method trusts what it is given.
+   */
+  compareAndSetOrderTags(id: string, expected: unknown, next: readonly string[]): Promise<OrderTagsWrite>;
+  /**
+   * ATOMICALLY replace an order's `invoice_records`, but only while the stored
+   * value is still `expected` (the raw value the caller read; `undefined` =
+   * absent). The same compare-and-set as `compareAndSetOrderTags`, on the
+   * same three driver shapes, for the same reason: creating a record, adding
+   * a credit memo and claiming a record for an issuer are each
+   * read-decide-write, and two at once (a payment webhook and an admin click,
+   * two refunds) must not both decide "there is no record yet" and both write
+   * one. The loser gets `changed`, re-reads, and finds the winner's record.
+   *
+   * Only `invoice_records` and `updated_at` are written. Use
+   * `lib/commerce/invoice-records.ts`, which owns every rule; this method
+   * trusts what it is given.
+   */
+  compareAndSetOrderInvoiceRecords(
+    id: string, expected: unknown, next: readonly InvoiceDocument[],
+  ): Promise<OrderInvoiceRecordsWrite>;
+
+  /**
+   * ATOMICALLY replace an order's stored `timeline`, but only while the stored
+   * value is still `expected` (the raw value the caller read; `undefined` =
+   * absent). The same contract as `compareAndSetOrderTags`, for the same
+   * reason: an append is read-modify-write, and two requests appending at
+   * once each wrote their own full list, the second erasing the first.
+   *
+   * An empty `next` removes the field. Only `timeline` is touched, so a
+   * payment landing at the same moment is not lost. It is NOT an edit of the
+   * order as the API presents it (the order endpoints strip the field), so it
+   * bumps no `updated_at` and writes no change-feed row: a status change is
+   * still exactly one feed entry.
+   *
+   * Use `lib/commerce/order-timeline.ts`; it owns the entry shape, the bound
+   * and the retry loop, and this method trusts what it is given.
+   */
+  compareAndSetOrderTimeline(id: string, expected: unknown, next: readonly unknown[]): Promise<OrderTimelineWrite>;
+  /**
+   * The same compare-and-set, for any field in {@link ORDER_CAS_FIELDS}:
+   * write `next` to `field` only while the stored value is still `expected`
+   * (`undefined` = absent). `next === undefined` removes the field. Only that
+   * field and `updated_at` are written, and the change feed records it naming
+   * only that field. `compareAndSetOrderTags` is this with `field = 'tags'`.
+   */
+  compareAndSetOrderField(id: string, field: OrderCasField, expected: unknown, next: unknown): Promise<OrderFieldWrite>;
 
   // Idempotency keys (POST /api/orders `Idempotency-Key`). Durable, so a
   // retry after a restart still gets the first answer, and — on the
@@ -407,6 +530,25 @@ export interface Storage {
   deleteMessage(id: string): Promise<boolean>;
   getSubscribers(): Promise<Subscriber[]>;
   createSubscriber(email: string): Promise<Subscriber | null>;
+
+  // The consent ledger (src/lib/consent-ledger.ts). APPEND-ONLY: there is
+  // deliberately no update and no delete here. The one rewrite is the GDPR
+  // erasure's pseudonymisation, which keeps every row and replaces only the
+  // address (and drops ip/ua). Its own collection on every driver, never a
+  // custom entity: those writes land in the public change feed.
+  /** Append one row. Rejects a duplicate id rather than overwriting it. */
+  appendConsentRow(row: ConsentLedgerRow): Promise<ConsentLedgerRow>;
+  /**
+   * Rows in the order they were WRITTEN (oldest first), optionally narrowed to
+   * one address and/or one purpose. `limit` keeps the NEWEST n, still oldest first.
+   */
+  getConsentRows(query?: { email?: string; purpose?: string; limit?: number }): Promise<ConsentLedgerRow[]>;
+  /**
+   * The erasure: every row for `email` keeps its purpose, decision, version,
+   * text hash and times; `email` becomes `replacement`, ip/ua are removed and
+   * `erased_at` is set. Returns how many rows were rewritten.
+   */
+  pseudonymiseConsentRows(email: string, replacement: string, erasedAt: string): Promise<number>;
 
   // Plugins
   getPlugins(): Promise<PluginRecord[]>;

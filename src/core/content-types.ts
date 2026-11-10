@@ -48,6 +48,21 @@ export interface ContentTypeField {
    * the type does not declare — not a field the form hides.
    */
   showIf?: FieldCondition;
+  /**
+   * Never returned to a reader who is not content staff, even when the
+   * collection is public.
+   *
+   * `visibility` is collection-wide, so a public collection published EVERY
+   * field of every approved row — including the commenter's and the reviewer's
+   * email address, which the form asks for precisely so that it is NOT shown.
+   * The value is still stored, validated, exported in a subject-access request
+   * and erased on request; it is only left out of the anonymous read.
+   *
+   * Applied by `projectEntityForReader`, which every public read of a custom
+   * entity goes through. Like `showIf`, this is per FIELD and the validator
+   * never sees it.
+   */
+  private?: boolean;
 }
 
 /** One equality condition. See {@link ContentTypeField.showIf}. */
@@ -167,6 +182,54 @@ export function contentTypeIsPublic(def: ContentTypeDefinition | undefined): boo
  */
 export function contentTypeAcceptsPublicWrites(def: ContentTypeDefinition | undefined): boolean {
   return def?.writable === 'public';
+}
+
+/**
+ * The field names a non-staff reader must never receive. See
+ * {@link ContentTypeField.private}.
+ */
+export function privateFieldNames(def: ContentTypeDefinition | undefined): string[] {
+  return (def?.fields ?? []).filter((f) => f.private === true).map((f) => f.name);
+}
+
+/**
+ * May this role read a collection's `private` fields?
+ *
+ * The roles that may create and edit custom entries (the content routes' POST
+ * and PUT), because they already see every field in the admin. A signed-in
+ * author or viewer is NOT one: being logged in is authentication, not
+ * permission to read a stranger's address. One predicate, so the list route
+ * and the entity route cannot answer differently.
+ */
+export function canReadPrivateFields(role: string | undefined): boolean {
+  return role === 'admin' || role === 'editor';
+}
+
+/** Keys the server stamps on a record that only staff may read. */
+const SERVER_ONLY_KEYS = ['spam_score', 'spam_flagged', 'spam_reasons'] as const;
+
+/**
+ * One entity as THIS reader may see it.
+ *
+ * `privileged` is the caller's decision (content staff), so the list route, the
+ * entity route and anything added later share one projection and cannot
+ * disagree about what an anonymous reader receives. A copy is returned; the
+ * stored row is never mutated.
+ */
+export function projectEntityForReader<T extends { data?: Record<string, unknown> }>(
+  def: ContentTypeDefinition | undefined,
+  entity: T,
+  privileged: boolean,
+): T {
+  if (privileged) return entity;
+  // The spam score is written by the server on any public submission
+  // (`spamFields`) and is a moderator's signal, not content: a review flagged
+  // and then approved anyway must not publish why it was flagged.
+  const hidden = [...privateFieldNames(def), ...SERVER_ONLY_KEYS];
+  if (!entity?.data) return entity;
+  const data = { ...entity.data };
+  for (const name of hidden) delete data[name];
+  return { ...entity, data };
 }
 
 const registry = new Map<string, ContentTypeDefinition>();

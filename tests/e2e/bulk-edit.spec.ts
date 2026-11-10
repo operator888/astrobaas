@@ -5,17 +5,11 @@
  */
 import { test, expect, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { adminLogin } from './lib/session';
 
-/** Must match ADMIN_PASSWORD in playwright.config.ts (see cms.spec.ts for why). */
-const ADMIN_PASSWORD = 'e2e-admin-not-the-default';
 
-async function login(page: Page) {
-  await page.goto('/login');
-  await page.fill('input[name="email"]', 'admin@local');
-  await page.fill('input[name="password"]', ADMIN_PASSWORD);
-  await page.click('button[type="submit"]');
-  await page.waitForURL('**/admin');
-}
+/** One shared admin session, so the suite stays inside the login throttle — see lib/session.ts. */
+const login = (page: Page) => adminLogin(page);
 
 test('bulk edit: tick two products, preview a 10% rise, apply it', async ({ page }) => {
   await login(page);
@@ -38,7 +32,7 @@ test('bulk edit: tick two products, preview a 10% rise, apply it', async ({ page
   await page.getByRole('checkbox', { name: `Select ${b.name}` }).check();
   await expect(page.locator('#bulk-count')).toHaveText('2');
   await page.getByLabel('Change', { exact: true }).selectOption('price');
-  await page.getByLabel('How').selectOption('percent');
+  await page.getByLabel('How', { exact: true }).selectOption('percent');
   await page.getByLabel('Value').fill('10');
   await page.getByRole('button', { name: 'Preview' }).click();
 
@@ -82,7 +76,7 @@ test('bulk edit: two changes with a condition, then undo from the history', asyn
 
   // Change 1: price +10%, queued. Change 2: add a tag.
   await page.getByLabel('Change', { exact: true }).selectOption('price');
-  await page.getByLabel('How').selectOption('percent');
+  await page.getByLabel('How', { exact: true }).selectOption('percent');
   await page.getByLabel('Value').fill('10');
   await page.getByRole('button', { name: 'Add another change' }).click();
   await expect(page.getByRole('list', { name: 'Changes to make' })).toContainText('Price +10%');

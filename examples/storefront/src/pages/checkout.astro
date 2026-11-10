@@ -86,6 +86,12 @@ const countries = codes.map((c) => ({ code: c, name: names.of(c) ?? c })).sort((
       <h2 id="summary-title">Order summary</h2>
       <ul class="posts" data-co-lines></ul>
       <dl class="totals" data-co-totals aria-live="polite"></dl>
+      <div class="field" data-terms hidden>
+        <label class="choice">
+          <input type="checkbox" name="terms" data-terms-input />
+          <span data-terms-label></span>
+        </label>
+      </div>
       <p><button class="btn" type="submit" data-place>Place order</button></p>
       <p class="hint">By placing the order you agree to pay the total shown.</p>
     </aside>
@@ -94,7 +100,8 @@ const countries = codes.map((c) => ({ code: c, name: names.of(c) ?? c })).sort((
 
 <script>
   import { readCart, clearCart, browserStorage, cartNonce, attemptKey } from '../lib/cart';
-  import { cms, quote, paymentMethods, instructionsFor, problem, AstroBaasError, type Quote, type PaymentMethod } from '../scripts/shop-api';
+  import { attributionForOrder } from '../lib/attribution';
+  import { cms, quote, paymentMethods, instructionsFor, problem, termsBox, AstroBaasError, type Quote, type PaymentMethod, type TermsBox } from '../scripts/shop-api';
   import { formatMoney } from '../lib/money';
   import { powToken } from '../scripts/pow';
   import { LAST_ORDER_KEY, startPayment } from '../scripts/last-order';
@@ -119,6 +126,7 @@ const countries = codes.map((c) => ({ code: c, name: names.of(c) ?? c })).sort((
   }
 
   let methods: PaymentMethod[] = [];
+  let terms: TermsBox | null = null;
   let last: Quote | null = null;
 
   function field(name: string): string {
@@ -199,6 +207,19 @@ const countries = codes.map((c) => ({ code: c, name: names.of(c) ?? c })).sort((
       return;
     }
     renderPayments();
+    terms = await termsBox();
+    if (terms) {
+      const box = $('[data-terms]');
+      const label = box.querySelector<HTMLElement>('[data-terms-label]')!;
+      // textContent, never innerHTML: the label is the merchant's text.
+      label.textContent = terms.label;
+      if (terms.url) {
+        label.append(' (', el('a', { href: terms.url, target: '_blank', rel: 'noopener', textContent: 'read' }), ')');
+      }
+      // Not the `required` attribute: its message names the field by id, and a
+      // checkbox has no label text to quote. The submit handler says it properly.
+      box.hidden = false;
+    }
     status.textContent = '';
     form.hidden = false;
   }
@@ -214,6 +235,14 @@ const countries = codes.map((c) => ({ code: c, name: names.of(c) ?? c })).sort((
       const bad = form.querySelector<HTMLInputElement>(':invalid');
       showError(bad ? `Please fill in "${form.querySelector(`label[for="${bad.id}"]`)?.textContent?.trim() ?? bad.name}".` : 'Please complete the form.');
       bad?.focus();
+      return;
+    }
+    // Same check the CMS makes, so the buyer is told here instead of after a
+    // round trip. The server still decides.
+    const termsInput = form.querySelector<HTMLInputElement>('[data-terms-input]');
+    if (terms?.required && !termsInput?.checked) {
+      showError('Please accept the Terms & Conditions to place your order.');
+      termsInput?.focus();
       return;
     }
     const method = methods.find((m) => m.id === field('payment'));
@@ -253,6 +282,12 @@ const countries = codes.map((c) => ({ code: c, name: names.of(c) ?? c })).sort((
         shipping_method_id: field('shipping') || undefined,
         payment_method: method.id,
         note: field('note') || undefined,
+        // Sent only when the box was shown: no box means no answer, and the
+        // server records an absent answer as unknown.
+        ...(terms ? { terms_accepted: !!termsInput?.checked } : {}),
+        // Which campaign brought the shopper — only with marketing consent,
+        // re-checked now; otherwise the field is not sent at all.
+        ...attributionForOrder(store),
       };
       // Same cart + same details = same key = the same order, however many
       // times it is sent. The proof-of-work token is left out of the key: it

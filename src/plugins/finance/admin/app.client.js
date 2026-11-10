@@ -277,7 +277,7 @@
   /* ------------------------------------------------------------------ layout */
 
   const NAV = [
-    ['', 'Übersicht'], ['invoices', 'Rechnungen'], ['quotes', 'Angebote'], ['contacts', 'Kontakte'],
+    ['', 'Übersicht'], ['requests', 'Anfragen'], ['invoices', 'Rechnungen'], ['quotes', 'Angebote'], ['contacts', 'Kontakte'],
     ['articles', 'Artikel'], ['expenses', 'Ausgaben'], ['bank', 'Bank'], ['recurring', 'Wiederkehrend'],
     ['reports', 'Auswertungen'], ['export', 'Export'], ['settings', 'Einstellungen'],
   ];
@@ -308,7 +308,7 @@
     try {
       await meta();
       const view = {
-        '': dashboard, invoices: () => docList('invoice'), quotes: () => docList('quote'), credit_notes: () => docList('credit_note'),
+        '': dashboard, requests: requestList, invoices: () => docList('invoice'), quotes: () => docList('quote'), credit_notes: () => docList('credit_note'),
         doc: () => docEditor(parts[1], params), contacts: contactList, contact: () => contactEditor(parts[1]),
         articles: articleList, expenses: expenseList, expense: () => expenseEditor(parts[1]), bank: bankView,
         dunning: dunningView, recurring: recurringList, rec: () => recurringEditor(parts[1]), reports: reportsView, export: exportView, settings: settingsView,
@@ -332,6 +332,7 @@
       sub ? h('div', { class: 'mt-1 text-xs text-gray-500' }, sub) : null);
     const todos = [];
     if (!s.company_ready) todos.push(['Firmendaten vervollständigen (Pflichtangaben für Rechnungen)', '#/settings']);
+    if (s.requests_new) todos.push([`${s.requests_new} neue Anfragen / Bestellungen beantworten`, '#/requests']);
     if (s.drafts) todos.push([`${s.drafts} Entwürfe abschließen`, '#/invoices?status=draft']);
     if (s.overdue_count) todos.push([`${s.overdue_count} überfällige Rechnungen (${money(s.overdue_cents)})`, '#/invoices?status=overdue']);
     if (s.dunning_due) todos.push([`${s.dunning_due} Mahnungen fällig`, '#/dunning']);
@@ -423,6 +424,84 @@
       title(type === 'quote' ? 'Angebote' : type === 'credit_note' ? 'Gutschriften' : 'Rechnungen',
         type !== 'credit_note' ? btn(`+ ${TYPE[type]}`, () => go(`#/doc/new?type=${type}`), 'primary') : null),
       tabs, h('div', { class: 'mb-3 flex flex-wrap items-center justify-between gap-2' }, chipRow, h('div', { class: 'w-64' }, search)), list);
+  }
+
+  /* ------------------------------------------------------------------ requests inbox */
+
+  const REQ_STATE = {
+    new: ['Neu', 'bg-blue-100 text-blue-800'],
+    in_progress: ['In Bearbeitung', 'bg-amber-100 text-amber-800'],
+    quoted: ['Angebot erstellt', 'bg-purple-100 text-purple-800'],
+    done: ['Erledigt', 'bg-green-100 text-green-800'],
+    dismissed: ['Verworfen', 'bg-gray-100 text-gray-500'],
+  };
+  const REQ_KIND = { order: 'Bestellung', request: 'Anfrage (Portal)', inquiry: 'Anfrage (Portal)', contact: 'Kontaktformular', quote: 'Angebotsanfrage', estimate: 'Kostenrechner' };
+  const reqBadge = (st) => {
+    const [l, c] = REQ_STATE[st] || [st, 'bg-gray-100 text-gray-700'];
+    return h('span', { class: `inline-block rounded-full px-2 py-0.5 text-xs font-medium ${c}` }, l);
+  };
+  const reqWho = (r) => [r.customer.company_name, r.customer.name].filter(Boolean).join(' · ') || r.customer.email || '—';
+  const reqAmount = (r) => (typeof r.gross_cents === 'number' && r.gross_cents > 0 ? money(r.gross_cents, r.currency) : r.items.some((i) => i.unit_net_cents === null) ? 'auf Anfrage' : '');
+
+  async function requestList() {
+    const state = { state: 'open', q: '' };
+    const list = h('div', {});
+    const chips = [['open', 'Offen'], ['new', 'Neu'], ['in_progress', 'In Bearbeitung'], ['quoted', 'Angebot erstellt'], ['done', 'Erledigt'], ['dismissed', 'Verworfen'], ['all', 'Alle']];
+    const load = async () => {
+      const rows = await api('GET', `/requests?state=${state.state}&q=${encodeURIComponent(state.q)}`);
+      fill(list, table(['Eingang', 'Art', 'Nr.', 'Kunde', 'Betreff', { label: 'Betrag', right: true }, 'Status'],
+        rows.map((r) => ({ r, cells: [date(r.external_created_at || r.received_at), REQ_KIND[r.kind] || r.kind, r.number || '—', reqWho(r),
+          (r.subject || r.message || '').slice(0, 80), reqAmount(r), reqBadge(r.state)] })),
+        (row) => requestDialog(row.r, load)));
+    };
+    const chipRow = h('div', { class: 'flex flex-wrap gap-1' });
+    const renderChips = () => fill(chipRow, ...chips.map(([k, l]) => h('button', {
+      type: 'button', class: `rounded-full px-3 py-1 text-xs font-medium ${state.state === k ? 'bg-gray-900 text-white' : 'bg-white text-gray-600 ring-1 ring-gray-200 hover:bg-gray-50'}`,
+      onclick: () => { state.state = k; renderChips(); load(); },
+    }, l)));
+    renderChips();
+    let timer;
+    const search = input({ placeholder: 'Suchen (Nr., Kunde, Text)…', oninput: (e) => { clearTimeout(timer); timer = setTimeout(() => { state.q = e.target.value; load(); }, 250); } });
+    await load();
+    return h('div', {},
+      title('Anfragen & Bestellungen'),
+      h('p', { class: 'mb-3 text-xs text-gray-500' }, 'Was über die Website und das Kundenportal hereinkommt: Kontakt- und Angebotsanfragen, der Kostenrechner, Bestellungen und Anfragen aus dem Portal. Aus jeder Anfrage wird mit einem Klick ein Angebotsentwurf.'),
+      h('div', { class: 'mb-3 flex flex-wrap items-center justify-between gap-2' }, chipRow, h('div', { class: 'w-64' }, search)), list);
+  }
+
+  function requestDialog(r, reload) {
+    const dl = (pairs) => h('dl', { class: 'grid grid-cols-3 gap-x-3 gap-y-1 text-sm' },
+      pairs.filter(([, v]) => v).map(([k, v]) => [h('dt', { class: 'text-gray-500' }, k), h('dd', { class: 'col-span-2 break-words text-gray-900' }, v)]));
+    const c = r.customer;
+    const addr = c.address ? [c.address.street, [c.address.zip, c.address.city].filter(Boolean).join(' '), c.address.country].filter(Boolean).join(', ') : '';
+    const per = { monthly: ' / Monat', yearly: ' / Jahr', one_off: '' };
+    const stateSel = select({}, Object.entries(REQ_STATE).map(([k, [l]]) => [k, l]), r.state);
+    const note = textarea({ value: r.note || '', placeholder: 'Interne Notiz' });
+    modal(`${REQ_KIND[r.kind] || r.kind}${r.number ? ` ${r.number}` : ''}`, (close) => h('div', { class: 'space-y-4' },
+      dl([['Eingang', date(r.external_created_at || r.received_at)], ['Kunde', reqWho(r)], ['E-Mail', c.email], ['Telefon', c.phone], ['USt-IdNr.', c.vat_id], ['Adresse', addr],
+        ['Status (Website)', r.external_status], ['Seite', r.page], ['Betreff', r.subject],
+        ...Object.entries(r.extra || {}).map(([k, v]) => [k, v])]),
+      r.message ? h('div', { class: 'whitespace-pre-wrap rounded-md bg-gray-50 p-3 text-sm text-gray-800' }, r.message) : null,
+      r.items.length ? table(['Position', { label: 'Menge', right: true }, { label: 'Einzelpreis netto', right: true }],
+        r.items.map((it) => ({ cells: [it.name, String(it.quantity), it.unit_net_cents === null ? 'auf Anfrage' : `${it.price_is_from ? 'ab ' : ''}${money(it.unit_net_cents, r.currency)}${per[it.billing] || ''}`] }))) : null,
+      typeof r.gross_cents === 'number' && r.gross_cents > 0 ? h('p', { class: 'text-right text-sm' }, `Netto ${money(r.net_cents, r.currency)} · USt ${money(r.tax_cents, r.currency)} · `, h('strong', {}, `Brutto ${money(r.gross_cents, r.currency)}`)) : null,
+      h('div', { class: 'grid grid-cols-3 gap-3' }, field('Bearbeitung', stateSel), h('div', { class: 'col-span-2' }, field('Notiz', note))),
+      r.link ? h('a', { href: r.link, target: '_blank', rel: 'noopener noreferrer', class: 'text-sm text-blue-600 hover:underline' }, 'Auf der Website öffnen ↗') : null,
+    ), (close) => [
+      r.quote_id
+        ? btn('Angebot öffnen', () => { close(); go(`#/doc/${r.quote_id}`); })
+        : btn('→ Angebot erstellen', () => run(async () => {
+          const res = await api('POST', `/requests/${r.id}/quote`);
+          close();
+          toast('Angebotsentwurf erstellt — Preise prüfen und abschließen.');
+          go(`#/doc/${res.quote.id}`);
+        })),
+      btn('Speichern', () => run(async () => {
+        await api('PUT', `/requests/${r.id}`, { state: stateSel.value, note: note.value });
+        close();
+        reload();
+      }, 'Gespeichert'), 'primary'),
+    ]);
   }
 
   /* ------------------------------------------------------------------ dunning */

@@ -12,10 +12,21 @@ const currency = await shopCurrency();
 <Shop title="Search" noindex>
   <h1 data-search-title>Search</h1>
   <p class="muted" data-search-status role="status">Type what you are looking for in the search box.</p>
+  <div class="field sort-field" data-sort-field hidden>
+    <label for="sort">Sort by</label>
+    <select id="sort" data-sort>
+      <option value="relevance">Relevance</option>
+      <option value="price_asc">Price: low to high</option>
+      <option value="price_desc">Price: high to low</option>
+      <option value="newest">Newest</option>
+      <option value="name_asc">Name: A to Z</option>
+    </select>
+  </div>
   <ul class="grid" data-search-results data-currency={currency}></ul>
 </Shop>
 
 <script>
+  import type { Product } from 'astrobaas/core';
   import { cms, problem } from '../scripts/shop-api';
   import { formatMoney } from '../lib/money';
 
@@ -27,11 +38,32 @@ const currency = await shopCurrency();
   const box = document.getElementById('site-q') as HTMLInputElement | null;
   if (box) box.value = q;
 
+  // The order is the CMS's to decide: this menu only names one of the values
+  // GET /api/products documents and sends it. Nothing here compares a price.
+  // The choice lives in the address (?sort=), so a link or a reload keeps it.
+  const SORTS = ['relevance', 'price_asc', 'price_desc', 'newest', 'name_asc'];
+  const asked = new URLSearchParams(location.search).get('sort') ?? '';
+  const sort = SORTS.includes(asked) ? asked : 'relevance';
+  const sortField = document.querySelector<HTMLElement>('[data-sort-field]')!;
+  const sortMenu = document.querySelector<HTMLSelectElement>('[data-sort]')!;
+  sortMenu.value = sort;
+  sortMenu.addEventListener('change', () => {
+    const next = new URLSearchParams(location.search);
+    if (sortMenu.value === 'relevance') next.delete('sort'); else next.set('sort', sortMenu.value);
+    location.search = next.toString();
+  });
+
   if (q.length >= 2) {
     title.textContent = `Results for “${q}”`;
     status.textContent = 'Searching…';
+    sortField.hidden = false;
     try {
-      const found = (await cms.products.list({ search: q, limit: 48 }))
+      // A raw request rather than `products.list`, so this page type-checks
+      // against any released client; `sort` is only sent when it is not the
+      // default, which keeps the plain URL (and its cache entry) unchanged.
+      const params = new URLSearchParams({ search: q, limit: '48' });
+      if (sort !== 'relevance') params.set('sort', sort);
+      const found = (await cms.request<Product[]>('GET', `/api/products?${params}`))
         .filter((p) => ['visible', 'search', undefined].includes(p.catalog_visibility));
       results.replaceChildren(...found.map((p) => {
         const li = document.createElement('li');
@@ -52,7 +84,11 @@ const currency = await shopCurrency();
         a.append(frame, name);
         const price = document.createElement('span');
         price.className = 'price';
-        price.textContent = formatMoney(p.price_cents, currency);
+        // The CMS's derived price band, the same figure it sorted by.
+        const band = p as typeof p & { price_from_cents?: number | null; price_to_cents?: number | null };
+        const from = band.price_from_cents ?? p.price_cents;
+        const dearer = band.price_to_cents != null && band.price_to_cents > from;
+        price.textContent = (dearer ? 'From ' : '') + formatMoney(from, currency);
         li.append(a, price);
         return li;
       }));

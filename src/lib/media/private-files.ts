@@ -28,8 +28,10 @@
  * id is derived from the bytes, so it is unguessable without them.
  */
 import crypto from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { getPrivateUploadsDir } from '../paths';
 import { refuseIfInfected } from './scan';
 import { settingInt } from '../settings-map';
@@ -40,6 +42,21 @@ const ID_RE = /^pf_[0-9a-f]{20}$/;
 
 /** Smaller than the library's 10 MB: this is an anonymous door. */
 export const MAX_SUBMISSION_FILE_SIZE = 5 * 1024 * 1024;
+
+/**
+ * The ceiling for a file a MERCHANT uploads as a product download.
+ *
+ * A different door from the form one: staff only, and the files are the
+ * goods themselves — an e-book, an album, a software archive. 100 MB by
+ * default, the media library's video ceiling, and `DOWNLOAD_MAX_FILE_MB`
+ * moves it (2 GB at most). The whole request is held in memory while it is
+ * read, so raising it is a RAM decision as much as a disk one.
+ */
+export const MAX_PRODUCT_FILE_SIZE = (() => {
+  const raw = Number(process.env.DOWNLOAD_MAX_FILE_MB);
+  const mb = Number.isFinite(raw) && raw > 0 ? Math.min(raw, 2048) : 100;
+  return Math.round(mb) * 1024 * 1024;
+})();
 
 /**
  * What a public form may upload.
@@ -56,9 +73,23 @@ const KINDS = {
   gif: { ext: 'gif', mime: 'image/gif' },
   webp: { ext: 'webp', mime: 'image/webp' },
   pdf: { ext: 'pdf', mime: 'application/pdf' },
+  // Product downloads only (see PRODUCT_KINDS). Never accepted from a form.
+  zip: { ext: 'zip', mime: 'application/zip' },
+  epub: { ext: 'epub', mime: 'application/epub+zip' },
+  mp3: { ext: 'mp3', mime: 'audio/mpeg' },
 } as const;
 
 type Kind = keyof typeof KINDS;
+
+/** What an anonymous form may send. */
+const SUBMISSION_KINDS: ReadonlySet<Kind> = new Set<Kind>(['png', 'jpeg', 'gif', 'webp', 'pdf']);
+/**
+ * What a merchant may sell as a download: the form kinds plus archives,
+ * e-books and audio. Still decided by magic bytes. A ZIP can hold anything,
+ * and that is the point of one — it is served as an attachment with
+ * `nosniff`, to the buyer who paid for it, and never rendered by this site.
+ */
+const PRODUCT_KINDS: ReadonlySet<Kind> = new Set<Kind>([...SUBMISSION_KINDS, 'zip', 'epub', 'mp3']);
 
 /** Decide what a file IS from its bytes. Mirrors `sniff` in ingest.ts. */
 function sniff(buf: Buffer): Kind | null {
@@ -78,6 +109,14 @@ function sniff(buf: Buffer): Kind | null {
     && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP'
   ) return 'webp';
   if (buf.length >= 5 && buf.toString('ascii', 0, 5) === '%PDF-') return 'pdf';
+  if (buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04) {
+    // An EPUB is a ZIP whose FIRST entry is an uncompressed `mimetype` file
+    // saying so — the format requires it, which is what makes it sniffable.
+    return buf.length >= 58 && buf.toString('ascii', 30, 58) === 'mimetypeapplication/epub+zip' ? 'epub' : 'zip';
+  }
+  // MP3: an ID3v2 tag, or a bare MPEG audio frame sync (11 set bits).
+  if (buf.length >= 3 && buf.toString('ascii', 0, 3) === 'ID3') return 'mp3';
+  if (buf.length >= 2 && buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0 && (buf[1] & 0x06) !== 0) return 'mp3';
   return null;
 }
 
@@ -98,6 +137,12 @@ export interface PrivateFile {
    * is never swept, because nothing says where its owner would be.
    */
   form?: string;
+  /**
+   * `product` for a merchant's product download. Such a file is never swept
+   * as an orphan and never deleted by a data-subject erasure: it is the goods,
+   * not anybody's personal data, and every buyer's download depends on it.
+   */
+  purpose?: 'product';
 }
 
 export function isPrivateFileId(value: unknown): value is string {
@@ -129,6 +174,12 @@ export type StoreResult =
 export interface StoreOptions {
   /** The form (content type) this upload belongs to. Recorded in the sidecar. */
   form?: string;
+  /**
+   * `submission` (the default) is the anonymous form door: 5 MB, images and
+   * PDF. `product` is a merchant's product download: MAX_PRODUCT_FILE_SIZE,
+   * plus ZIP, EPUB and MP3. Only a staff-only route may pass `product`.
+   */
+  purpose?: 'submission' | 'product';
   /**
    * The most bytes this form's uploads may occupy in total, this one included.
    * Omit for no quota. Only enforced together with `form`.
@@ -185,8 +236,10 @@ export async function storePrivateFile(
   opts: StoreOptions = {},
 ): Promise<StoreResult> {
   if (!buf || buf.length === 0) return { ok: false, error: 'The file is empty.' };
-  if (buf.length > MAX_SUBMISSION_FILE_SIZE) {
-    return { ok: false, error: `Files must be under ${Math.floor(MAX_SUBMISSION_FILE_SIZE / (1024 * 1024))} MB.` };
+  const product = opts.purpose === 'product';
+  const maxBytes = product ? MAX_PRODUCT_FILE_SIZE : MAX_SUBMISSION_FILE_SIZE;
+  if (buf.length > maxBytes) {
+    return { ok: false, error: `Files must be under ${Math.floor(maxBytes / (1024 * 1024))} MB.` };
   }
   // The virus scan (C-76). This door matters MORE than the media library's,
   // not less: these bytes come from a stranger rather than from a colleague,
@@ -196,12 +249,26 @@ export async function storePrivateFile(
   const infected = await refuseIfInfected(buf);
   if (infected) return { ok: false, error: infected };
 
-  const kind = sniff(buf);
+  const sniffed = sniff(buf);
+  const kind = sniffed && (product ? PRODUCT_KINDS : SUBMISSION_KINDS).has(sniffed) ? sniffed : null;
   if (!kind) {
-    return { ok: false, error: 'That file type is not accepted. Send a PNG, JPEG, GIF, WebP or PDF.' };
+    return {
+      ok: false,
+      error: product
+        ? 'That file type is not accepted. Send a PDF, ZIP, EPUB, MP3, PNG, JPEG, GIF or WebP.'
+        : 'That file type is not accepted. Send a PNG, JPEG, GIF, WebP or PDF.',
+    };
   }
 
-  const hash = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 20);
+  // A product file lives in its OWN id space: the hash is salted with the
+  // purpose. Otherwise a buyer uploading the exact bytes of a purchased file
+  // through a public form would land on the product file's id, re-tag its
+  // sidecar with that form, and the orphan sweep (or an erasure of that
+  // submitter) would delete the file every buyer downloads.
+  const hash = (product
+    ? crypto.createHash('sha256').update('astrobaas:product-download\0').update(buf)
+    : crypto.createHash('sha256').update(buf)
+  ).digest('hex').slice(0, 20);
   const id = `${PRIVATE_FILE_PREFIX}${hash}`;
   const now = new Date();
   const dir = path.join(String(now.getUTCFullYear()), String(now.getUTCMonth() + 1).padStart(2, '0'));
@@ -237,7 +304,8 @@ export async function storePrivateFile(
       // uploaded again is about to be attached, not abandoned.
       created_at: now.toISOString(),
       rel: rel.split(path.sep).join('/'),
-      ...(form ? { form } : {}),
+      ...(form && !product ? { form } : {}),
+      ...(product ? { purpose: 'product' as const } : {}),
     };
     await fs.writeFile(path.join(getPrivateUploadsDir(), dir, `${id}.json`), JSON.stringify(file));
     if (form && !alreadyThere) noteUsage(form, buf.length);
@@ -403,6 +471,27 @@ export async function readPrivateFile(file: PrivateFile): Promise<Buffer | null>
 }
 
 /**
+ * The bytes as a stream, with their size — for files too large to hold in
+ * memory (a product download can be hundreds of megabytes). Null when the
+ * file is gone or the sidecar points outside the private root.
+ */
+export async function openPrivateFileStream(
+  file: PrivateFile,
+): Promise<{ stream: ReadableStream<Uint8Array>; size: number } | null> {
+  const root = getPrivateUploadsDir();
+  const abs = path.resolve(root, file.rel);
+  if (abs !== root && !abs.startsWith(root + path.sep)) return null;
+  try {
+    const st = await fs.stat(abs);
+    if (!st.isFile()) return null;
+    const node = createReadStream(abs);
+    return { stream: Readable.toWeb(node) as unknown as ReadableStream<Uint8Array>, size: st.size };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Delete a stranger's file and its sidecar.
  *
  * Called by the GDPR erasure path: a submission erased from the database while
@@ -411,6 +500,10 @@ export async function readPrivateFile(file: PrivateFile): Promise<Buffer | null>
 export async function deletePrivateFile(id: unknown): Promise<boolean> {
   const meta = await readPrivateFileMeta(id);
   if (!meta) return false;
+  // A product download is never deleted by this path. Its id is only ever
+  // named in a submission if somebody typed it there, and an erasure of that
+  // person must not take the goods away from every buyer.
+  if (meta.purpose === 'product') return false;
   const root = getPrivateUploadsDir();
   const abs = path.resolve(root, meta.rel);
   if (abs !== root && !abs.startsWith(root + path.sep)) return false;
@@ -483,7 +576,7 @@ export async function sweepOrphanPrivateFiles(input: OrphanSweepInput): Promise<
   const now = input.now ?? Date.now();
   const root = getPrivateUploadsDir();
   const candidates = (await listPrivateFiles()).filter((f) => {
-    if (!f.form) return false;
+    if (!f.form || f.purpose === 'product') return false;
     const born = Date.parse(f.created_at);
     return Number.isFinite(born) && now - born >= input.maxAgeMs;
   });

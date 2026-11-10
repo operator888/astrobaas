@@ -145,16 +145,69 @@ function toInt(v: unknown, fallback: number): number {
   return Math.round(n);
 }
 
-/** Parse + clamp a stored rate table. Rejects rows that cannot be trusted. */
-export function normalizeTaxRates(raw: unknown): TaxRate[] {
-  if (!Array.isArray(raw)) return [...DEFAULT_TAX_RATES];
+/**
+ * How many rows the OPERATOR's `tax_rates` setting may hold.
+ *
+ * Why it exists: it came in with the table itself (3b1c23c, Aug 2026) as a
+ * plain bound on admin-written JSON that is re-parsed on every quote; no
+ * incident or other rationale is recorded. The settings endpoint already caps
+ * a value at 64 KB, so this is a work bound, and it is KEPT for operator input
+ * because raising it changes what an existing shop charges. What it must not
+ * do is cut rows a plugin supplies: a maintained EU table is ~120 rows, and a
+ * silent cut there drops whole countries. Plugin rows have their own, much
+ * larger bound (`MAX_SUPPLIED_TAX_RATES`), and every row cut is logged.
+ */
+export const MAX_OPERATOR_TAX_RATES = 50;
+
+/** Work bound for rows supplied through `PLUGIN_HOOKS.TAX_RATES`. */
+export const MAX_SUPPLIED_TAX_RATES = 2000;
+
+/** A row the normaliser refused, and why. Reported for plugin rows. */
+export interface TaxRateDrop {
+  row: unknown;
+  reason: string;
+}
+
+/**
+ * The identity of a rate row: jurisdiction, class AND postcodes.
+ *
+ * Postcodes are part of it because a special territory is a second row for
+ * the same country and class (`ES standard 21%` and `ES standard 0%` for the
+ * Canaries). Keyed on country and class alone, the territory was dropped as a
+ * duplicate of the mainland. Sorted, so the same set written in another order
+ * is still the same row.
+ *
+ * `origin` resolves a row without a country to the shop's own, so `GR` and
+ * absent compare equal once the shop's country is known.
+ */
+export function taxRateKey(r: TaxRate, origin?: string): string {
+  const pcs = r.postcodes?.length ? [...r.postcodes].sort().join(',') : '';
+  return `${r.country ?? origin ?? ''}|${r.class}|${pcs}`;
+}
+
+/**
+ * Parse rows without the seed fallback and with a caller-chosen bound.
+ *
+ * `onDrop` hears about every row refused, with the reason — the plugin path
+ * logs them, because a supplied row that vanishes silently is a country whose
+ * sales start being refused with nobody knowing why.
+ */
+export function normalizeTaxRateRows(
+  raw: readonly unknown[],
+  opts: { max: number; onDrop?: (d: TaxRateDrop) => void; dedupe?: boolean },
+): TaxRate[] {
+  const drop = opts.onDrop ?? (() => {});
   const out: TaxRate[] = [];
   const seen = new Set<string>();
-  for (const row of raw.slice(0, 50)) {
-    if (!row || typeof row !== 'object') continue;
+  if (raw.length > opts.max) {
+    // One report for the whole tail, not one per row: the tail is unbounded.
+    drop({ row: `${raw.length - opts.max} rows`, reason: `over the ${opts.max}-row limit` });
+  }
+  for (const row of raw.slice(0, opts.max)) {
+    if (!row || typeof row !== 'object') { drop({ row, reason: 'not an object' }); continue; }
     const r = row as Record<string, unknown>;
     const cls = typeof r.class === 'string' ? r.class.trim().toLowerCase() : '';
-    if (!cls) continue;
+    if (!cls) { drop({ row, reason: 'no class' }); continue; }
 
     /*
      * The jurisdiction, and the one way it may fail.
@@ -169,20 +222,20 @@ export function normalizeTaxRates(raw: unknown): TaxRate[] {
     let country: string | undefined;
     if (r.country !== undefined && r.country !== null && r.country !== '') {
       const c = String(r.country).trim().toUpperCase();
-      if (!/^[A-Z]{2}$/.test(c)) continue;
-      country = c;
+      if (!/^[A-Z]{2}$/.test(c)) { drop({ row, reason: 'country is not an ISO 3166-1 alpha-2 code' }); continue; }
+      // `EL` is Greece's VAT prefix; every country here is ISO (`GR`).
+      country = vatPrefixToIso(c);
     }
-
-    // The key is the PAIR. 'standard' in GR and 'standard' in DE are two rows,
-    // and de-duplicating on the class alone would have kept only the first.
-    const key = `${country ?? ''}|${cls}`;
-    if (seen.has(key)) continue;
 
     const bp = toInt(r.rate_bp, NaN);
     // A NaN or negative rate must not become 0% silently — that would
     // under-charge tax without anyone noticing. Drop the row instead.
-    if (!Number.isFinite(bp) || bp < 0 || bp > MAX_RATE_BP) continue;
+    if (!Number.isFinite(bp) || bp < 0 || bp > MAX_RATE_BP) {
+      drop({ row, reason: `rate_bp must be an integer from 0 to ${MAX_RATE_BP}` });
+      continue;
+    }
 
+    const hadPostcodes = Array.isArray(r.postcodes) && r.postcodes.length > 0;
     const postcodes = Array.isArray(r.postcodes)
       ? r.postcodes
           .filter((x): x is string => typeof x === 'string')
@@ -193,8 +246,14 @@ export function normalizeTaxRates(raw: unknown): TaxRate[] {
           .filter((x) => /^[A-Z0-9]+\*?$/.test(x) || /^\d+\s*-\s*\d+$/.test(x))
           .slice(0, 500)
       : undefined;
+    // A territory row whose every postcode was unusable is DROPPED. Kept, it
+    // would lose its postcodes and become a country-wide row — charging the
+    // territory's rate (often 0%) to the whole country.
+    if (hadPostcodes && !postcodes?.length) {
+      drop({ row, reason: 'none of its postcodes is a recognised pattern' });
+      continue;
+    }
 
-    seen.add(key);
     const entry: TaxRate = {
       class: cls,
       label: typeof r.label === 'string' && r.label.trim() ? r.label.trim().slice(0, 60) : cls,
@@ -202,12 +261,69 @@ export function normalizeTaxRates(raw: unknown): TaxRate[] {
     };
     if (country) entry.country = country;
     if (postcodes?.length) entry.postcodes = postcodes;
+
+    // The key is country, class AND postcodes: 'standard' in GR and in DE are
+    // two rows, and so are mainland Spain and the Canaries. See taxRateKey.
+    const key = taxRateKey(entry);
+    if (opts.dedupe !== false && seen.has(key)) { drop({ row, reason: 'duplicate of an earlier row' }); continue; }
+    seen.add(key);
     out.push(entry);
   }
+  return out;
+}
+
+/** Parse + clamp the operator's stored rate table. Rejects rows that cannot be trusted. */
+export function normalizeTaxRates(raw: unknown): TaxRate[] {
+  if (!Array.isArray(raw)) return [...DEFAULT_TAX_RATES];
+  const out = normalizeTaxRateRows(raw, { max: MAX_OPERATOR_TAX_RATES });
   // Falls back to the seed ladder only when NOTHING survived. An operator who
   // configured rates and lost them all to validation is better served by a
   // working domestic ladder than by a shop that charges no tax at all.
   return out.length ? out : [...DEFAULT_TAX_RATES];
+}
+
+/**
+ * Add rows a plugin supplied (`PLUGIN_HOOKS.TAX_RATES`) to the operator's.
+ *
+ * PURE. The rules:
+ *   - the operator's rows are kept, first and unchanged, whatever the plugin
+ *     returned — a plugin that drops or rewrites them changes nothing;
+ *   - a supplied row with the same identity (`taxRateKey`, the shop's own
+ *     country resolved) as an operator row loses to it; at a different rate
+ *     that is reported, at the same rate it is the operator's row handed back;
+ *   - supplied rows go through the same normaliser, bounded by
+ *     `MAX_SUPPLIED_TAX_RATES`, not the operator's cap;
+ *   - anything that is not an array leaves the operator's rows in force.
+ *
+ * Every supplied row that is not used is reported through `onDrop`.
+ */
+export function mergeSuppliedTaxRates(
+  base: TaxSettings,
+  supplied: unknown,
+  onDrop: (d: TaxRateDrop) => void = () => {},
+): TaxRate[] {
+  if (!Array.isArray(supplied)) {
+    onDrop({ row: supplied, reason: 'the filter did not return an array; the operator\'s rates are used alone' });
+    return base.rates;
+  }
+  const origin = base.originCountry;
+  const own = new Map(base.rates.map((r) => [taxRateKey(r, origin), r]));
+  const taken = new Set(own.keys());
+  const out = [...base.rates];
+  // De-duplicated HERE rather than by the normaliser, so a supplied row that
+  // repeats an operator row is reported as losing to it, not as a duplicate.
+  for (const r of normalizeTaxRateRows(supplied, { max: MAX_SUPPLIED_TAX_RATES, onDrop, dedupe: false })) {
+    const key = taxRateKey(r, origin);
+    const mine = own.get(key);
+    if (mine) {
+      if (mine.rate_bp !== r.rate_bp) onDrop({ row: r, reason: `the operator's own row wins (${mine.rate_bp} bp)` });
+      continue;
+    }
+    if (taken.has(key)) { onDrop({ row: r, reason: 'duplicate of an earlier supplied row' }); continue; }
+    taken.add(key);
+    out.push(r);
+  }
+  return out.length === base.rates.length ? base.rates : out;
 }
 
 export function resolveTaxSettings(settings: Record<string, unknown> | null | undefined): TaxSettings {
@@ -217,7 +333,8 @@ export function resolveTaxSettings(settings: Record<string, unknown> | null | un
     ? (map[TAX_KEYS.originCountry] as string).trim().toUpperCase()
     : '';
   // No default, deliberately. See the note on TAX_KEYS.originCountry.
-  const originCountry = /^[A-Z]{2}$/.test(rawOrigin) ? rawOrigin : undefined;
+  // `EL` (Greece's VAT prefix) is stored as ISO `GR`, like every other list.
+  const originCountry = /^[A-Z]{2}$/.test(rawOrigin) ? vatPrefixToIso(rawOrigin) : undefined;
   const defaultClass =
     typeof map[TAX_KEYS.defaultClass] === 'string' && (map[TAX_KEYS.defaultClass] as string).trim()
       ? (map[TAX_KEYS.defaultClass] as string).trim().toLowerCase()
@@ -266,7 +383,9 @@ function normalizeCountryList(raw: unknown): string[] | null {
   if (!Array.isArray(raw)) return null;
   const out = raw
     .filter((c): c is string => typeof c === 'string')
-    .map((c) => c.trim().toUpperCase())
+    // `EL` is Greece's VAT prefix, not its ISO code. An operator who typed it
+    // into the EU list meant Greece, and every other list here is ISO.
+    .map((c) => vatPrefixToIso(c.trim().toUpperCase()))
     .filter((c) => /^[A-Z]{2}$/.test(c));
   return out.length ? [...new Set(out)] : null;
 }
@@ -290,14 +409,84 @@ function normalizeCountryList(raw: unknown): string[] | null {
  * What is still the operator's own to supply is the NUMBERS for other
  * countries: core ships no foreign rate tables, and a destination with no row
  * refuses the sale (`checkout.tax_not_configured`) rather than guessing.
+ *
+ * Only the shop's own rows are consulted (`domesticTaxRates`), for the class
+ * AND for the default-class fallback: a foreign row is never a domestic rate.
+ * `postcode`, when given, lets a domestic territory row apply (Άγιο Όρος);
+ * without one, territory rows are skipped.
  */
-export function rateForClass(settings: TaxSettings, taxClass: string | undefined | null): number {
+export function rateForClass(
+  settings: TaxSettings,
+  taxClass: string | undefined | null,
+  postcode?: string,
+): number {
+  return domesticRate(settings, taxClass, postcode) ?? 0;
+}
+
+/**
+ * The domestic rate, or `null` when the shop's own rows have neither the
+ * class nor the default class.
+ *
+ * `null` is the refusal case, exactly as for a destination: with the shop's
+ * country set and no home row to charge, every fallback is a silent wrong
+ * number — 0% under-charges, and a foreign row charges another country's VAT
+ * at home. `resolveTaxTreatment` turns it into `not-configured` (409), naming
+ * the classes to add. `rateForClass` keeps its historical `?? 0` for callers
+ * that have already checked the class exists.
+ *
+ * With NO `shop_country` nothing is refused and nothing is guessed: if the
+ * rows without a country cannot answer, the whole table is searched as it
+ * always was. That shop is told its country is missing by the attention feed,
+ * and plugin rows are never merged without one, so only the operator's own
+ * rows can be reached this way.
+ */
+export function domesticRate(
+  settings: TaxSettings,
+  taxClass: string | undefined | null,
+  postcode?: string,
+): number | null {
   if (!settings.enabled) return 0;
   const wanted = (taxClass ?? '').trim().toLowerCase();
-  const hit = wanted ? settings.rates.find((r) => r.class === wanted) : undefined;
-  if (hit) return hit.rate_bp;
-  const fallback = settings.rates.find((r) => r.class === settings.defaultClass);
-  return fallback ? fallback.rate_bp : 0;
+  const find = (rows: readonly TaxRate[]) =>
+    (wanted ? pickRate(rows, wanted, postcode) : undefined) ?? pickRate(rows, settings.defaultClass, postcode);
+  const rows = domesticTaxRates(settings);
+  let hit = find(rows);
+  if (!hit && !settings.originCountry && rows !== settings.rates) hit = find(settings.rates);
+  return hit ? hit.rate_bp : null;
+}
+
+/**
+ * The shop's OWN rows: those whose country is the shop's, or absent.
+ *
+ * Every domestic lookup goes through this. It used to be the whole table, so
+ * once any foreign row existed (an operator's, or a rate pack's) a domestic
+ * product whose class the home ladder lacks took the FOREIGN rate: a Greek
+ * `reduced-2` product, with Austria's 10% the only `reduced-2` row, cost Greek
+ * buyers 10%. The fallback to the default class has to stay at home too.
+ *
+ * With no `shop_country` only rows without a country are home — nothing is
+ * guessed. If every row names a country, the table cannot say which is home,
+ * so it is used as it always was (that shop is already told by the attention
+ * feed that its country is missing; plugin rows are not merged without one).
+ * `domesticRate` applies the same rule when the country-less rows cannot
+ * answer a lookup.
+ */
+export function domesticTaxRates(settings: TaxSettings): TaxRate[] {
+  const origin = settings.originCountry;
+  if (origin) return settings.rates.filter((r) => (r.country ?? origin) === origin);
+  const plain = settings.rates.filter((r) => !r.country);
+  return plain.length ? plain : settings.rates;
+}
+
+/**
+ * One class's row among `rows`: a postcode row that matches wins over the
+ * country-wide one; a postcode row never applies without a matching postcode.
+ */
+function pickRate(rows: readonly TaxRate[], cls: string, postcode?: string): TaxRate | undefined {
+  const territorial = postcode
+    ? rows.find((r) => r.class === cls && r.postcodes?.some((p) => postcodeMatches(p, postcode)))
+    : undefined;
+  return territorial ?? rows.find((r) => r.class === cls && !r.postcodes);
 }
 
 export interface TaxSplit {
@@ -385,6 +574,61 @@ export interface TaxTreatment {
   jurisdiction?: string;
   /** For 'not-configured': what the operator must add. */
   missing?: { country: string; classes: string[] };
+  /**
+   * What a TAX_ID_VERDICT plugin said about the buyer's tax id, when one was
+   * asked. Absent when nobody was asked (no tax id, reverse charge off, a
+   * domestic or non-EU sale, no plugin). Informational: `kind` is the decision.
+   */
+  tax_id_status?: TaxIdVerdictStatus;
+}
+
+/**
+ * A plugin's opinion on a buyer's tax id — `PLUGIN_HOOKS.TAX_ID_VERDICT`.
+ *
+ *   `unchecked`   nobody has an opinion. The core's own shape check decides,
+ *                 exactly as it does with no plugin installed.
+ *   `verified`    a registry confirmed the number. Reverse charge may apply
+ *                 (the shop's own rules still decide), using `country`.
+ *   `invalid`     the number is not a registered business. No reverse charge:
+ *                 the sale is taxed like any consumer's.
+ *   `unverified`  nobody could tell (the registry was down, the cache cold).
+ *                 VAT is charged when a rate for the destination is on file.
+ *                 It is NEVER a refusal: with no destination rate on file the
+ *                 core falls back to its shape-only reverse charge — the
+ *                 policy the operator switched on — rather than block the
+ *                 order over a lookup that did not answer.
+ */
+export type TaxIdVerdictStatus = 'unchecked' | 'verified' | 'invalid' | 'unverified';
+
+export const TAX_ID_VERDICT_STATUSES: readonly TaxIdVerdictStatus[] =
+  ['unchecked', 'verified', 'invalid', 'unverified'];
+
+export interface TaxIdVerdict {
+  status: TaxIdVerdictStatus;
+  /** ISO country of the number (`GR`, not `EL`). Preferred over the prefix. */
+  country?: string;
+  vat_id?: string;
+  reason?: string;
+  source?: string;
+  checked_at?: string;
+  consultation_number?: string | null;
+}
+
+/** What `resolveTaxTreatment` asks when a verdict could change the answer. */
+export type TaxIdVerdictFn = (ctx: { taxId: string; country?: string }) => unknown;
+
+/**
+ * Greece's VAT prefix is `EL`; its ISO 3166 code is `GR`.
+ *
+ * Every country list in this engine (the EU list, the origin, the rate table)
+ * is ISO, so a VAT prefix is mapped before any comparison. Without this a
+ * correctly written Greek number (`EL…`) was never in the EU list and so never
+ * reverse-charged.
+ */
+export function vatPrefixToIso(code: string): string;
+export function vatPrefixToIso(code: string | undefined): string | undefined;
+export function vatPrefixToIso(code: string | undefined): string | undefined {
+  return code === 'EL' ? 'GR' : code;
 }
 
 /**
@@ -403,12 +647,33 @@ export interface TaxTreatment {
  * `reverse-charge` on shape alone is a policy the operator switches ON
  * deliberately, and the admin says exactly what it does and does not verify.
  */
-export function looksLikeVatId(raw: unknown): { ok: boolean; country?: string; normalised?: string } {
+export function looksLikeVatId(
+  raw: unknown,
+): { ok: boolean; country?: string; prefix?: string; normalised?: string } {
   if (typeof raw !== 'string') return { ok: false };
   const t = raw.replace(/[\s.-]/g, '').toUpperCase();
   const m = /^([A-Z]{2})([A-Z0-9]{2,12})$/.exec(t);
   if (!m) return { ok: false };
-  return { ok: true, country: m[1], normalised: t };
+  // `country` is ISO (`GR`); `prefix` is what was typed (`EL`); `normalised`
+  // keeps the typed prefix, because that is the number as VIES knows it.
+  return { ok: true, country: vatPrefixToIso(m[1]), prefix: m[1], normalised: t };
+}
+
+/**
+ * A plugin's answer, or `null` ("no opinion") when it is not a verdict.
+ *
+ * A filter that returns garbage — a Promise from an async function, a bare
+ * string — must not change a sale's tax, in either direction.
+ */
+export function normaliseTaxIdVerdict(raw: unknown): TaxIdVerdict | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const v = raw as Partial<TaxIdVerdict>;
+  if (!TAX_ID_VERDICT_STATUSES.includes(v.status as TaxIdVerdictStatus)) return null;
+  const out: TaxIdVerdict = { ...(v as TaxIdVerdict) };
+  const c = typeof v.country === 'string' ? v.country.trim().toUpperCase() : '';
+  if (/^[A-Z]{2}$/.test(c)) out.country = vatPrefixToIso(c);
+  else delete out.country;
+  return out;
 }
 
 /** Does this jurisdiction have a rate for this class on file? */
@@ -429,24 +694,56 @@ export function resolveTaxTreatment(input: {
   destination?: { country?: string; postcode?: string };
   /** The customer's VAT id, if they gave one. */
   customerTaxId?: string;
+  /** The country the VAT id was entered next to (billing), as a hint. */
+  customerCountry?: string;
+  /**
+   * Asked ONLY where a verdict could change the answer: reverse charge
+   * switched on, an EU destination other than the origin, and a non-empty tax
+   * id. Absent means nobody has an opinion, and the shape check decides as it
+   * always has. See TaxIdVerdictStatus for what each answer does.
+   */
+  taxIdVerdict?: TaxIdVerdictFn;
   /** Classes this basket needs a rate for — used to report what is missing. */
   classes?: string[];
 }): TaxTreatment {
   const { settings } = input;
   const origin = settings.originCountry;
+  const wanted = (input.classes?.length ? input.classes : [settings.defaultClass])
+    .map((c) => (c || settings.defaultClass).trim().toLowerCase());
+
+  /*
+   * A domestic sale, or a refusal when the shop's OWN rows cannot price it.
+   *
+   * Only once the shop's country is known: then a class with no home row and
+   * no home default-class row has no honest rate — 0% under-charges and a
+   * foreign row is another country's VAT. Refused like a destination with no
+   * rate (`not-configured`, 409), naming the classes to add. Without a
+   * country, `domesticRate` never refuses (see there).
+   */
+  const domestic = (): TaxTreatment => {
+    if (settings.enabled && origin) {
+      const postcode = input.destination?.postcode;
+      const missing = [...new Set(wanted.filter((c) => domesticRate(settings, c, postcode) === null))];
+      if (missing.length) {
+        return { kind: 'not-configured', jurisdiction: origin, missing: { country: origin, classes: missing } };
+      }
+    }
+    return { kind: 'domestic', jurisdiction: origin };
+  };
 
   // Tax off, or no origin configured: everything is domestic and the existing
   // class ladder answers. This is the behaviour every install has today.
   if (!settings.enabled || settings.destinationMode !== 'oss' || !origin) {
-    return { kind: 'domestic', jurisdiction: origin };
+    return domestic();
   }
 
-  const dest = String(input.destination?.country ?? '').trim().toUpperCase();
+  // ISO: a destination written `EL` is Greece, not a non-EU export.
+  const dest = vatPrefixToIso(String(input.destination?.country ?? '').trim().toUpperCase());
   // No destination yet — a cart page asks for totals before an address exists.
   // Domestic is the right provisional answer AND the one the shop mostly makes.
-  if (!/^[A-Z]{2}$/.test(dest)) return { kind: 'domestic', jurisdiction: origin };
+  if (!/^[A-Z]{2}$/.test(dest)) return domestic();
 
-  if (dest === origin) return { kind: 'domestic', jurisdiction: origin };
+  if (dest === origin) return domestic();
 
   const inEu = settings.euCountries.includes(dest);
   // Outside the EU VAT territory: no EU VAT is due.
@@ -455,21 +752,61 @@ export function resolveTaxTreatment(input: {
   // EU B2B: the customer accounts for the VAT. Only when the operator has
   // switched it on, and only for a VAT id from a DIFFERENT member state —
   // a domestic sale to a domestic business is still domestically taxed.
-  if (settings.reverseCharge) {
-    const vat = looksLikeVatId(input.customerTaxId);
-    if (vat.ok && vat.country && vat.country !== origin && settings.euCountries.includes(vat.country)) {
-      return { kind: 'reverse-charge' };
+  //
+  // Every side of the comparison is ISO: `EL` (Greece's VAT prefix) is `GR`
+  // on the number (looksLikeVatId), the origin, the destination, the rate rows
+  // and the EU list (resolveTaxSettings) alike.
+  const isoOrigin = origin;
+  const crossBorderEu = (country: string | undefined): boolean =>
+    !!country && country !== isoOrigin && settings.euCountries.includes(country);
+
+  // The core's own answer, from the SHAPE of the number. It is the whole of
+  // reverse charge when no plugin has an opinion: the policy the operator
+  // switched on, documented as checking nothing more than the shape.
+  const taxId = typeof input.customerTaxId === 'string' ? input.customerTaxId.trim() : '';
+  const shape = looksLikeVatId(taxId);
+  const byShape = shape.ok && crossBorderEu(shape.country);
+
+  let taxIdStatus: TaxIdVerdictStatus | undefined;
+  if (settings.reverseCharge && taxId) {
+    let verdict: TaxIdVerdict = { status: 'unchecked' };
+    if (input.taxIdVerdict) {
+      const hint = String(input.customerCountry ?? '').trim().toUpperCase();
+      verdict = normaliseTaxIdVerdict(input.taxIdVerdict({
+        taxId,
+        ...(/^[A-Z]{2}$/.test(hint) ? { country: vatPrefixToIso(hint) } : {}),
+      })) ?? { status: 'unchecked' };
+      taxIdStatus = verdict.status;
     }
+    const stamp = taxIdStatus ? { tax_id_status: taxIdStatus } : {};
+
+    if (verdict.status === 'unchecked' && byShape) return { kind: 'reverse-charge', ...stamp };
+    if (verdict.status === 'verified') {
+      // The registry's country wins over the two letters the buyer typed —
+      // they may not have typed a prefix at all.
+      if (crossBorderEu(verdict.country ?? (shape.ok ? shape.country : undefined))) {
+        return { kind: 'reverse-charge', ...stamp };
+      }
+    }
+    // 'invalid' and 'unverified' fall through: VAT is charged.
   }
+  const stamp = taxIdStatus ? { tax_id_status: taxIdStatus } : {};
 
   // EU B2C: the destination's rate. Refuse rather than guess when it is absent.
-  const wanted = (input.classes?.length ? input.classes : [settings.defaultClass])
-    .map((c) => (c || settings.defaultClass).trim().toLowerCase());
   const missing = [...new Set(wanted.filter((c) => !hasRate(settings, dest, c)))];
   if (missing.length) {
-    return { kind: 'not-configured', jurisdiction: dest, missing: { country: dest, classes: missing } };
+    // An UNVERIFIED number never blocks an order. Owner decision 2026-09-04:
+    // the tax id is captured, never the reason a sale is refused. With no
+    // destination rate on file the only alternative here is a 409 caused by a
+    // registry that did not answer, so the operator's own shape-only reverse
+    // charge applies — exactly what happens with no plugin installed. The
+    // priced treatment's `tax_id_status` says it was not verified; it is NOT
+    // stored on the order, so a verifier keeps its own evidence (the vat
+    // module flags exactly this as `reverse-charge-not-verified`).
+    if (taxIdStatus === 'unverified' && byShape) return { kind: 'reverse-charge', ...stamp };
+    return { kind: 'not-configured', jurisdiction: dest, missing: { country: dest, classes: missing }, ...stamp };
   }
-  return { kind: 'destination', jurisdiction: dest };
+  return { kind: 'destination', jurisdiction: dest, ...stamp };
 }
 
 /**
@@ -494,6 +831,9 @@ export function rateForTreatment(
     case 'not-configured':
       return null;
     case 'domestic':
+      // The shop's own rows only, with the historical fallback to the default
+      // class — also at home. `null` when home has neither. See `domesticRate`.
+      return domesticRate(settings, taxClass, postcode);
     case 'destination': {
       const country = treatment.jurisdiction;
       const wanted = (taxClass ?? '').trim().toLowerCase() || settings.defaultClass;
@@ -502,17 +842,10 @@ export function rateForTreatment(
       );
       // A postcode row wins over a country-wide one — that is what makes a
       // special territory expressible without a second table.
-      const territorial = postcode
-        ? inCountry.find((r) => r.class === wanted && r.postcodes?.some((p) => postcodeMatches(p, postcode)))
-        : undefined;
-      if (territorial) return territorial.rate_bp;
-      const plain = inCountry.find((r) => r.class === wanted && !r.postcodes);
-      if (plain) return plain.rate_bp;
-      // Domestic keeps its historical fallback to the default class, which is
-      // what `rateForClass` has always done. A DESTINATION with no row is the
-      // not-configured case and must not borrow the origin's number.
-      if (treatment.kind === 'domestic') return rateForClass(settings, taxClass);
-      return null;
+      const hit = pickRate(inCountry, wanted, postcode);
+      // A DESTINATION with no row is the not-configured case and must not
+      // borrow the origin's number, nor fall back to another class.
+      return hit ? hit.rate_bp : null;
     }
     default:
       return null;

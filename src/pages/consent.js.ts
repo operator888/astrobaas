@@ -5,6 +5,10 @@ import { pluginManager } from '../lib/plugin-system';
 import { ensurePluginsBootstrapped } from '../plugins';
 import { configuredAnalytics } from '../lib/analytics';
 import {
+  resolveAttributionEnabled, ATTRIBUTION_COOKIE, ATTRIBUTION_COOKIE_VERSION, ATTRIBUTION_MAX_AGE_DAYS,
+  ATTRIBUTION_KEYS, ATTRIBUTION_CLICK_KEYS, MAX_UTM_LENGTH, MAX_CLICK_ID_LENGTH, CLICK_ID_PATTERN, UTM_FORBIDDEN,
+} from '../lib/commerce/attribution';
+import {
   CONSENT_COOKIE, CONSENT_VERSION, CONSENT_MAX_AGE_DAYS, CONSENT_DESCRIPTORS, OPTIONAL_CATEGORIES,
   CONSENT_STRINGS,
   CONSENT_MODE_SIGNALS,
@@ -39,7 +43,7 @@ function safeJson(value: unknown): string {
 }
 
 export const GET: APIRoute = async () => {
-  let payload = { enabled: false, providers: [] as any[], descriptors: [] as any[] };
+  let payload = { enabled: false, providers: [] as any[], descriptors: [] as any[], attribution: null as any };
 
   try {
     await LocalDB.init();
@@ -62,6 +66,23 @@ export const GET: APIRoute = async () => {
         trackingId: c.trackingId,
       })),
       descriptors: CONSENT_DESCRIPTORS.map((d) => ({ id: d.id, required: d.required })),
+      // Campaign attribution (commerce/attribution.ts). Every rule the browser
+      // applies is SHIPPED from that module — the key list, the caps, the two
+      // patterns — so the capture here and the server's parser cannot drift.
+      // `null` (shop off, or the merchant switched it off) also makes the
+      // loader DELETE a cookie left from before.
+      attribution: resolveAttributionEnabled(map) ? {
+        cookie: ATTRIBUTION_COOKIE,
+        version: ATTRIBUTION_COOKIE_VERSION,
+        maxAgeDays: ATTRIBUTION_MAX_AGE_DAYS,
+        keys: ATTRIBUTION_KEYS,
+        clickKeys: ATTRIBUTION_CLICK_KEYS,
+        lowercase: ['utm_source', 'utm_medium'],
+        maxUtm: MAX_UTM_LENGTH,
+        maxClick: MAX_CLICK_ID_LENGTH,
+        clickPattern: CLICK_ID_PATTERN.source,
+        utmForbidden: UTM_FORBIDDEN.source,
+      } : null,
     };
   } catch (err) {
     // A failure here must not fire trackers by accident. Empty config = nothing
@@ -240,11 +261,23 @@ export const GET: APIRoute = async () => {
 
   var LOADERS = {
     ga4: function (id) {
-      addScript('https://www.googletagmanager.com/gtag/js?id=' + encodeURIComponent(id));
       window.dataLayer = window.dataLayer || [];
-      gtag('js', new Date());
+      if (!window.__abGtag) {
+        window.__abGtag = true;
+        addScript('https://www.googletagmanager.com/gtag/js?id=' + encodeURIComponent(id));
+        gtag('js', new Date());
+      }
       // No cookies until consent, and consent is why we are here at all.
       gtag('config', id, { anonymize_ip: true });
+    },
+    'google-ads': function (id) {
+      // gtag.js is shared with GA4: load it once, configure each id.
+      if (!window.__abGtag) {
+        window.__abGtag = true;
+        addScript('https://www.googletagmanager.com/gtag/js?id=' + encodeURIComponent(id));
+        gtag('js', new Date());
+      }
+      gtag('config', id);
     },
     gtm: function (id) {
       window.dataLayer = window.dataLayer || [];
@@ -309,6 +342,68 @@ export const GET: APIRoute = async () => {
       addScript(host.replace(/\\/+$/, '') + '/script.js', { 'data-website-id': id, defer: 'defer' });
     }
   };
+
+  /* ---------- campaign attribution (first party, marketing consent) ---------- */
+  /*
+   * Which campaign brought this visitor: the utm_* tags and ad click ids of
+   * the landing URL, kept in ONE first-party cookie so checkout can put them
+   * on the order. Nothing is sent anywhere from here.
+   *
+   * Only with MARKETING consent — a click id is an identifier the ad platform
+   * can join back to a person. Without it, the cookie is not written, and one
+   * left from before (consent withdrawn, expired, or re-asked after a version
+   * change) is DELETED. The server re-checks the consent cookie before it reads
+   * this one, so a stale cookie that escaped deletion is still ignored.
+   */
+  var ATTR = CONFIG.attribution;
+  function attrCookieName() { return ATTR ? ATTR.cookie : ${safeJson(ATTRIBUTION_COOKIE)}; }
+  function readAttrRaw() {
+    var m = document.cookie.match(new RegExp('(?:^|; )' + attrCookieName() + '=([^;]*)'));
+    return m ? m[1] : null;
+  }
+  function eraseAttribution() {
+    if (readAttrRaw() === null) return;
+    document.cookie = attrCookieName() + '=;path=/;max-age=0;SameSite=Lax' + (location.protocol === 'https:' ? ';Secure' : '');
+  }
+  function cleanAttrValue(key, raw) {
+    if (typeof raw !== 'string') return null;
+    var v = raw.trim();
+    if (!v) return null;
+    if (ATTR.clickKeys.indexOf(key) >= 0) {
+      if (v.length > ATTR.maxClick || !new RegExp(ATTR.clickPattern).test(v)) return null;
+      return v;
+    }
+    if (v.length > ATTR.maxUtm || new RegExp(ATTR.utmForbidden).test(v)) return null;
+    return ATTR.lowercase.indexOf(key) >= 0 ? v.toLowerCase() : v;
+  }
+  function freshTouch(t) {
+    if (!t || typeof t.at !== 'string') return false;
+    var ms = Date.parse(t.at);
+    return isFinite(ms) && Date.now() - ms <= ATTR.maxAgeDays * 86400000 && ms <= Date.now() + 300000;
+  }
+  function captureAttribution() {
+    if (!ATTR || !granted('marketing')) { eraseAttribution(); return; }
+    var params;
+    try { params = new URLSearchParams(location.search); } catch (e) { return; }
+    var touch = {};
+    var any = false;
+    for (var i = 0; i < ATTR.keys.length; i++) {
+      var val = cleanAttrValue(ATTR.keys[i], params.get(ATTR.keys[i]));
+      if (val !== null) { touch[ATTR.keys[i]] = val; any = true; }
+    }
+    if (!any) return;                  // an ordinary visit is not a campaign touch
+    touch.at = new Date().toISOString();
+    var existing = null;
+    try { existing = JSON.parse(decodeURIComponent(readAttrRaw() || '')); } catch (e) { existing = null; }
+    var first = existing && existing.v === ATTR.version && freshTouch(existing.first) ? existing.first : touch;
+    var value = encodeURIComponent(JSON.stringify({ v: ATTR.version, first: first, last: touch }));
+    // A browser drops a cookie over ~4 KB without a word; keep the new visit
+    // rather than lose both.
+    if (value.length > 3800) value = encodeURIComponent(JSON.stringify({ v: ATTR.version, first: touch, last: touch }));
+    if (value.length > 3800) return;
+    document.cookie = ATTR.cookie + '=' + value + ';path=/;max-age=' + (ATTR.maxAgeDays * 86400) +
+      ';SameSite=Lax' + (location.protocol === 'https:' ? ';Secure' : '');
+  }
 
   var fired = {};
   function loadConsented() {
@@ -375,6 +470,8 @@ export const GET: APIRoute = async () => {
 
     function close() {
       wrap.remove();
+      // The decision was just written: keep (or delete) attribution to match.
+      captureAttribution();
       loadConsented();
       showReopener();
     }
@@ -431,6 +528,9 @@ export const GET: APIRoute = async () => {
     var stored = readConsent();
     if (stored) pushConsentMode('update', stored);
 
+    // Attribution follows the stored decision: kept with marketing consent,
+    // deleted without it (including "no decision yet").
+    captureAttribution();
     // Load anything already consented FIRST so a returning visitor is not made
     // to wait on UI, then decide whether to ask.
     loadConsented();

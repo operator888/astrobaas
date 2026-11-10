@@ -19,6 +19,12 @@ export const webhooks = {
   // {all} and {prefix} are code samples supplied by the page, not translated.
   'admin.webhooks.eventsHint': 'Comma-separated. Use {all} for all, or a {prefix} wildcard.',
   'admin.webhooks.register': 'Register webhook',
+  // The event catalogue under the input: click to add.
+  'admin.webhooks.coreEvents': 'Core events',
+  'admin.webhooks.pluginEvents': 'Events from active plugins',
+  // {plugin} is the plugin id, not translated.
+  'admin.webhooks.fromPlugin': 'from {plugin}',
+  'admin.webhooks.noPluginEvents': 'No active plugin declares webhook events.',
 
   // Webhook table
   'admin.webhooks.colUrl': 'URL',

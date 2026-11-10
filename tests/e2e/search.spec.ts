@@ -7,6 +7,7 @@
  * follow is a regression on the accessibility work, not a feature.
  */
 import { test, expect } from '@playwright/test';
+import { adminLogin } from './lib/session';
 import AxeBuilder from '@axe-core/playwright';
 
 test('suggestions: typing offers matching posts, and the keyboard opens one', async ({ page }) => {
@@ -49,11 +50,8 @@ test('suggestions: Enter with nothing highlighted still searches, and Escape clo
 });
 
 test('suggestions: switched off in Settings, the box is a plain search form again', async ({ page }) => {
-  await page.goto('/login');
-  await page.fill('input[name="email"]', 'admin@local');
-  await page.fill('input[name="password"]', 'e2e-admin-not-the-default');
-  await page.click('button[type="submit"]');
-  await page.waitForURL('**/admin');
+  // The suite's shared admin session (lib/session.ts): the login throttle.
+  await adminLogin(page);
   const csrf = await page.locator('meta[name="csrf-token"]').first().getAttribute('content');
   const set = (on: boolean) => page.request.post('/api/settings/update', { headers: { 'X-CSRF-Token': csrf ?? '' }, data: { search_suggestions_enabled: on } });
   expect((await set(false)).status()).toBe(200);
@@ -66,11 +64,7 @@ test('suggestions: switched off in Settings, the box is a plain search form agai
     expect(api.meta?.enabled).toBe(false);
     expect(api.data.posts).toEqual([]);
   } finally {
-    await page.goto('/login');
-    await page.fill('input[name="email"]', 'admin@local');
-    await page.fill('input[name="password"]', 'e2e-admin-not-the-default');
-    await page.click('button[type="submit"]');
-    await page.waitForURL('**/admin');
+    await adminLogin(page);
     const csrf2 = await page.locator('meta[name="csrf-token"]').first().getAttribute('content');
     await page.request.post('/api/settings/update', { headers: { 'X-CSRF-Token': csrf2 ?? '' }, data: { search_suggestions_enabled: true } });
   }

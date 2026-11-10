@@ -195,7 +195,11 @@ async function installProbes({ LocalDB, pluginManager, PLUGIN_HOOKS }) {
     const deliveries = (await LocalDB.getWebhookDeliveries({ webhookId: wh.id, limit: 10000 }))
       .filter((d) => { try { return JSON.parse(d.payload)?.data?.id === orderId; } catch { return false; } }).length;
     const feed = (await LocalDB.getContentChanges())
-      .filter((c) => c.entity_type === 'order' && c.entity_id === orderId && c.action === 'update').length;
+      .filter((c) => c.entity_type === 'order' && c.entity_id === orderId && c.action === 'update')
+      // An invoice record written AFTER a payment or refund event is its own
+      // write (invoice-records.test.mjs counts those); this counts the status
+      // and payment writes, which is what "recorded once" is about.
+      .filter((c) => !(Array.isArray(c.fields) && c.fields.length === 1 && c.fields[0] === 'invoice_records')).length;
     return { hooks: calls.filter((c) => c.id === orderId).length, audits, deliveries, feed };
   };
 }

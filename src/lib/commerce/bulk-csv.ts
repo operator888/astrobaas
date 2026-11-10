@@ -200,6 +200,13 @@ export function planCsvUpdate(
     if (t.price && priced.length) { plan.rowErrors.push({ row: t.price.row, message: `${p.name}: its variants have their own prices — give each variant's SKU a row instead.` }); delete t.price; }
     if (t.sale_price && priced.length && t.sale_price.value !== null) { plan.rowErrors.push({ row: t.sale_price.row, message: `${p.name}: a product-level sale does not reach variants with their own prices — put the sale on each variant's row.` }); delete t.sale_price; }
     if (t.stock && variants.length) { plan.rowErrors.push({ row: t.stock.row, message: `${p.name}: it has variants, which keep their own stock — give each variant's SKU a row.` }); delete t.stock; }
+    // A grouped product has no price or stock of its own (saveProduct forces
+    // them to nothing), so a value here would preview as a change and do nothing.
+    if (p.type === 'grouped') {
+      for (const f of ['price', 'sale_price', 'stock'] as const) {
+        if (t[f]) { plan.rowErrors.push({ row: t[f]!.row, message: `${p.name}: a grouped product has no ${f.replace('_', ' ')} of its own — change its products instead.` }); delete t[f]; }
+      }
+    }
 
     const regular = p.regular_price_cents ?? p.price_cents;
     if (t.price && t.price.value !== regular) { patch.regular_price_cents = t.price.value as number; changes.push(`price ${show(regular)} → ${show(t.price.value as number)}`); }

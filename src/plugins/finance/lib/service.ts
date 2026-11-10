@@ -38,6 +38,7 @@ import { parseStatement } from './bank-parse';
 import { parseEInvoice, type ParsedEInvoice } from './einvoice-parse';
 import { extractEmbeddedXml } from './facturx';
 import { DOC_STRINGS } from './strings';
+import { MIRROR_PDF_MAX_BYTES } from './limits';
 
 export const COL = {
   config: 'config',
@@ -56,6 +57,8 @@ export const COL = {
   log: (year: string) => `log_${year}`,
   dunnings: 'dunnings',
   jobs: 'jobs',
+  /** Requests and orders from the website / customer portal (the "Anfragen" inbox). */
+  requests: 'requests',
 } as const;
 
 export interface Deps {
@@ -1884,6 +1887,196 @@ export class Finance {
     }
     return { document: final, created: true };
   }
+
+  /* ----------------------------- mirrored documents ----------------------------- */
+
+  /**
+   * An invoice or a cancellation that ANOTHER system issued (the website's
+   * ON-… invoices) — mirrored here so the VAT figures, DATEV, the reports and
+   * the dashboard see every sale. That system is the issuer: its number, its
+   * totals and its PDF are kept exactly as issued (an imported document, like
+   * the Lexware import), never renumbered or re-rendered.
+   *
+   * Idempotent on `source` + `external_id`. Delivering the same document
+   * again may only add what was missing the first time (the PDF, the
+   * payment); anything else that differs is refused, because an issued
+   * invoice does not change.
+   *
+   * A cancellation (`kind: 'cancellation'`, `cancels_external_id`) becomes a
+   * credit note with the cancellation's own number, and the mirrored
+   * original is marked cancelled — the same bookkeeping as a Storno made
+   * here, so the sale and its reversal both reach the VAT return.
+   */
+  async mirrorDocument(input: unknown, actor: string): Promise<{ document: FinanceDocument; created: boolean }> {
+    const i = asObj(input);
+    const source = str(i.source, 40);
+    const externalId = str(i.external_id, 120);
+    if (!source || !externalId) throw new FinanceError('"source" and "external_id" are required for idempotency.');
+    const ref = `${source}:${externalId}`;
+    let first = false;
+    const result = await singleFlight(`mirror:${ref}`, () => { first = true; return this.mirrorDocumentOnce(i, source, ref, actor); });
+    return first ? result : { document: result.document, created: false };
+  }
+
+  private async mirrorDocumentOnce(i: Record<string, unknown>, source: string, ref: string, actor: string): Promise<{ document: FinanceDocument; created: boolean }> {
+    const type: DocumentType = i.kind === 'cancellation' || i.kind === 'credit_note' ? 'credit_note' : 'invoice';
+    const number = str(i.number, 40);
+    if (!number || !/^[A-Za-z0-9$&%*+\-/._]+$/.test(number)) throw new FinanceError('"number" is required: the number the document was issued with (letters, digits, - / . only).');
+    const pdf = mirrorPdf(i);
+
+    const known = await this.store.get<{ document_id: string }>(COL.refs, ref);
+    if (known) {
+      const doc = await this.getDocument(known.document_id);
+      if (doc.number !== number || doc.type !== type) {
+        throw new FinanceError(`${ref} is already mirrored as ${doc.number} — an issued document cannot change.`, 409);
+      }
+      return { document: await this.mirrorTopUp(doc, i, pdf, actor), created: false };
+    }
+
+    const currency = (str(i.currency, 3) ?? 'EUR').toUpperCase();
+    if (currency !== 'EUR') throw new FinanceError('Only EUR documents are supported.');
+    const tt = readTreatment(i.tax_treatment) ?? 'domestic';
+    const rate = Number(i.tax_rate ?? (tt === 'domestic' ? 19 : 0));
+    if (tt === 'domestic' ? ![19, 7, 0].includes(rate) : rate !== 0) {
+      throw new FinanceError(tt === 'domestic' ? 'Only the German VAT rates 19 %, 7 % and 0 % are supported (no OSS).' : `A ${tt} document carries 0 % VAT.`);
+    }
+    const amount = (k: string) => {
+      const v = i[`${k}_cents`];
+      if (typeof v !== 'number' || !Number.isInteger(v)) throw new FinanceError(`"${k}_cents" is required (an integer amount in cents).`);
+      return Math.abs(v);
+    };
+    const net = amount('net');
+    const tax = amount('tax');
+    const gross = amount('gross');
+    if (net + tax !== gross) throw new FinanceError('net_cents + tax_cents must equal gross_cents.', 422);
+    if (Math.abs(Math.round((net * rate) / 100) - tax) > 2) throw new FinanceError(`tax_cents does not match ${rate} % of net_cents.`, 422);
+    if (!gross) throw new FinanceError('The document total is zero.', 422);
+
+    const rawLines = Array.isArray(i.lines) ? i.lines : [];
+    if (rawLines.length > 500) throw new FinanceError('A document can have at most 500 lines.');
+    const lines: FinanceDocument['lines'] = (rawLines.length ? rawLines : [{ name: str(i.title, 500) ?? number, quantity: 1, unit_net_cents: net }]).map((raw, n) => {
+      const l = asObj(raw);
+      const name = str(l.name, 500) ?? str(l.description, 500);
+      if (!name) throw new FinanceError(`Line ${n + 1} needs a name.`);
+      const qty = Number(l.quantity ?? 1);
+      const unit = Number(l.unit_net_cents ?? l.unit_price_cents ?? l.net_cents);
+      if (!Number.isFinite(qty) || !Number.isFinite(unit)) throw new FinanceError(`Line ${n + 1}: quantity and unit_net_cents must be numbers.`);
+      return {
+        id: `l${n + 1}`, type: 'item' as const, name, description: str(l.details, 4000),
+        quantity: Math.abs(Math.round(qty * 1000) / 1000), unit: (str(l.unit, 8) ?? 'C62').toUpperCase(),
+        unit_price_cents: Math.abs(Math.round(unit)), tax_rate: rate,
+      };
+    });
+    const company = await this.company();
+    const totals = computeTotals(lines, tt, 'net', company.document_language);
+    if (Math.abs(totals.net_cents - net) > Math.max(2, lines.length)) {
+      throw new FinanceError(`The lines add up to ${formatMoney(totals.net_cents, 'EUR')} net, the document says ${formatMoney(net, 'EUR')}.`, 422);
+    }
+    // The issuer's rounding is authoritative for its own document. The VAT
+    // return reads the groups, so they must add up to the totals too: the
+    // difference goes onto the (single) largest group.
+    const big = [...totals.groups].sort((a, b) => Math.abs(b.net_cents) - Math.abs(a.net_cents))[0];
+    if (big) { big.net_cents += net - totals.net_cents; big.tax_cents += tax - totals.tax_cents; }
+    totals.net_cents = net;
+    totals.tax_cents = tax;
+    totals.gross_cents = gross;
+
+    const issue = readDate(i.issue_date, 'issue_date');
+    if (!issue) throw new FinanceError('"issue_date" is required.');
+    let original: FinanceDocument | undefined;
+    if (type === 'credit_note') {
+      const cancels = str(i.cancels_external_id, 120);
+      if (!cancels) throw new FinanceError('A cancellation needs "cancels_external_id" (the invoice it cancels).');
+      const o = await this.store.get<{ document_id: string }>(COL.refs, `${source}:${cancels}`);
+      if (!o) throw new FinanceError(`The cancelled invoice (${source}:${cancels}) is not mirrored yet — send it first.`, 409);
+      original = await this.getDocument(o.document_id);
+      if (original.type !== 'invoice' || !original.imported) throw new FinanceError(`${original.number} is not a mirrored invoice.`, 409);
+      if (original.status === 'cancelled') throw new FinanceError(`${original.number} is already cancelled.`, 409);
+    }
+
+    const cust = asObj(i.customer);
+    const addr = asObj(cust.address ?? cust.billing_address);
+    const email = str(cust.email, 200)?.toLowerCase();
+    const contact = await this.upsertContact({
+      kind: cust.company_name ? 'company' : 'person',
+      company_name: cust.company_name, last_name: cust.company_name ? undefined : (cust.name ?? email),
+      email, vat_id: cust.vat_id, phone: cust.phone,
+      billing_address: { street: addr.street, zip: addr.zip ?? addr.postal_code, city: addr.city, country: addr.country },
+    }, source, str(cust.external_id, 120), actor);
+    const archivedPdf = pdf ? (await archiveFile(pdf, `${number}.pdf`, 'pdf')).id : undefined;
+    const now = this.stamp();
+    const doc: FinanceDocument = {
+      id: id('doc'), type, status: 'open', number, contact_id: contact.id,
+      recipient: {
+        name: str(cust.company_name, 200) ?? str(cust.name, 200) ?? email ?? number,
+        supplement: cust.company_name ? str(cust.name, 200) : undefined,
+        street: str(addr.street, 200), zip: str(addr.zip ?? addr.postal_code, 20), city: str(addr.city, 100),
+        country: (str(addr.country, 2) ?? 'DE').toUpperCase(), email, vat_id: str(cust.vat_id, 30),
+      },
+      seller: company,
+      title: str(i.title, 200),
+      intro: str(i.note, 2000),
+      currency, price_mode: 'net', tax_treatment: tt, lines,
+      issue_date: issue,
+      service_date: readDate(i.service_date, 'service_date'),
+      service_date_end: readDate(i.service_date_end, 'service_date_end'),
+      due_date: issue,
+      totals, paid_cents: 0, einvoice_format: 'pdf',
+      archived_pdf_id: archivedPdf,
+      ...(original ? { refers_to_id: original.id, refers_to_number: original.number } : {}),
+      imported: true, source, external_ref: ref,
+      public_token: crypto.randomBytes(24).toString('base64url'),
+      finalized_at: now, created_at: now, updated_at: now,
+    };
+
+    const created = await withLock(async () => {
+      // Re-checked under the lock: two deliveries of different documents
+      // claiming one number must not both land.
+      const taken = await this.store.get<{ document_id: string }>(COL.numbers, number);
+      if (taken) throw new FinanceError(`Number ${number} is already used by another document here — not mirrored.`, 409);
+      await this.putDocument(doc);
+      await this.store.put(COL.numbers, number, { document_id: doc.id, imported: true, at: now });
+      await this.store.put(COL.refs, ref, { document_id: doc.id });
+      if (original) {
+        const fresh = await this.getDocument(original.id);
+        const open = dueCents(fresh) - fresh.paid_cents;
+        if (open !== 0) {
+          // As a Storno made here: what was still open on the invoice is
+          // offset against the credit note; what was paid stays a refund owed.
+          await this.addPaymentRecord({ document_id: fresh.id, amount_cents: open, method: 'offset', reference: number, date: issue });
+          await this.addPaymentRecord({ document_id: doc.id, amount_cents: open, method: 'offset', reference: fresh.number, date: issue });
+        }
+        await this.putDocument({ ...(await this.recalcPaid(fresh.id)), status: 'cancelled', cancelled_by_id: doc.id, updated_at: now });
+      }
+      return this.recalcPaid(doc.id);
+    });
+    await this.log(actor, 'document.mirror', type, doc.id, `${number} from ${source}: ${formatMoney(gross, 'EUR')}${original ? ` (cancels ${original.number})` : ''}`);
+    return { document: await this.mirrorTopUp(created, i, undefined, actor), created: true };
+  }
+
+  /** What a later delivery may add to a mirrored document: its PDF, its payment. */
+  private async mirrorTopUp(doc: FinanceDocument, i: Record<string, unknown>, pdf: Uint8Array | undefined, actor: string): Promise<FinanceDocument> {
+    let d = doc;
+    if (pdf && !d.archived_pdf_id) {
+      const fileId = (await archiveFile(pdf, `${d.number}.pdf`, 'pdf')).id;
+      d = await this.patchDocument(d.id, (cur) => (cur.archived_pdf_id ? {} : { archived_pdf_id: fileId }));
+    }
+    const paid = asObj(i.paid);
+    if (i.paid && d.status !== 'cancelled' && d.status !== 'paid' && !(await this.listPayments(d.id)).some((p) => p.method !== 'offset')) {
+      const open = dueCents(d) - d.paid_cents;
+      const amount = 'amount_cents' in paid || 'amount' in paid ? Math.abs(readCents(paid, 'amount')) : open;
+      if (amount > 0) {
+        const m = String(paid.method ?? '').toLowerCase();
+        const method = m === 'card' ? 'card' : m === 'paypal' ? 'paypal' : m === 'bank' || m === 'sepa_debit' || m === 'customer_balance' ? 'bank' : 'stripe';
+        d = (await this.recordPayment(d.id, {
+          amount_cents: Math.min(amount, open), date: readDate(paid.date ?? (typeof paid.paid_at === 'string' ? paid.paid_at.slice(0, 10) : undefined), 'paid.date') ?? d.issue_date,
+          method, reference: str(paid.reference, 200),
+          note: d.type === 'credit_note' ? 'Erstattung (gespiegelt)' : 'Zahlung (gespiegelt)',
+        }, actor)).document;
+      }
+    }
+    return d;
+  }
 }
 
 /* A second, tiny lock for the log head only — logging happens inside other
@@ -1908,4 +2101,16 @@ export function publicDoc(d: FinanceDocument) {
     net_cents: d.totals.net_cents, tax_cents: d.totals.tax_cents, gross_cents: d.totals.gross_cents, due_cents: dueCents(d),
     paid_cents: d.paid_cents, external_ref: d.external_ref, source: d.source,
   };
+}
+
+/** The issuer's PDF, base64 in the body; checked before anything is stored. */
+function mirrorPdf(i: Record<string, unknown>): Uint8Array | undefined {
+  if (typeof i.pdf_base64 !== 'string' || !i.pdf_base64) return undefined;
+  const bytes = Buffer.from(i.pdf_base64, 'base64');
+  if (bytes.length > MIRROR_PDF_MAX_BYTES) throw new FinanceError(`The PDF is larger than ${Math.round(MIRROR_PDF_MAX_BYTES / 1024)} KB.`, 413);
+  if (bytes.subarray(0, 5).toString('latin1') !== '%PDF-') throw new FinanceError('pdf_base64 is not a PDF.');
+  if (typeof i.pdf_sha256 === 'string' && crypto.createHash('sha256').update(bytes).digest('hex') !== i.pdf_sha256.toLowerCase()) {
+    throw new FinanceError('The PDF does not match pdf_sha256.', 422);
+  }
+  return new Uint8Array(bytes);
 }

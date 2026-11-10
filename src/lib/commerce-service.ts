@@ -9,7 +9,8 @@ import { locales } from './i18n'
  *
  * Hook contract (see PLUGIN_HOOKS):
  *   before_product_save / after_product_save / after_product_delete
- *   product_price (checkout-time unit price — sales rules plug in here)
+ *   product_price (unit price — sales rules plug in here; applied in priceBasket)
+ *   order_line_addons (priced per-line add-ons; applied in priceBasket)
  *   before_order_save / after_order_create / after_order_status_change
  */
 import { LocalDB } from './localdb'
@@ -17,8 +18,12 @@ import { pluginManager, PLUGIN_HOOKS, type OrderLineExtras } from './plugin-syst
 import { sanitizeHtml } from './sanitize'
 import { fireEvent } from './webhooks'
 import { recordAudit, AUDIT, summariseChanges } from './audit'
+import { recordOrderEvent } from './commerce/order-timeline'
 import { rankBy, PRODUCT_WEIGHTS } from './search/rank'
-import { priceBasket } from './commerce/pricing-service'
+import { sortItems, PRODUCT_SORT_KEYS, DEFAULT_SORT, type SortValue } from './commerce/product-sort'
+import { projectTranslations } from './i18n/catalogue-translations'
+import { priceBasket, buyerTaxId } from './commerce/pricing-service'
+import { priceLineAddons } from './commerce/line-addons'
 import { totalsReconcile } from './commerce/totals'
 import { normalizeAddress, formatAddressOneLine, isEmptyAddress } from './commerce/address'
 import { brandKey, buildBrandDirectory, normalizeBrand, type BrandDirectory } from './commerce/brand'
@@ -30,28 +35,35 @@ import {
   PRODUCT_FIELDS_SETTING, validateProductFieldDefs, mergeProductFieldDefs, type ProductFieldDef,
 } from '../core/product-fields-def'
 import {
-  resolveCurrencySettings, rateFor, convertTotals,
+  resolveCurrencySettings, rateFor, convertTotals, convertMinorUnits,
   type CurrencySettings, type ResolvedCurrency,
 } from './commerce/currency-rates'
 import { canTransition } from './commerce/order-status'
+import { syncInvoiceRecordsSafely } from './commerce/invoice-records'
 import {
   resolvePaymentHoldSettings, countUnpaidForBuyer, VELOCITY_WINDOW_MS,
   isRoutableClientIp, ipWindowMs,
 } from './commerce/payment-hold'
 import { resolveAbandonmentSettings } from './commerce/abandonment'
-import { normalizeCouponCode } from './commerce/coupons'
-import { resolvePurchasable, explainResolveFailure, variantAvailability } from './commerce/variants'
+import { normalizeCouponCode, refusalCodeFor } from './commerce/coupons'
+import { claimOptionsFor, couponEmailKey } from './commerce/coupon-service'
+import { resolvePurchasable, explainResolveFailure, variantAvailability, isVariable } from './commerce/variants'
+import { groupsContaining, isGrouped, memberIdsOf, readGroup, validateGroupMembers } from './commerce/grouped'
 import {
   normalizeMeasurement, normalizeBackorders, normalizeCatalogVisibility, normalizeTaxStatus,
   normalizeClassSlug, normalizeGtin, normalizeTags, normalizeDimensions, normalizeAttributes,
-  normalizeDownloads, normalizeLinkedIds, normalizeImages, normalizeVariants, availableFor, PRODUCT_LIMITS,
+  normalizeDownloads, normalizeDownloadOverride, DOWNLOAD_LIMIT_MAX, DOWNLOAD_EXPIRY_DAYS_MAX, normalizeLinkedIds, normalizeImages, normalizeVariants, availableFor, PRODUCT_LIMITS,
   GPSR_TEXT_FIELDS,
-  deriveSaleState, deriveInStock, normalizeCustomFields, normalizeVariantStock,
+  deriveSaleState, deriveInStock, normalizeCustomFields, normalizeVariantStock, swatchProblems,
   type StockBases,
 } from './product-fields'
 import { resolveOrderLimits, resolveCommerceEnabled, resolveShopCurrency, type OrderLimits } from './commerce-settings'
 import type { Address, Order, OrderItem, OrderStatus, Product } from '../core/models'
 import { recordPrice } from './commerce/price-history'
+import {
+  resolveCheckoutTermsSettings, consentFields, type CheckoutTermsSettings,
+} from './commerce/checkout-terms'
+import { resolveAttributionEnabled, type OrderAttribution } from './commerce/attribution'
 
 export interface ServiceErr {
   ok: false
@@ -104,6 +116,8 @@ const err = (
 function couponRefusal(message: string, reason: string, shortfall?: number): ServiceErr {
   return err(400, message, undefined, 'checkout.coupon_invalid', {
     reason,
+    // The contract's stable code for the same reason, as the quote reports it.
+    refusal: refusalCodeFor(reason),
     ...(typeof shortfall === 'number' ? { shortfall_cents: shortfall } : {}),
   })
 }
@@ -162,12 +176,19 @@ function normalizeExtendedFields(
   if ('low_stock_threshold' in p) p.low_stock_threshold = normalizeMeasurement(p.low_stock_threshold, 1_000_000)
   if ('attributes' in p) p.attributes = normalizeAttributes(p.attributes)
   if ('downloads' in p) p.downloads = normalizeDownloads(p.downloads)
+  // 0 is a decision (unlimited / never expires); blank or junk is "use the shop default".
+  if ('download_limit' in p) p.download_limit = normalizeDownloadOverride(p.download_limit, DOWNLOAD_LIMIT_MAX)
+  if ('download_expiry_days' in p) p.download_expiry_days = normalizeDownloadOverride(p.download_expiry_days, DOWNLOAD_EXPIRY_DAYS_MAX)
   if ('upsell_ids' in p) p.upsell_ids = normalizeLinkedIds(p.upsell_ids, selfId)
   if ('cross_sell_ids' in p) p.cross_sell_ids = normalizeLinkedIds(p.cross_sell_ids, selfId)
   if ('images' in p) p.images = normalizeImages(p.images)
+  // `type` is derived, never taken from the client — except `grouped`, which
+  // saveProduct reads from the input BEFORE this runs (applyGroupRules) and
+  // which nothing could derive. Dropped here so a client's `type: 'variable'`
+  // on a product without variants is not believed.
+  delete p.type
   if ('variants' in p) {
     p.variants = normalizeVariants(p.variants, existingVariants)
-    // `type` is derived, never taken from the client.
     p.type = p.variants.length ? 'variable' : 'simple'
   }
   if ('purchase_note' in p && typeof p.purchase_note === 'string') {
@@ -179,6 +200,98 @@ function normalizeExtendedFields(
   // A virtual product is never shipped. Left to the operator these two drift
   // apart and a download gets a shipping quote.
   if (p.virtual === true) p.requires_shipping = false
+}
+
+/**
+ * The grouped-product rules, applied to a save in place.
+ *
+ * Here rather than at the route so the bulk editor, the CSV import, the MCP
+ * server and any plugin calling saveProduct get the same rules as the form.
+ *
+ * - `type: 'grouped'` is the one type a client chooses; a save that does not
+ *   mention `type` keeps what is stored.
+ * - A group's members are validated (lib/commerce/grouped.ts), and a group
+ *   has no price, sale, stock or variants of its own — those are forced, not
+ *   trusted, so no writer can store a group that a path forgetting the group
+ *   rule would sell at a price. Its "from" price is derived on read.
+ * - A product that is a MEMBER of a group cannot become a group: groups do not
+ *   nest, and the check has to run on this side too, not only when a group's
+ *   list is saved.
+ * - A product that stops being a group loses its member list.
+ */
+async function applyGroupRules(
+  filtered: Partial<Product>,
+  requestedType: unknown,
+  existing: Product | null,
+  id: string | undefined,
+  opts: { cascade?: boolean },
+): Promise<ServiceErr | null> {
+  const wantsGrouped = requestedType !== undefined
+    ? requestedType === 'grouped'
+    : existing?.type === 'grouped'
+  if (!wantsGrouped) {
+    if (existing?.type === 'grouped') {
+      // A group's stored price is 0. Leaving the group without naming a price
+      // would make an ordinary, buyable product at €0 — so this save must set one.
+      const priced = [filtered.price_cents, filtered.regular_price_cents]
+        .some((v) => typeof v === 'number' && Number.isInteger(v) && v > 0)
+      if (!priced) {
+        return err(400, 'Set a price when turning a grouped product into an ordinary one', undefined,
+          'group.price_required')
+      }
+      filtered.grouped_product_ids = []
+      // Leaving a group behind: with no variants in this save it is simple.
+      if (!('variants' in filtered)) filtered.type = isVariable(existing) ? 'variable' : 'simple'
+    } else {
+      // A member list on a product that is not a group means nothing; the
+      // admin form sends an empty one with every save.
+      delete filtered.grouped_product_ids
+    }
+    return null
+  }
+
+  const variants = 'variants' in filtered ? filtered.variants : existing?.variants
+  if (Array.isArray(variants) && variants.length > 0) {
+    return err(400, 'A grouped product cannot have variants; its members are bought on their own', undefined,
+      'group.has_variants')
+  }
+  const becoming = existing?.type !== 'grouped'
+  // The member list is judged when this save SETS it, or when the product
+  // becomes a group. A save that does not mention it (a category rename, a
+  // bulk "feature these", a scheduled sale sweep) keeps the stored list as it
+  // is: re-judging it there would let a group that membership upkeep left with
+  // one member block every unrelated edit of that group.
+  if ('grouped_product_ids' in filtered || becoming) {
+    const all = await LocalDB.getProducts()
+    const byId = new Map(all.map((p) => [p.id, p]))
+    if (id && becoming) {
+      const parent = groupsContaining(all, id).find((g) => g.id !== id)
+      if (parent) {
+        return err(400, `This product is in the group "${parent.name}", so it cannot be a group itself`, undefined,
+          'group.nested_group')
+      }
+    }
+    const raw = 'grouped_product_ids' in filtered ? filtered.grouped_product_ids : (existing?.grouped_product_ids ?? [])
+    const checked = validateGroupMembers(raw, {
+      selfId: id, lookup: (k) => byId.get(k), previous: existing?.grouped_product_ids, cascade: opts.cascade,
+    })
+    if (!checked.ok) return err(400, checked.message, undefined, checked.code)
+    filtered.grouped_product_ids = checked.ids
+  }
+
+  filtered.type = 'grouped'
+  filtered.variants = []
+  filtered.price_cents = 0
+  filtered.regular_price_cents = 0
+  filtered.sale_price_cents = null
+  filtered.sale_starts_at = null
+  filtered.sale_ends_at = null
+  filtered.stock = null
+  filtered.manage_stock = false
+  // Read-only projections a client may echo back from a read.
+  delete (filtered as Record<string, unknown>).grouped_products
+  delete (filtered as Record<string, unknown>).price_from_cents
+  return null
 }
 
 export async function saveProduct(
@@ -197,11 +310,21 @@ export async function saveProduct(
    * Optional: every caller that sends no base is saved exactly as before.
    */
   bases?: StockBases,
+  /**
+   * `cascade`: membership upkeep after a member was deleted (removeProduct).
+   * Lets a group's list shrink below the minimum rather than keep a dead id.
+   */
+  opts: { cascade?: boolean } = {},
 ): Promise<ServiceResult<Product>> {
   const isNew = !id
   const filtered = pluginManager.applyFilters(
     PLUGIN_HOOKS.BEFORE_PRODUCT_SAVE, { ...input }, { isNew },
   ) as Partial<Product>
+  // Read before normalizeExtendedFields drops it — see applyGroupRules.
+  const requestedType = 'type' in filtered ? filtered.type : undefined
+  // Read-only on the wire, never stored, whatever the product is.
+  delete (filtered as Record<string, unknown>).grouped_products
+  delete (filtered as Record<string, unknown>).price_from_cents
 
   // Sanitize AFTER the filter so plugins cannot smuggle HTML past the gate.
   if (typeof filtered.description === 'string') {
@@ -257,6 +380,15 @@ export async function saveProduct(
   // server, and any plugin calling saveProduct directly.
   // Existing variants are passed so an edit REUSES ids for unchanged option
   // combinations — regenerating them would orphan every historical order line.
+  // A swatch colour or image that would be dropped is refused instead, with
+  // the value named: a typo'd hex must not save "fine" and render a button.
+  if ('attributes' in filtered) {
+    const problems = swatchProblems(filtered.attributes)
+    if (problems.length) {
+      // Every problem in the message: both routes pass on `message` only.
+      return { ok: false, status: 400, message: `Invalid swatch: ${problems.join('; ')}`, details: problems }
+    }
+  }
   const existing = id ? await LocalDB.getProduct(id) : null
   normalizeExtendedFields(filtered, id, existing?.variants)
 
@@ -291,7 +423,11 @@ export async function saveProduct(
   // the shelf is an absolute, not a delta, and second-guessing it would leave
   // the operator no way to correct a count at all.
   let keepVariantStock: string[] = []
-  if (!isNew && bases) {
+  // Before the stock bases below and the sale derivation further down: a group
+  // has its price and stock FORCED to nothing, and both must see that.
+  const groupRefusal = await applyGroupRules(filtered, requestedType, existing, id, opts)
+  if (groupRefusal) return groupRefusal
+  if (!isNew && bases && filtered.type !== 'grouped') {
     if (bases.stock !== undefined && 'stock' in filtered && filtered.stock === bases.stock) {
       delete filtered.stock
     }
@@ -318,6 +454,11 @@ export async function saveProduct(
   // `PUT { sale_price_cents: 1190 }` is the shape the admin form and most API
   // clients actually send, and resolving it against an empty patch would read
   // as the field being ignored.
+  // `stock_status` is derived on every READ (lib/commerce/stock-status.ts).
+  // A client that reads a product and writes it back sends it, and a plugin
+  // or importer calling saveProduct directly never passed the REST allow-list.
+  // Storing it would leave a frozen copy in the row that means nothing.
+  delete (filtered as Record<string, unknown>).stock_status
   Object.assign(filtered, deriveSaleState(filtered, existing))
   // `in_stock` follows the count. A save that SETS the count derives it from
   // the new one. A save that does not leaves the stored flag alone — unless it
@@ -412,9 +553,57 @@ export async function removeProduct(id: string, actor?: string): Promise<Service
     target: existing.slug || id,
     metadata: { name: existing.name, price_cents: existing.price_cents },
   })
+  await detachFromGroups(id, actor)
   pluginManager.doAction(PLUGIN_HOOKS.AFTER_PRODUCT_DELETE, existing)
   fireEvent('product.deleted', { id }).catch(() => {})
   return { ok: true, value: { id } }
+}
+
+/**
+ * Take a deleted product out of every group that listed it.
+ *
+ * Through saveProduct, so each group's change is audited, fires its webhook
+ * and its hooks like any other edit — and each group is RE-READ just before
+ * its save rather than filtered from the list read above, so two members
+ * deleted at once cannot write each other's stale list back. The list is a
+ * new array; the stored (possibly cached) row is never edited in place.
+ *
+ * Best effort per group: one group failing to save must not leave the others
+ * holding the dead id, and a dead id left behind is harmless on read
+ * (readGroup skips a member it cannot find).
+ */
+async function detachFromGroups(memberId: string, actor?: string): Promise<void> {
+  for (const g of groupsContaining(await LocalDB.getProducts(), memberId)) {
+    try {
+      const fresh = await LocalDB.getProduct(g.id)
+      if (!fresh || !isGrouped(fresh)) continue
+      const ids = (fresh.grouped_product_ids ?? []).filter((x) => x !== memberId)
+      const res = await saveProduct({ grouped_product_ids: ids }, fresh.id, actor ?? 'system', undefined, { cascade: true })
+      if (!res.ok) console.error(`Removing ${memberId} from group ${fresh.id} failed: ${res.message}`)
+    } catch (e) {
+      console.error(`Removing ${memberId} from group ${g.id} failed:`, e)
+    }
+  }
+}
+
+/**
+ * A member lookup for the grouped products in `products`, for the read routes.
+ *
+ * Loads each member by id — at most `GROUP_LIMITS.max` per group, deduplicated
+ * across a page — rather than the whole catalogue, and nothing at all when no
+ * product in the list is a group, which is every request on a shop without
+ * groups.
+ */
+export async function loadGroupMembers(
+  products: readonly Pick<Product, 'type' | 'grouped_product_ids'>[],
+): Promise<(id: string) => Product | null> {
+  const ids = memberIdsOf(products)
+  const map = new Map<string, Product>()
+  if (ids.length) {
+    const found = await Promise.all(ids.map((k) => LocalDB.getProduct(k)))
+    found.forEach((p, i) => { if (p) map.set(ids[i], p) })
+  }
+  return (k) => map.get(k) ?? null
 }
 
 /** Public product list with hook, filters and pagination. */
@@ -425,6 +614,15 @@ export async function listProducts(opts: {
   onSale?: boolean
   featured?: boolean
   includeInactive?: boolean
+  /**
+   * How to order the result. Absent or `relevance` is the order this function
+   * has always returned (the ranked order for a search, the shop's
+   * merchandising order otherwise). The route validates the value; an unknown
+   * one reaching here is treated as `relevance`, never as a different order.
+   */
+  sort?: SortValue
+  /** Language `name_asc`/`name_desc` compare in, and whose translated name they read. */
+  locale?: string
   limit?: number
   offset?: number
 }) {
@@ -516,11 +714,20 @@ export async function listProducts(opts: {
   if (opts.onSale) products = products.filter(p => p.on_sale)
   if (opts.featured) products = products.filter(p => p.featured === true)
   // Stable order: explicit position first, then newest.
+  //
+  // With NO explicit sort, products tied on both keep the order storage handed
+  // back — exactly what this route has always done, so a deploy reorders
+  // nothing. Only an explicit `?sort=` adds the id as a last tie-break: a sort
+  // is something a client pages through and compares between requests, and
+  // "equal keys, storage order" is not a promise a driver makes.
+  const explicitSort = (opts.sort ?? DEFAULT_SORT) !== DEFAULT_SORT
   products = [...products].sort((a, b) => {
     const pa = a.position ?? Number.MAX_SAFE_INTEGER
     const pb = b.position ?? Number.MAX_SAFE_INTEGER
     if (pa !== pb) return pa - pb
-    return (b.created_at ?? '').localeCompare(a.created_at ?? '')
+    const byDate = (b.created_at ?? '').localeCompare(a.created_at ?? '')
+    if (byDate !== 0 || !explicitSort) return byDate
+    return String(a.id ?? '').localeCompare(String(b.id ?? ''))
   })
   if (opts.search) {
     // RANKED, not merely filtered. This used to be `matchesSearch`, which
@@ -583,6 +790,36 @@ export async function listProducts(opts: {
       typeof expand === 'function' ? { expand } : {},
     ).map((r) => r.item)
   }
+  /*
+   * An explicit sort runs LAST, after filtering and ranking, over the whole
+   * matching set and before the page is cut — so sort, filters and paging
+   * compose: `total` and `hasMore` describe the same set whatever the order,
+   * and page 2 of "price ascending" is the continuation of page 1.
+   *
+   * It is stable, so equal keys keep the order they arrived in: relevance for
+   * a search, merchandising order otherwise. `relevance` itself is a no-op —
+   * the ranker (core's, widened by a search module's expander) already put the
+   * results in that order.
+   */
+  const sort: SortValue = opts.sort ?? DEFAULT_SORT
+  if (sort !== DEFAULT_SORT) {
+    // A grouped product STORES price_cents 0; the price a reader sees is its
+    // "from" price, which the route derives later (withGroup, then
+    // withPriceRange keeps it as price_from_cents). Sorting the stored 0 put
+    // every group first on price_asc while it showed, say, €40. So a group's
+    // price key is derived here the same way — readGroup over the stored
+    // members, public members only, null (sorts last) when none is visible —
+    // and the key stays the price_from_cents the response carries.
+    let byId: Map<string, Product> | undefined
+    const groupLookup = (k: string) => (byId ??= new Map(stored.map((p) => [p.id, p]))).get(k)
+    products = sortItems(products, sort, {
+      ...PRODUCT_SORT_KEYS,
+      price: (p) => isGrouped(p)
+        ? readGroup(p, groupLookup, { publicOnly: true, defaultThreshold: 0 }).price_from_cents
+        : PRODUCT_SORT_KEYS.price!(p),
+      name: (p) => projectTranslations(p, opts.locale, ['name']).name,
+    }, opts.locale)
+  }
   const total = products.length
   const limit = Math.min(Math.max(opts.limit ?? 24, 1), 500)
   const offset = Math.max(opts.offset ?? 0, 0)
@@ -593,6 +830,7 @@ export async function listProducts(opts: {
       total, count: page.length, limit, offset,
       page: Math.floor(offset / limit) + 1,
       hasMore: offset + page.length < total,
+      sort,
     },
   }
 }
@@ -820,6 +1058,38 @@ export async function getOrderLimits(): Promise<OrderLimits> {
  * been through the validator. `custom_content_types` has the identical hole and
  * the identical answer.
  */
+/**
+ * The checkout consent settings (requirement, label, link).
+ *
+ * A storage failure reads as the DEFAULT — not required — for the reason
+ * `getOrderLimits` does: a hiccup must not turn every checkout into a refusal.
+ */
+export async function getCheckoutTermsSettings(): Promise<CheckoutTermsSettings> {
+  try {
+    const rows = await LocalDB.getSettings()
+    const map: Record<string, unknown> = {}
+    for (const r of rows) map[r.key] = r.value
+    return resolveCheckoutTermsSettings(map)
+  } catch {
+    return resolveCheckoutTermsSettings(null)
+  }
+}
+
+/**
+ * Whether checkout keeps attribution (commerce on, merchant has not switched it
+ * off). A storage failure reads as OFF: when in doubt, keep less.
+ */
+export async function getAttributionEnabled(): Promise<boolean> {
+  try {
+    const rows = await LocalDB.getSettings()
+    const map: Record<string, unknown> = {}
+    for (const r of rows) map[r.key] = r.value
+    return resolveAttributionEnabled(map)
+  } catch {
+    return false
+  }
+}
+
 /** The shop's own country, for the risk signal that compares against it. */
 export async function getTaxOrigin(): Promise<string | undefined> {
   try {
@@ -989,9 +1259,9 @@ async function allocateOrderNumber(): Promise<string> {
 }
 
 /**
- * Place an order (public checkout path). Server-side pricing: line totals are
- * computed from the stored product prices (through the PRODUCT_PRICE hook) —
- * client-supplied totals are ignored. Stock is decremented when tracked.
+ * Place an order (public checkout path). Server-side pricing: every line total
+ * is frozen from `priceBasket` (stored prices, the PRODUCT_PRICE hook and any
+ * ORDER_LINE_ADDONS add-ons) — client-supplied totals are ignored. Stock is decremented when tracked.
  */
 export async function placeOrder(input: {
   email: string
@@ -1014,6 +1284,11 @@ export async function placeOrder(input: {
     qty: number
     /** Per-line prescription, required when the product says it is. */
     prescription?: unknown
+    /**
+     * Priced add-on selections, keyed by namespace — PLUGIN_HOOKS.ORDER_LINE_ADDONS.
+     * Priced by `priceBasket`, never by the client.
+     */
+    addons?: unknown
   }>
   /** Destination, for shipping + tax. */
   shipping_country?: string
@@ -1043,8 +1318,35 @@ export async function placeOrder(input: {
    * storefront's server shares its address), and neither for staff.
    */
   buyer_limits?: { email?: boolean; ip?: boolean }
+  /**
+   * The buyer's answer to "I agree to the Terms & Conditions", exactly as sent
+   * (commerce/checkout-terms.ts). Absent is stored as absent.
+   */
+  terms_accepted?: boolean
+  /** Optional GDPR consent, recorded the same way and never required. */
+  privacy_accepted?: boolean
+  /**
+   * Refuse the order unless `terms_accepted` is true.
+   *
+   * Absent means NOT required, so every existing internal caller — importers,
+   * plugins, scripts — behaves as before. The public route sets it from the
+   * shop's `checkout_terms_required` for a shopper or an API key, and never
+   * for staff placing an order on somebody's behalf.
+   */
+  require_terms?: boolean
+  /**
+   * Which campaign brought this order, ALREADY validated and consent-checked
+   * by the caller (commerce/attribution.ts). Absent is stored as absent.
+   */
+  attribution?: OrderAttribution
 }): Promise<ServiceResult<Order>> {
   if (!input.items?.length) return err(400, 'Order has no items', undefined, 'checkout.no_items')
+
+  // Before anything is priced or reserved, so a refused checkout costs nothing.
+  if (input.require_terms && input.terms_accepted !== true) {
+    return err(400, 'Please accept the Terms & Conditions to place your order.', undefined,
+      'checkout.terms_not_accepted')
+  }
 
   // Checkout is public and anonymous, so these caps are an abuse control as much
   // as a UX rule — they bound what one request can drain or inflate.
@@ -1100,23 +1402,26 @@ export async function placeOrder(input: {
 
   // Stock already taken, so it can be handed back if a later line fails.
   const reserved: Array<{ product_id: string; qty: number; variant_id?: string }> = []
-  // A coupon use already counted (claimCouponUse), handed back the same way.
-  let couponClaimed: string | null = null
+  // A coupon use already counted (claimCouponUse), handed back the same way —
+  // with the buyer's per-email count when that was counted too.
+  let couponClaimed: { id: string; emailKey?: string } | null = null
   const rollback = async () => {
     for (const r of reserved) {
       await LocalDB.releaseStock(r.product_id, r.qty, { variantId: r.variant_id ?? null }).catch(() => {})
     }
     reserved.length = 0
     if (couponClaimed) {
-      const id = couponClaimed
+      const held = couponClaimed
       couponClaimed = null
-      await LocalDB.releaseCouponUse(id).catch(() => {})
+      await LocalDB.releaseCouponUse(held.id, held.emailKey ? { emailKey: held.emailKey } : {}).catch(() => {})
     }
   }
 
   try {
-    const items: OrderItem[] = []
-    let total = 0
+    // Each line WITHOUT its money. `total_cents` and `addons` are filled in
+    // from priceBasket's priced line below — never computed here — so the
+    // stored lines and the order's totals cannot disagree.
+    const pending: Omit<OrderItem, 'total_cents'>[] = []
 
     for (const line of input.items) {
       const qty = Math.floor(Number(line.qty))
@@ -1142,7 +1447,27 @@ export async function placeOrder(input: {
       const resolved = resolvePurchasable(product, line.variant_id)
       if (!resolved) {
         await rollback()
-        return err(400, explainResolveFailure(product, line.variant_id).message)
+        const why = explainResolveFailure(product, line.variant_id)
+        return err(400, why.message, undefined, why.code)
+      }
+
+      // The add-ons, asked BEFORE any stock moves — the same reason as the
+      // extras above: a refused selection (bad shape, nothing handles it,
+      // unpriced, refused by the plugin, a broken filter) must not hold the
+      // last unit away from another buyer, even for a moment. This is only
+      // the early refusal; the PRICE is decided by priceBasket below, from
+      // the same pure function, and that is what the order freezes.
+      const addonCheck = priceLineAddons({
+        line: line as unknown as Record<string, unknown>,
+        product,
+        variant: resolved,
+        qty,
+        name: resolved.name,
+        settings: settingsMap,
+      })
+      if (!addonCheck.ok) {
+        await rollback()
+        return err(addonCheck.status, addonCheck.message, undefined, addonCheck.code, addonCheck.params)
       }
 
       // Vertical-specific line rules — optical prescriptions, and anything a
@@ -1207,14 +1532,7 @@ export async function placeOrder(input: {
       }
       reserved.push({ product_id: product.id, qty, variant_id: resolved.variant_id })
 
-      const unit = pluginManager.applyFilters(
-        PLUGIN_HOOKS.PRODUCT_PRICE, resolved.price_cents, product, { qty, variant: resolved },
-      ) as number
-      if (!Number.isInteger(unit) || unit < 0) {
-        await rollback()
-        return err(500, 'Price hook returned an invalid price')
-      }
-      items.push({
+      pending.push({
         product_id: product.id,
         variant_id: resolved.variant_id,
         // Frozen, not referenced: renaming "Black" to "Matte Black" next year
@@ -1222,11 +1540,11 @@ export async function placeOrder(input: {
         variant_options: resolved.options,
         name: resolved.name,
         qty,
-        total_cents: unit * qty,
         // Whatever the vertical attached, frozen onto the line at purchase.
+        // Spread BEFORE the money fields are added below, so a patch can
+        // never set a line's price.
         ...extras.patch,
       })
-      total += unit * qty
     }
 
     /*
@@ -1301,8 +1619,18 @@ export async function placeOrder(input: {
     const priced = await priceBasket({
       items: input.items.map(i => ({
         product_id: i.product_id, variant_id: i.variant_id, qty: Math.floor(Number(i.qty)),
+        // As posted: the add-on filter reads the prescription in DISPLAY
+        // units, not the stored-units copy ORDER_LINE_EXTRAS returned.
+        ...(i.addons !== undefined ? { addons: i.addons } : {}),
+        ...(i.prescription !== undefined ? { prescription: i.prescription } : {}),
       })),
       destination: destination,
+      // The buyer's VAT id, so reverse charge can apply at checkout at all.
+      // It was never passed, so `resolveTaxTreatment` always saw none and the
+      // core's own reverse charge was unreachable from a real order. Read
+      // through the SAME helper the quote uses. Captured, never validated:
+      // see Address.tax_id — this only ever feeds the tax decision.
+      ...buyerTaxId(addressFields.billing_address, addressFields.shipping_address),
       shipping_method_id: input.shipping_method_id,
       coupon_code: input.coupon_code,
       email: input.email,
@@ -1310,8 +1638,19 @@ export async function placeOrder(input: {
 
     if (!priced.ok) {
       await rollback()
-      return err(priced.status, priced.message)
+      return err(priced.status, priced.message, undefined, priced.code, priced.params)
     }
+
+    // One priced line per item, in order — checked before anything is frozen.
+    // A gift_product coupon adds ONE more, always last (giftLineIndex).
+    const giftIndex = priced.giftLineIndex
+    if (priced.totals.lines.length !== pending.length + (giftIndex === null ? 0 : 1)
+      || (giftIndex !== null && giftIndex !== pending.length)
+      || pending.some((p, i) => priced.totals.lines[i].product_id !== p.product_id)) {
+      await rollback()
+      return err(500, 'Pricing did not return one line per item')
+    }
+
     // A coupon the customer typed must not be silently dropped: they agreed to
     // a discounted price, so a rejected code is a 400 with the reason, not an
     // order at full price.
@@ -1323,6 +1662,32 @@ export async function placeOrder(input: {
     if (priced.coupon && !priced.coupon.ok) {
       await rollback()
       return couponRefusal(priced.coupon.message, priced.coupon.reason, priced.coupon.shortfall_cents)
+    }
+
+    /*
+     * The GIFT's unit, taken by the same atomic reserve as every other line
+     * and handed back by the same rollback. Pricing saw a unit free; the
+     * reserve is what makes it true. No backorder: a gift the shop does not
+     * have is refused as the coupon's own refusal, never shipped "later".
+     */
+    // A coupon lost between pricing and placing. A code the buyer TYPED is
+    // their refusal to read; an AUTOMATIC rule they never typed means the
+    // total they were quoted no longer exists — a conflict to re-quote, not
+    // their error.
+    const couponLost = (message: string, reason: string): ServiceErr =>
+      normalizeCouponCode(input.coupon_code)
+        ? couponRefusal(message, reason)
+        : err(409, 'A promotion in your basket is no longer available. Please review the total and try again.',
+          undefined, 'checkout.promotion_unavailable')
+
+    if (giftIndex !== null) {
+      const g = priced.totals.lines[giftIndex]
+      if (!(await LocalDB.reserveStock(g.product_id, 1, { variantId: null }))) {
+        await rollback()
+        return couponLost('The gift that comes with this code is not available right now.', 'gift-unavailable')
+      }
+      reserved.push({ product_id: g.product_id, qty: 1 })
+      pending.push({ product_id: g.product_id, name: g.name, qty: 1, coupon_gift: true })
     }
 
     /*
@@ -1348,6 +1713,36 @@ export async function placeOrder(input: {
     const t = presentment.rate
       ? convertTotals(baseTotals, presentment.settings.base, presentment.currency, presentment.rate.rate_ppm)
       : baseTotals
+
+    /*
+     * FREEZE what priceBasket priced — the line total and its add-ons from the
+     * SAME priced line, so `items[].total_cents` sums to the order's
+     * `subtotal_cents` (exactly in the base currency; on a converted order
+     * each line and the subtotal are converted separately, so they may differ
+     * by a cent of rounding). `line_subtotal_cents` is qty × unit
+     * (PRODUCT_PRICE and add-ons included), before discount: what a line
+     * total always meant here.
+     *
+     * In the ORDER's currency, like every other amount on it: taken from the
+     * presented lines `t`, and add-on prices restated with the same rate. The
+     * lines used to stay in the base currency on a converted order while the
+     * receipt printed them in the order's.
+     */
+    const fx = presentment.rate
+      ? (n: number) => convertMinorUnits(n, presentment.settings.base, presentment.currency, presentment.rate!.rate_ppm)
+      : (n: number) => n
+    const items: OrderItem[] = pending.map((p, i) => {
+      // An ORDER_LINE_EXTRAS patch may not supply the money fields either.
+      const { total_cents: _t, addons: _a, ...rest } = p as Omit<OrderItem, 'total_cents'> & { total_cents?: unknown }
+      const addons = priced.addons[i] ?? []
+      return {
+        ...rest,
+        total_cents: t.lines[i].line_subtotal_cents,
+        ...(addons.length
+          ? { addons: addons.map((a) => ({ ...a, unit_price_cents: fx(a.unit_price_cents) })) }
+          : {}),
+      }
+    })
 
     /*
      * The base-currency view, frozen alongside the rate.
@@ -1409,10 +1804,21 @@ export async function placeOrder(input: {
       note: input.note?.trim(),
       payment_method: input.payment_method?.trim() || 'bank-transfer',
       items,
+      // Server clock, and only what the buyer actually answered.
+      ...consentFields(input, new Date().toISOString()),
+      // Only when there is one: no consent or no campaign is NO key, never `{}`.
+      ...(input.attribution ? { attribution: input.attribution } : {}),
     }
     draft = pluginManager.applyFilters(
       PLUGIN_HOOKS.BEFORE_ORDER_SAVE, draft, { isNew: true },
     ) as typeof draft
+    // Invoice records are written only by invoice-records.ts, from the order
+    // as charged. A new order has none, whatever a filter put on it.
+    delete (draft as Partial<Order>).invoice_records
+    // Likewise the coupon use it holds: only the claim below records one. A
+    // filter-supplied one would let a cancellation hand back a use this order
+    // never took.
+    delete (draft as Partial<Order>).coupon_redemption
 
     // Guard the invariant a filter might have broken. NOT a plain line-sum any
     // more: the total legitimately includes shipping and tax, so it is checked
@@ -1487,17 +1893,31 @@ export async function placeOrder(input: {
      */
     if (priced.coupon?.ok) {
       const c = priced.coupon.coupon
-      if (!(await LocalDB.claimCouponUse(c.id))) {
+      // The per-email count rides in the SAME atomic claim when the coupon
+      // limits uses per email (claimOptionsFor), so one buyer's two
+      // concurrent checkouts cannot both pass a one-per-customer code.
+      // Only for a TYPED code: pricing does not judge per-customer limits for
+      // an automatic rule (it would scan orders on every cart change), and a
+      // claim that enforced one the quote never checked would refuse a
+      // buyer's second checkout forever while every re-quote still offered it.
+      const claim: { emailKey?: string; perEmailLimit?: number } =
+        normalizeCouponCode(input.coupon_code) ? claimOptionsFor(c, input.email) : {}
+      if (!(await LocalDB.claimCouponUse(c.id, claim))) {
         await rollback()
-        if (normalizeCouponCode(input.coupon_code)) {
-          return couponRefusal('That code has reached its usage limit.', 'usage-limit-reached')
-        }
-        // An AUTOMATIC rule the buyer never typed: the total they were quoted
-        // no longer exists, which is a conflict to re-quote, not their error.
-        return err(409, 'A promotion in your basket is no longer available. Please review the total and try again.',
-          undefined, 'checkout.promotion_unavailable')
+        // Which limit was hit, for the buyer's sentence: their own (or a code
+        // only they could use), or everyone's.
+        const now = (await LocalDB.getCoupons()).find((x) => x.id === c.id)
+        const mine = claim.emailKey ? Number(now?.redemptions_by_email?.[claim.emailKey]) || 0 : 0
+        const own = !!c.email || (claim.perEmailLimit != null && mine >= claim.perEmailLimit)
+        return own
+          ? couponLost('You have already used that code.', 'customer-limit-reached')
+          : couponLost('That code has reached its usage limit.', 'usage-limit-reached')
       }
-      couponClaimed = c.id
+      couponClaimed = { id: c.id, ...(claim.emailKey ? { emailKey: claim.emailKey } : {}) }
+      // Recorded on the order in the same write that creates it, so a
+      // cancellation before payment can hand back exactly this use (and this
+      // buyer's count) — see releaseOrderCoupon.
+      draft.coupon_redemption = { coupon_id: c.id, ...(claim.emailKey ? { email_key: claim.emailKey } : {}) }
     }
 
     // Attach/create the customer record.
@@ -1532,6 +1952,17 @@ export async function placeOrder(input: {
 
     pluginManager.doAction(PLUGIN_HOOKS.AFTER_ORDER_CREATE, order)
     fireEvent('order.created', order).catch(() => {})
+    if (order.coupon_redemption && order.coupon_code) {
+      // The buyer as a HASH (couponEmailKey), never the address: a webhook
+      // receiver that knows the address can match it, and one that does not
+      // learns nothing it should not.
+      fireEvent('coupon.redeemed', {
+        code: order.coupon_code,
+        coupon_id: order.coupon_redemption.coupon_id,
+        order_id: order.id,
+        email_hash: couponEmailKey(order.email),
+      }).catch(() => {})
+    }
     // Tell the owner. Fire-and-forget for the same reason as the line above:
     // the order is already committed, and a mail server having a bad afternoon
     // must not turn a completed sale into a 500.
@@ -1557,6 +1988,29 @@ export const STOCK_RELEASED_STATUSES: OrderStatus[] = ['cancelled', 'refunded']
 
 export function releasesStock(status: OrderStatus): boolean {
   return STOCK_RELEASED_STATUSES.includes(status)
+}
+
+/**
+ * What a status move does to the coupon use an order holds.
+ *
+ * `release`: entering `cancelled` while the order is NOT paid (payment status
+ * anything but `paid`/`refunded`) — the buyer never had the discount, so the
+ * use goes back and a one-use code works again. A refund, or a cancellation
+ * after payment, keeps the use: the discount was had.
+ *
+ * `recount`: leaving cancelled/refunded when an earlier cancellation released
+ * the use — the order is live again with its discount, so it is counted again.
+ *
+ * The rule is stated in ONE place so the docs, the tests and both branches of
+ * setOrderStatus ask the same question.
+ */
+export function couponMove(order: Pick<Order, 'status' | 'payment_status' | 'coupon_redemption'>, next: OrderStatus): 'release' | 'recount' | null {
+  const r = order.coupon_redemption
+  if (!r || typeof r.coupon_id !== 'string' || !r.coupon_id) return null
+  const paid = order.payment_status === 'paid' || order.payment_status === 'refunded'
+  if (next === 'cancelled' && !releasesStock(order.status) && !r.released_at && !paid) return 'release'
+  if (releasesStock(order.status) && !releasesStock(next) && r.released_at) return 'recount'
+  return null
 }
 
 export interface SetOrderStatusOptions {
@@ -1673,11 +2127,26 @@ export async function setOrderStatus(
     const previous = existing.status
     if (previous === status) return { ok: true, value: existing }
 
-    const guard = opts.when ? { paymentStatus: existing.payment_status ?? null } : undefined
+    // The coupon use this order holds goes back only on a cancellation BEFORE
+    // PAYMENT, and comes back (counted again) when that cancellation is undone.
+    // See couponMove below and the rule in commerce/coupon-service.ts.
+    const coupon = couponMove(existing, status)
+    // A release depends on the order being unpaid, so the payment status it
+    // was decided on is pinned in the write: a payment landing in between
+    // makes this request lose and decide again, rather than hand back the use
+    // of a code a paid order took.
+    const guard = opts.when || coupon === 'release' ? { paymentStatus: existing.payment_status ?? null } : undefined
     // See SetOrderStatusOptions.cancelledReason. Leaving cancelled/refunded
     // removes the reason; entering them sets this move's own, or none.
     const set: Partial<Order> | undefined = releasesStock(previous) !== releasesStock(status)
-      ? { cancelled_reason: releasesStock(status) ? opts.cancelledReason : undefined }
+      ? {
+          cancelled_reason: releasesStock(status) ? opts.cancelledReason : undefined,
+          ...(coupon === 'release'
+            ? { coupon_redemption: { ...existing.coupon_redemption!, released_at: new Date().toISOString() } }
+            : coupon === 'recount'
+              ? { coupon_redemption: { coupon_id: existing.coupon_redemption!.coupon_id, ...(existing.coupon_redemption!.email_key ? { email_key: existing.coupon_redemption!.email_key } : {}) } }
+              : {}),
+        }
       : undefined
 
     // Every stock call carries the line's variant, so stock returns to (and is
@@ -1720,7 +2189,13 @@ export async function setOrderStatus(
         await giveBack()
         continue
       }
-      return statusChanged(updated, previous, actor)
+      if (coupon === 'recount') {
+        // Counted again WITHOUT a limit check: the order exists with its
+        // discount whatever happened to the code since it was handed back.
+        const r = existing.coupon_redemption!
+        await LocalDB.claimCouponUse(r.coupon_id, { force: true, ...(r.email_key ? { emailKey: r.email_key } : {}) }).catch(() => {})
+      }
+      return await statusChanged(updated, previous, actor)
     }
 
     const updated = await LocalDB.transitionOrderStatus(id, previous, status, guard, set)
@@ -1735,19 +2210,39 @@ export async function setOrderStatus(
           variantId: line.variant_id ?? null,
         }).catch(() => {})
       }
+      // And the coupon use, once, by the same winner: `released_at` landed in
+      // the same write as the status, so no later request can release it again.
+      if (coupon === 'release') {
+        const r = existing.coupon_redemption!
+        await LocalDB.releaseCouponUse(r.coupon_id, r.email_key ? { emailKey: r.email_key } : {}).catch(() => {})
+      }
     }
-    return statusChanged(updated, previous, actor)
+    return await statusChanged(updated, previous, actor)
   }
   return err(409, 'The order was changed by another request while this one was updating it; reload it and try again')
 }
 
 /** What a status change records — once, by the request that made it. */
-function statusChanged(updated: Order, previous: OrderStatus, actor?: string): ServiceOk<Order> {
+async function statusChanged(updated: Order, previous: OrderStatus, actor?: string): Promise<ServiceOk<Order>> {
   const { id, status } = updated
   pluginManager.doAction(PLUGIN_HOOKS.AFTER_ORDER_STATUS_CHANGE, updated, previous)
   fireEvent('order.status_changed', { id, previous, status }).catch(() => {})
   recordAudit(AUDIT.ORDER_STATUS, { actor, target: id, metadata: { order: id, previous, status } })
-  return { ok: true, value: updated }
+  // The order's own timeline — the one place a status change is kept per
+  // order. Awaited so that when this returns the entry is there, but it can
+  // never fail the change: the move has already landed.
+  await recordOrderEvent(id, { event: 'status.changed', actor: actor || 'system', from: previous, to: status })
+  // A completed order is a settled one — the moment a bank-transfer or
+  // cash-on-delivery order, which no provider marks paid, gets its invoice
+  // record (invoice-records-rules.ts triggerReached). Never fails the move.
+  if (status === 'completed') await syncInvoiceRecordsSafely(id)
+  // Download entitlements follow the status: granted on processing/completed,
+  // revoked on cancelled/refunded. Every status move passes through here, so
+  // this is the one hook; the download route re-checks the status live as
+  // well, so a failure here fails closed. Never throws.
+  const { afterOrderStatusChange } = await import('./commerce/download-entitlements')
+  const withDownloads = await afterOrderStatusChange(updated)
+  return { ok: true, value: withDownloads }
 }
 
 /**
@@ -1796,6 +2291,7 @@ async function confirmToCustomer(order: Order): Promise<void> {
       ? settings.public_site_url.trim()
       : undefined,
     allowSend: allowConfirmation,
+    hasDownloads: async (o) => (await import('./commerce/download-entitlements')).orderHasDownloadableLines(o),
   })
 }
 
