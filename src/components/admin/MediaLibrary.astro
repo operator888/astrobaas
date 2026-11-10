@@ -682,8 +682,25 @@ ${this.insertTargetId ? `
      * clicked the grid first) and the hidden-textarea sync are the two things
      * easy to get wrong here, and getting the sync wrong means the change is
      * visible and then gone after save.
+     *
+     * Additionally, if the Rich Text Editor registered a one-shot callback
+     * (`window.__insertImageFromLibrary`), we use that instead of the normal
+     * insert path. This allows the editor's image button to open the library
+     * and receive the selected URL directly.
      */
     insertIntoBody(mediaItem) {
+      const url = mediaItem.dataset.url;
+      if (!url) return;
+
+      // One-shot callback from the Rich Text Editor (if present)
+      if (typeof window.__insertImageFromLibrary === 'function') {
+        window.__insertImageFromLibrary(url);
+        mediaItem.classList.add('ring-2', 'ring-green-500');
+        setTimeout(() => mediaItem.classList.remove('ring-2', 'ring-green-500'), 1000);
+        return;
+      }
+
+      // Original path: insert into a known contenteditable surface
       const surface = this.insertTargetId ? document.getElementById(this.insertTargetId) : null;
       if (!surface) return;
       const id = mediaItem.dataset.mediaId;
